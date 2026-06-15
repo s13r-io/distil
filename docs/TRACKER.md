@@ -23,7 +23,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 | ID  | Task                       | Status | T? | C? | P? | Owner | Notes |
 |-----|----------------------------|--------|----|----|----|-------|-------|
 | 1.1 | Pydantic models (T-M1..M4) | done   | ✅ | ✅ | ✅ | agent | Profile+KBEntry+nested; closed enums (extra=forbid); quote mandatory, ts/locator optional; round-trip lossless. 13 tests |
-| 1.2 | store.py SQLite+md (T-S*)  | todo   | ⬜ | ⬜ | ⬜ | agent |       |
+| 1.2 | store.py SQLite+md (T-S*)  | done   | ✅ | ✅ | ✅ | agent | md front-matter=full JSON (lossless)+readable body; SQLite entries+profiles; upsert; candidate lookup; persists across instances. 8 tests |
 | 1.3 | ingest.py .srt/.txt/.md/paste, ts optional (T-I*) | todo | ⬜ | ⬜ | ⬜ | agent | stage 0, pure |
 
 ## Phase 2 — Profile update logic (pure)
