@@ -15,11 +15,13 @@ import sys
 
 import typer
 
+from .embed import Embedder, make_embedder
 from .ingest import IngestError, Transcript, ingest_file, ingest_text
 from .llm import AnthropicClient, LLMClient
 from .models import Profile
 from .pipeline import PipelineConfig, run_pipeline
 from .profile_update import apply_feedback
+from .query import ask as run_ask
 from .store import Store
 
 app = typer.Typer(add_completion=False, help="Distil — personal knowledge distiller.")
@@ -38,6 +40,24 @@ def _make_store() -> Store:
 
 def _make_client() -> LLMClient:
     return AnthropicClient()
+
+
+def _make_embedder() -> Embedder:
+    return make_embedder()
+
+
+def _threshold() -> float:
+    try:
+        return float(os.environ.get("DISTIL_RETRIEVAL_THRESHOLD", "0.35"))
+    except ValueError:
+        return 0.35
+
+
+def _top_k() -> int:
+    try:
+        return int(os.environ.get("DISTIL_TOP_K", "6"))
+    except ValueError:
+        return 6
 
 
 def _load_or_default_profile(store: Store) -> Profile:
@@ -87,10 +107,12 @@ def run(
     profile = _load_or_default_profile(store)
     try:
         client = _make_client()
+        embedder = _safe_embedder()
         entry = run_pipeline(
             transcript, profile, store, client,
             source_title=title,
             config=PipelineConfig(novelty_ratio=_novelty_ratio(), enable_graph=not no_graph),
+            embedder=embedder,
         )
     except RuntimeError as exc:
         # e.g. missing ANTHROPIC_API_KEY / DISTIL_MODEL
@@ -157,6 +179,69 @@ def show(entry_id: str = typer.Argument(..., help="The entry id to display.")):
         _fail(f"Entry '{entry_id}' not found.")
         return
     typer.echo(path.read_text(encoding="utf-8"))
+
+
+@app.command()
+def ask(
+    question: str = typer.Argument(..., help="A question, or a 'do I have notes on X' lookup."),
+    lookup: bool = typer.Option(False, "--lookup", help="Just list ranked sources, no synthesis."),
+):
+    """Ask your knowledge base. Answers ONLY from your notes, or says it has none."""
+    store = _make_store()
+    try:
+        embedder = _make_embedder()
+    except Exception as exc:  # missing local model / embed dep
+        _fail(f"Could not load the embedder: {exc}")
+        return
+    try:
+        client = _make_client()
+    except RuntimeError as exc:
+        _fail(f"{exc}")
+        return
+
+    result = run_ask(
+        question, store, embedder, client,
+        threshold=_threshold(), top_k=_top_k(), lookup_only=lookup,
+    )
+    if result.abstained:
+        typer.echo(result.message)
+        raise typer.Exit(0)
+
+    if result.answer:
+        typer.echo(result.answer)
+        typer.echo("")
+    if result.conflict:
+        typer.echo(f"⚠ Conflict: {result.conflict}\n")
+    typer.echo("Sources:")
+    for s in result.sources:
+        ts = f" @ {s.timestamp}" if s.timestamp else ""
+        typer.echo(f"  - {s.entry_id}/{s.item_id}{ts}: \"{s.quote}\"")
+    if result.ungrounded_citations:
+        typer.echo(
+            f"\n(Note: dropped {len(result.ungrounded_citations)} citation(s) not backed by "
+            "your notes.)"
+        )
+
+
+@app.command()
+def reindex():
+    """Embed any filed entries that lack a current vector (backfill for the read layer)."""
+    store = _make_store()
+    try:
+        embedder = _make_embedder()
+    except Exception as exc:
+        _fail(f"Could not load the embedder: {exc}")
+        return
+    n = store.reindex(embedder)
+    typer.echo(f"Reindexed {n} item vector(s).")
+
+
+def _safe_embedder() -> Embedder | None:
+    """Best-effort embedder for the run path: skip embedding if the backend can't load."""
+    try:
+        return _make_embedder()
+    except Exception:
+        return None
 
 
 def _alpha() -> float:

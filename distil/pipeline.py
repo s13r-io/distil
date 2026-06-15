@@ -15,6 +15,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from .embed import Embedder
 from .extract import run_extraction
 from .graph import link_graph
 from .ingest import Transcript
@@ -42,6 +43,7 @@ def run_pipeline(
     source_title: str = "Untitled",
     source_url: str | None = None,
     config: PipelineConfig | None = None,
+    embedder: Embedder | None = None,
 ) -> KBEntry:
     config = config or PipelineConfig()
     entry_id = f"e_{uuid.uuid4().hex[:12]}"
@@ -56,7 +58,7 @@ def run_pipeline(
     # Honesty short-circuit: file a minimal entry, no further LLM calls (T-PL2).
     if is_low_value(triage_result):
         entry = KBEntry(entry_id=entry_id, source=source, triage=triage, meta=meta)
-        store.file_entry(entry)
+        store.file_entry(entry, embedder=embedder)  # no items → no vectors
         return entry
 
     # Stage 2 — extract; Stage 3 — normalize (pure faithfulness gate).
@@ -80,8 +82,8 @@ def run_pipeline(
     if config.enable_graph:
         entry.related_entries = link_graph(entry, store, client)
 
-    # Stage 6 — file.
-    store.file_entry(entry)
+    # Stage 6 — file (and embed items into the vector store for the read layer).
+    store.file_entry(entry, embedder=embedder)
     return entry
 
 

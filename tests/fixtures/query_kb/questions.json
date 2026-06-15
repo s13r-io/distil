@@ -1,0 +1,18 @@
+{
+  "answerable": [
+    {
+      "question": "How should I approach writing tests?",
+      "expected_topic": "testing",
+      "expected_item_substring": "test"
+    },
+    {
+      "question": "What do my notes say about kubernetes networking?",
+      "expected_topic": "kubernetes",
+      "expected_item_substring": "pod"
+    }
+  ],
+  "no_notes": [
+    "What is the best recipe for sourdough bread?",
+    "Who won the 1998 world cup?"
+  ]
+}

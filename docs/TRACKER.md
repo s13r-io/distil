@@ -81,11 +81,11 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 |------|--------------------------------------------------|--------|----|----|----|-------|-------|
 | 10.1 | Embedder protocol + Fake + real (T-X3)           | done   | ✅ | ✅ | ✅ | agent | Embedder protocol; FakeEmbedder (hashed BoW, overlap→similarity); LocalEmbedder/ApiEmbedder lazy; make_embedder(). 6 tests |
 | 10.2 | sqlite-vec store; embed items at file (T-X1)     | done   | ✅ | ✅ | ✅ | agent | sqlite-vec 0.1.6 loads in env; vectors stored as JSON in item_vectors_meta (portable both backends); embed at file w/ embedder. 7 tests |
-| 10.3 | `distil reindex` backfill (T-X2,T-C5)            | review | ✅ | ✅ | ⬜ | agent | store.reindex() idempotent + re-embeds on model change (T-X2 done). CLI `distil reindex` (T-C5) still TODO |
-| 10.4 | Retrieval + ranking (T-Q1)                       | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 10.5 | Relevance gate / abstention (T-Q2)               | todo   | ⬜ | ⬜ | ⬜ | agent | no-hallucination |
-| 10.6 | Grounded synthesis + sources + conflict (T-Q3..Q6)| todo  | ⬜ | ⬜ | ⬜ | agent |       |
-| 10.7 | `distil ask` + query eval (T-C4,T-Q7)            | todo   | ⬜ | ⬜ | ⬜ | agent |       |
+| 10.3 | `distil reindex` backfill (T-X2,T-C5)            | done   | ✅ | ✅ | ✅ | agent | store.reindex() idempotent + re-embeds on model change; CLI `distil reindex` (T-C5). pipeline embeds at file stage |
+| 10.4 | Retrieval + ranking (T-Q1)                       | done   | ✅ | ✅ | ✅ | agent | retrieve(): cosine × feedback_mult × recency_mult; sorted desc |
+| 10.5 | Relevance gate / abstention (T-Q2)               | done   | ✅ | ✅ | ✅ | agent | HEADLINE. gate before any synthesis; below threshold → abstain w/ ZERO LLM calls (asserted) |
+| 10.6 | Grounded synthesis + sources + conflict (T-Q3..Q6)| done  | ✅ | ✅ | ✅ | agent | answer cites only retrieved items; ungrounded cites stripped+reported; resolvable sources; lookup-only; contradicts-edge conflict surfaced |
+| 10.7 | `distil ask` + query eval (T-C4,T-Q7)            | review | ✅ | ✅ | ⬜ | agent | CLI ask (answer/abstain/lookup) + reindex done (4 unit tests + e2e smoke). Eval T-Q7 written+gated, UNRUN — needs API key + local embedder (owner) |
 
 ## Phase 11 — Packaging & deploy (local + Railway)
 | ID   | Task                                       | Status | T? | C? | P? | Owner | Notes |
@@ -127,6 +127,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 - 2026-06-15 Phase 7 (7.1–7.2) done: graph.py deterministic topic-overlap candidate lookup + enum-bounded relation classify (capped 3 candidates). 89 unit tests green. Checkpoint held.
 - 2026-06-15 Phase 8 (8.1) done: pipeline.py orchestrates 0→6; honors little_to_extract short-circuit; LLM budget bounded. 93 unit tests green. Checkpoint held. Follow-up: derive topic tags (currently empty) to strengthen graph candidacy.
 - 2026-06-15 Phase 9 (9.1–9.3) done: Typer CLI run/score/list/show with friendly errors. 100 unit tests green + manual end-to-end smoke (run→list→show→score→profile updated). MVP loop usable from terminal. Checkpoint held.
+- 2026-06-15 Phase 10 (read layer) done: Embedder, vector store, reindex, ranked retrieval, ABSTENTION gate (zero-LLM on miss), grounded synthesis w/ source links + conflict surfacing, CLI ask/reindex. 126 unit tests green + e2e ask smoke. Headline T-Q2/T-Q3 proven hermetically. Eval T-Q7 gated/unrun. Checkpoint held.
 
 ## Agent notes (non-blocking observations)
 - ENV: stack pins Python >=3.11 (ARCHITECTURE.md §1) and CI uses 3.11. The dev sandbox here runs 3.10, so `pip install -e .` is refused by `requires-python`; tests are run via `PYTHONPATH=.` instead. No stack change made — flagging only. If the owner wants the sandbox to do editable installs, lowering the floor to 3.10 would be a stack decision (raise in Decisions needed first).
