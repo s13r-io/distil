@@ -1,0 +1,3 @@
+00:00:05 Today we are going to talk about testing strategy.
+00:00:30 Write the test first, then the code; this is test-driven development.
+00:12:30 Never weaken a guarantee just to make a test pass.

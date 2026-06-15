@@ -24,7 +24,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 |-----|----------------------------|--------|----|----|----|-------|-------|
 | 1.1 | Pydantic models (T-M1..M4) | done   | ✅ | ✅ | ✅ | agent | Profile+KBEntry+nested; closed enums (extra=forbid); quote mandatory, ts/locator optional; round-trip lossless. 13 tests |
 | 1.2 | store.py SQLite+md (T-S*)  | done   | ✅ | ✅ | ✅ | agent | md front-matter=full JSON (lossless)+readable body; SQLite entries+profiles; upsert; candidate lookup; persists across instances. 8 tests |
-| 1.3 | ingest.py .srt/.txt/.md/paste, ts optional (T-I*) | todo | ⬜ | ⬜ | ⬜ | agent | stage 0, pure |
+| 1.3 | ingest.py .srt/.txt/.md/paste, ts optional (T-I*) | done | ✅ | ✅ | ✅ | agent | stage 0, pure; SRT+inline+paragraph parsers; uniform Segment{text,timestamp?,locator}; IngestError on empty/binary/missing. 9 tests |
 
 ## Phase 2 — Profile update logic (pure)
 | ID  | Task                                | Status | T? | C? | P? | Owner | Notes |
@@ -118,6 +118,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 
 ## Changelog (agent appends)
 - 2026-06-15 Phase 0 (0.1–0.4) done: scaffold, LLM boundary, pytest harness, CI workflow. 9 unit tests green, ruff clean. Checkpoint held (CI wired on empty-but-working project).
+- 2026-06-15 Phase 1 (1.1–1.3) done: models, store, ingest. 39 unit tests green, ruff clean. Checkpoint held (construct/persist/reload KBEntry+Profile; uniform transcript across formats).
 
 ## Agent notes (non-blocking observations)
 - ENV: stack pins Python >=3.11 (ARCHITECTURE.md §1) and CI uses 3.11. The dev sandbox here runs 3.10, so `pip install -e .` is refused by `requires-python`; tests are run via `PYTHONPATH=.` instead. No stack change made — flagging only. If the owner wants the sandbox to do editable installs, lowering the floor to 3.10 would be a stack decision (raise in Decisions needed first).

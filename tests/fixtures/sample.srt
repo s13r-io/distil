@@ -1,0 +1,11 @@
+1
+00:00:01,000 --> 00:00:04,000
+Welcome to the talk on writing maintainable code.
+
+2
+00:00:04,500 --> 00:00:09,200
+The first rule is to keep your functions small and focused.
+
+3
+00:01:12,000 --> 00:01:15,800
+Name things clearly; a good name removes the need for a comment.
