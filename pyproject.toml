@@ -53,7 +53,10 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B"]
-ignore = ["E501"]  # line length handled by formatter; long prompt strings are fine
+ignore = [
+    "E501",   # line length handled by formatter; long prompt strings are fine
+    "UP017",  # keep `timezone.utc` (works on 3.10 dev sandbox and 3.11+); `datetime.UTC` is 3.11-only
+]
 
 [tool.coverage.run]
 source = ["distil"]
