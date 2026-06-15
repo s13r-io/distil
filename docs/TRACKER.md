@@ -67,7 +67,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 ## Phase 8 — Pipeline
 | ID  | Task                          | Status | T? | C? | P? | Owner | Notes |
 |-----|-------------------------------|--------|----|----|----|-------|-------|
-| 8.1 | Orchestrate 1→6 (T-PL1,T-PL2) | todo   | ⬜ | ⬜ | ⬜ | agent |       |
+| 8.1 | Orchestrate 1→6 (T-PL1,T-PL2) | done   | ✅ | ✅ | ✅ | agent | ingest→triage→[short-circuit]→extract→normalize→link→graph→file; low-value files minimal w/ 1 LLM call; budget≤4 w/o graph. 4 tests. NOTE: topic tags empty for now (weakens topic-based graph candidacy) — follow-up |
 
 ## Phase 9 — CLI
 | ID  | Task                        | Status | T? | C? | P? | Owner | Notes |
@@ -125,6 +125,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 - 2026-06-15 Phase 5 (5.1) done: normalize.py pure gate (drop unverifiable, backfill provenance, merge dups, preserve stance). 78 unit tests green. Checkpoint held.
 - 2026-06-15 Phase 6 (6.1–6.3) done: link.py goal-tied application links, deterministic novelty reservation, cold-start uses stable goals. 84 unit tests green. Checkpoint held.
 - 2026-06-15 Phase 7 (7.1–7.2) done: graph.py deterministic topic-overlap candidate lookup + enum-bounded relation classify (capped 3 candidates). 89 unit tests green. Checkpoint held.
+- 2026-06-15 Phase 8 (8.1) done: pipeline.py orchestrates 0→6; honors little_to_extract short-circuit; LLM budget bounded. 93 unit tests green. Checkpoint held. Follow-up: derive topic tags (currently empty) to strengthen graph candidacy.
 
 ## Agent notes (non-blocking observations)
 - ENV: stack pins Python >=3.11 (ARCHITECTURE.md §1) and CI uses 3.11. The dev sandbox here runs 3.10, so `pip install -e .` is refused by `requires-python`; tests are run via `PYTHONPATH=.` instead. No stack change made — flagging only. If the owner wants the sandbox to do editable installs, lowering the floor to 3.10 would be a stack decision (raise in Decisions needed first).
