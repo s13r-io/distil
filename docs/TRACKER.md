@@ -34,10 +34,10 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 ## Phase 3 — Triage
 | ID  | Task                              | Status | T? | C? | P? | Owner | Notes |
 |-----|-----------------------------------|--------|----|----|----|-------|-------|
-| 3.1 | Triage prompt template            | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 3.2 | Parse + TriageResult (T-T1,T-T2)  | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 3.3 | little_to_extract short-circuit   | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 3.4 | Eval tests (T-T4,T-T5)            | todo   | ⬜ | ⬜ | ⬜ | agent |       |
+| 3.1 | Triage prompt template            | done   | ✅ | ✅ | ✅ | agent | prompts/triage.py v1; honest verdict instruction; deictic evidence capture |
+| 3.2 | Parse + TriageResult (T-T1,T-T2)  | done   | ✅ | ✅ | ✅ | agent | fence-tolerant JSON parse → Triage; ParseError on malformed/partial/bad-enum. 7 tests |
+| 3.3 | little_to_extract short-circuit   | done   | ✅ | ✅ | ✅ | agent | is_low_value() signal; pipeline honors it in Phase 8 (T-PL2) |
+| 3.4 | Eval tests (T-T4,T-T5)            | review | ✅ | ✅ | ⬜ | agent | written+gated; fixtures added (vlog/screen_share/rich/proc/mixed). NOT yet run — needs ANTHROPIC_API_KEY (owner) |
 
 ## Phase 4 — Extraction
 | ID  | Task                               | Status | T? | C? | P? | Owner | Notes |
@@ -120,6 +120,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 - 2026-06-15 Phase 0 (0.1–0.4) done: scaffold, LLM boundary, pytest harness, CI workflow. 9 unit tests green, ruff clean. Checkpoint held (CI wired on empty-but-working project).
 - 2026-06-15 Phase 1 (1.1–1.3) done: models, store, ingest. 39 unit tests green, ruff clean. Checkpoint held (construct/persist/reload KBEntry+Profile; uniform transcript across formats).
 - 2026-06-15 Phase 2 (2.1) done: profile_update.py pure EMA logic, all SCHEMA §3 rows proven in isolation. 50 unit tests green. Checkpoint held (feedback→profile rules, no LLM). Also: ruff ignores UP017 to keep `timezone.utc` runnable on the 3.10 dev sandbox (3.11-valid too).
+- 2026-06-15 Phase 3 (3.1–3.3) done; 3.4 in review: triage prompt+parse+short-circuit. 57 unit tests green. Eval tests T-T4/T-T5 written and gated but UNRUN (no API key in build env) — owner to run `pytest -m eval` with a key to confirm the checkpoint.
 
 ## Agent notes (non-blocking observations)
 - ENV: stack pins Python >=3.11 (ARCHITECTURE.md §1) and CI uses 3.11. The dev sandbox here runs 3.10, so `pip install -e .` is refused by `requires-python`; tests are run via `PYTHONPATH=.` instead. No stack change made — flagging only. If the owner wants the sandbox to do editable installs, lowering the floor to 3.10 would be a stack decision (raise in Decisions needed first).
