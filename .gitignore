@@ -1,0 +1,32 @@
+# Secrets / env
+.env
+*.env
+!.env.example
+
+# Generated knowledge base + data (gitignored by default; back up via separate private repo — TRACKER D3)
+/kb/
+/data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
