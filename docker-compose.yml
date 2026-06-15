@@ -1,0 +1,18 @@
+# Local single-command self-host. `docker compose up --build`.
+# kb/ and data/ are bind-mounted so your knowledge base persists and is git-backupable.
+services:
+  distil:
+    build: .
+    env_file:
+      - .env
+    environment:
+      # Volume-backed storage (mirrors the Railway /data convention).
+      DISTIL_DB_PATH: /data/distil.db
+      DISTIL_KB_DIR: /data/kb
+      PORT: "8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+      - ./kb:/data/kb
+    restart: unless-stopped

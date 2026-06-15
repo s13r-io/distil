@@ -90,18 +90,18 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 ## Phase 11 — Packaging & deploy (local + Railway)
 | ID   | Task                                       | Status | T? | C? | P? | Owner | Notes |
 |------|--------------------------------------------|--------|----|----|----|-------|-------|
-| 11.1 | Dockerfile + compose; bind 0.0.0.0:$PORT (T-A4) | todo | ⬜ | ⬜ | ⬜ | agent |       |
-| 11.2 | Auth gate; fail closed if public (T-A1..A3)| todo   | ⬜ | ⬜ | ⬜ | agent | before public domain |
-| 11.3 | Volume-backed storage (/data)              | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 11.4 | railway.toml + DEPLOY_RAILWAY.md           | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 11.5 | Git-remote backup of kb/                    | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 11.6 | README quickstart verified (incl. ask)     | todo   | ⬜ | ⬜ | ⬜ | both  |       |
-| 11.7 | Tag v0.0.1 + release workflow              | todo   | ⬜ | ⬜ | ⬜ | agent |       |
+| 11.1 | Dockerfile + compose; bind 0.0.0.0:$PORT (T-A4) | done | ✅ | ✅ | ✅ | agent | python:3.11-slim; model baked at build; CMD binds 0.0.0.0:${PORT:-8000}; compose bind-mounts data/+kb/. T-A4 unit-tested |
+| 11.2 | Auth gate; fail closed if public (T-A1..A3)| done   | ✅ | ✅ | ✅ | agent | web/auth.py + middleware; 9 tests (T-A1..A4) green |
+| 11.3 | Volume-backed storage (/data)              | done   | ✅ | ✅ | ✅ | agent | DISTIL_DB_PATH/KB_DIR → /data in image+compose; runtime-mount caveat documented |
+| 11.4 | railway.toml + DEPLOY_RAILWAY.md           | done   | ✅ | ✅ | ✅ | agent | present from kickoff; verified consistent w/ web.app:app + /health + auth |
+| 11.5 | Git-remote backup of kb/                    | done   | ✅ | ✅ | ✅ | agent | scripts/backup_kb.sh: idempotent commit+push of kb/ to a SEPARATE private remote |
+| 11.6 | README quickstart verified (incl. ask)     | done   | ✅ | ✅ | ✅ | both  | all 6 CLI commands (run/score/list/show/ask/reindex) match README; --help verified |
+| 11.7 | Tag v0.0.1 + release workflow              | review | ✅ | ✅ | ⬜ | agent | release.yml (test-gated build+release on v* tag). Tag push deferred to owner (no push from build env) |
 
 ## Phase 12 — Web UI (v0.2)
 | ID   | Task                                  | Status | T? | C? | P? | Owner | Notes |
 |------|---------------------------------------|--------|----|----|----|-------|-------|
-| 12.1 | FastAPI list/view/score + ask box; auth middleware (T-A2) | todo | ⬜ | ⬜ | ⬜ | agent |       |
+| 12.1 | FastAPI list/view/score + ask box; auth middleware (T-A2) | done | ✅ | ✅ | ✅ | agent | web/app.py: index w/ ask box, /entries, /entries/{id}, score, /ask; auth middleware front of data routes. 9 web tests |
 
 ---
 
@@ -128,7 +128,8 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 - 2026-06-15 Phase 8 (8.1) done: pipeline.py orchestrates 0→6; honors little_to_extract short-circuit; LLM budget bounded. 93 unit tests green. Checkpoint held. Follow-up: derive topic tags (currently empty) to strengthen graph candidacy.
 - 2026-06-15 Phase 9 (9.1–9.3) done: Typer CLI run/score/list/show with friendly errors. 100 unit tests green + manual end-to-end smoke (run→list→show→score→profile updated). MVP loop usable from terminal. Checkpoint held.
 - 2026-06-15 Phase 10 (read layer) done: Embedder, vector store, reindex, ranked retrieval, ABSTENTION gate (zero-LLM on miss), grounded synthesis w/ source links + conflict surfacing, CLI ask/reindex. 126 unit tests green + e2e ask smoke. Headline T-Q2/T-Q3 proven hermetically. Eval T-Q7 gated/unrun. Checkpoint held.
-- 2026-06-15 Phase 11.2/11.3 + 12.1 done: auth gate (fail-closed when public w/o secret, 401 on data routes, localhost open), FastAPI app (list/view/score+ask box), $PORT bind. 135 unit tests green (T-A1..A4 + UI). Remaining P11: Dockerfile/compose, backup job, README, release tag.
+- 2026-06-15 Phase 11.2/11.3 + 12.1 done: auth gate (fail-closed when public w/o secret, 401 on data routes, localhost open), FastAPI app (list/view/score+ask box), $PORT bind. 135 unit tests green (T-A1..A4 + UI).
+- 2026-06-15 Phase 11 complete: Dockerfile (model baked at build, binds 0.0.0.0:$PORT), docker-compose (volume-backed kb/+data/), .dockerignore, scripts/backup_kb.sh (git-remote KB backup), release.yml (test-gated). README verified against all 6 CLI commands. 11.7 tag deferred to owner. BUILD COMPLETE through v0.2 scope; only gated evals + the v0.0.1 tag push remain for the owner.
 
 ## Agent notes (non-blocking observations)
 - ENV: stack pins Python >=3.11 (ARCHITECTURE.md §1) and CI uses 3.11. The dev sandbox here runs 3.10, so `pip install -e .` is refused by `requires-python`; tests are run via `PYTHONPATH=.` instead. No stack change made — flagging only. If the owner wants the sandbox to do editable installs, lowering the floor to 3.10 would be a stack decision (raise in Decisions needed first).
