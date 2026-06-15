@@ -14,10 +14,10 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 ## Phase 0 — Scaffold & CI
 | ID  | Task                                  | Status | T? | C? | P? | Owner | Notes |
 |-----|---------------------------------------|--------|----|----|----|-------|-------|
-| 0.1 | Repo, pyproject, package, gitignore   | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 0.2 | LLMClient + FakeClient + Anthropic    | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 0.3 | pytest harness + markers              | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 0.4 | GitHub Actions CI green               | todo   | ⬜ | ⬜ | ⬜ | agent |       |
+| 0.1 | Repo, pyproject, package, gitignore   | done   | ✅ | ✅ | ✅ | agent | pyproject (py>=3.11), distil/ pkg, tests/{unit,eval,fixtures}, .gitignore (kb/,data/,.env) |
+| 0.2 | LLMClient + FakeClient + Anthropic    | done   | ✅ | ✅ | ✅ | agent | Protocol + FakeClient (records calls for T-Q2) + AnthropicClient skeleton (env-driven, lazy key) |
+| 0.3 | pytest harness + markers              | done   | ✅ | ✅ | ✅ | agent | unit/eval markers; conftest auto-skips eval w/o ANTHROPIC_API_KEY; smoke test green |
+| 0.4 | GitHub Actions CI green               | done   | ✅ | ✅ | ✅ | agent | .github/workflows/ci.yml: ruff + pytest tests/unit on push/PR; eval job gated |
 
 ## Phase 1 — Data layer
 | ID  | Task                       | Status | T? | C? | P? | Owner | Notes |
@@ -117,4 +117,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 | D7 | Auth method when hosted?                                            | built-in single-user secret    | **built-in single-user secret** |
 
 ## Changelog (agent appends)
-- _(empty — agent adds dated entries: "2026-06-15 0.1 done, CI green, abc1234")_
+- 2026-06-15 Phase 0 (0.1–0.4) done: scaffold, LLM boundary, pytest harness, CI workflow. 9 unit tests green, ruff clean. Checkpoint held (CI wired on empty-but-working project).
+
+## Agent notes (non-blocking observations)
+- ENV: stack pins Python >=3.11 (ARCHITECTURE.md §1) and CI uses 3.11. The dev sandbox here runs 3.10, so `pip install -e .` is refused by `requires-python`; tests are run via `PYTHONPATH=.` instead. No stack change made — flagging only. If the owner wants the sandbox to do editable installs, lowering the floor to 3.10 would be a stack decision (raise in Decisions needed first).
