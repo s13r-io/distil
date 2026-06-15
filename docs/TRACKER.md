@@ -61,8 +61,8 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 ## Phase 7 — Graph linking (v0.1)
 | ID  | Task                            | Status | T? | C? | P? | Owner | Notes |
 |-----|---------------------------------|--------|----|----|----|-------|-------|
-| 7.1 | Candidate lookup (T-G1)         | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 7.2 | Relation classify (T-G2)        | todo   | ⬜ | ⬜ | ⬜ | agent |       |
+| 7.1 | Candidate lookup (T-G1)         | done   | ✅ | ✅ | ✅ | agent | deterministic topic-overlap lookup (type alone too broad); no candidates → no LLM call |
+| 7.2 | Relation classify (T-G2)        | done   | ✅ | ✅ | ✅ | agent | LLM labels each candidate; only enum relations kept; 'none'/invalid dropped; capped at 3 candidates (LLM budget). 5 tests |
 
 ## Phase 8 — Pipeline
 | ID  | Task                          | Status | T? | C? | P? | Owner | Notes |
@@ -124,6 +124,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 - 2026-06-15 Phase 4 (4.1,4.2) done; 4.3 in review: type-routed extraction + in-code quote discipline + deterministic faithfulness gate. 71 unit tests green. The headline faithfulness EVAL (T-E3) is written/gated/UNRUN — owner to run with a key. Guarantee NOT weakened: normalize (Phase 5) drops any item failing quote_in_transcript.
 - 2026-06-15 Phase 5 (5.1) done: normalize.py pure gate (drop unverifiable, backfill provenance, merge dups, preserve stance). 78 unit tests green. Checkpoint held.
 - 2026-06-15 Phase 6 (6.1–6.3) done: link.py goal-tied application links, deterministic novelty reservation, cold-start uses stable goals. 84 unit tests green. Checkpoint held.
+- 2026-06-15 Phase 7 (7.1–7.2) done: graph.py deterministic topic-overlap candidate lookup + enum-bounded relation classify (capped 3 candidates). 89 unit tests green. Checkpoint held.
 
 ## Agent notes (non-blocking observations)
 - ENV: stack pins Python >=3.11 (ARCHITECTURE.md §1) and CI uses 3.11. The dev sandbox here runs 3.10, so `pip install -e .` is refused by `requires-python`; tests are run via `PYTHONPATH=.` instead. No stack change made — flagging only. If the owner wants the sandbox to do editable installs, lowering the floor to 3.10 would be a stack decision (raise in Decisions needed first).
