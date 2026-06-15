@@ -128,6 +128,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 - 2026-06-15 Phase 8 (8.1) done: pipeline.py orchestrates 0→6; honors little_to_extract short-circuit; LLM budget bounded. 93 unit tests green. Checkpoint held. Follow-up: derive topic tags (currently empty) to strengthen graph candidacy.
 - 2026-06-15 Phase 9 (9.1–9.3) done: Typer CLI run/score/list/show with friendly errors. 100 unit tests green + manual end-to-end smoke (run→list→show→score→profile updated). MVP loop usable from terminal. Checkpoint held.
 - 2026-06-15 Phase 10 (read layer) done: Embedder, vector store, reindex, ranked retrieval, ABSTENTION gate (zero-LLM on miss), grounded synthesis w/ source links + conflict surfacing, CLI ask/reindex. 126 unit tests green + e2e ask smoke. Headline T-Q2/T-Q3 proven hermetically. Eval T-Q7 gated/unrun. Checkpoint held.
+- 2026-06-15 Phase 11.2/11.3 + 12.1 done: auth gate (fail-closed when public w/o secret, 401 on data routes, localhost open), FastAPI app (list/view/score+ask box), $PORT bind. 135 unit tests green (T-A1..A4 + UI). Remaining P11: Dockerfile/compose, backup job, README, release tag.
 
 ## Agent notes (non-blocking observations)
 - ENV: stack pins Python >=3.11 (ARCHITECTURE.md §1) and CI uses 3.11. The dev sandbox here runs 3.10, so `pip install -e .` is refused by `requires-python`; tests are run via `PYTHONPATH=.` instead. No stack change made — flagging only. If the owner wants the sandbox to do editable installs, lowering the floor to 3.10 would be a stack decision (raise in Decisions needed first).
