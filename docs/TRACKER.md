@@ -72,9 +72,9 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 ## Phase 9 — CLI
 | ID  | Task                        | Status | T? | C? | P? | Owner | Notes |
 |-----|-----------------------------|--------|----|----|----|-------|-------|
-| 9.1 | `distil run` (T-C1)         | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 9.2 | `distil score` (T-C2)       | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 9.3 | list/show + errors (T-C3)   | todo   | ⬜ | ⬜ | ⬜ | agent |       |
+| 9.1 | `distil run` (T-C1)         | done   | ✅ | ✅ | ✅ | agent | file/--paste/stdin → pipeline; prints entry path; --no-graph flag |
+| 9.2 | `distil score` (T-C2)       | done   | ✅ | ✅ | ✅ | agent | persists feedback on entry + applies profile update (EMA alpha from env) |
+| 9.3 | list/show + errors (T-C3)   | done   | ✅ | ✅ | ✅ | agent | list/show; friendly errors for missing key, bad file, unknown entry (no tracebacks). 7 tests |
 
 ## Phase 10 — Querying the knowledge base / read layer
 | ID   | Task                                             | Status | T? | C? | P? | Owner | Notes |
@@ -126,6 +126,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 - 2026-06-15 Phase 6 (6.1–6.3) done: link.py goal-tied application links, deterministic novelty reservation, cold-start uses stable goals. 84 unit tests green. Checkpoint held.
 - 2026-06-15 Phase 7 (7.1–7.2) done: graph.py deterministic topic-overlap candidate lookup + enum-bounded relation classify (capped 3 candidates). 89 unit tests green. Checkpoint held.
 - 2026-06-15 Phase 8 (8.1) done: pipeline.py orchestrates 0→6; honors little_to_extract short-circuit; LLM budget bounded. 93 unit tests green. Checkpoint held. Follow-up: derive topic tags (currently empty) to strengthen graph candidacy.
+- 2026-06-15 Phase 9 (9.1–9.3) done: Typer CLI run/score/list/show with friendly errors. 100 unit tests green + manual end-to-end smoke (run→list→show→score→profile updated). MVP loop usable from terminal. Checkpoint held.
 
 ## Agent notes (non-blocking observations)
 - ENV: stack pins Python >=3.11 (ARCHITECTURE.md §1) and CI uses 3.11. The dev sandbox here runs 3.10, so `pip install -e .` is refused by `requires-python`; tests are run via `PYTHONPATH=.` instead. No stack change made — flagging only. If the owner wants the sandbox to do editable installs, lowering the floor to 3.10 would be a stack decision (raise in Decisions needed first).
