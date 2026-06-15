@@ -22,7 +22,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 ## Phase 1 — Data layer
 | ID  | Task                       | Status | T? | C? | P? | Owner | Notes |
 |-----|----------------------------|--------|----|----|----|-------|-------|
-| 1.1 | Pydantic models (T-M1..M4) | todo   | ⬜ | ⬜ | ⬜ | agent | timestamp optional, quote mandatory |
+| 1.1 | Pydantic models (T-M1..M4) | done   | ✅ | ✅ | ✅ | agent | Profile+KBEntry+nested; closed enums (extra=forbid); quote mandatory, ts/locator optional; round-trip lossless. 13 tests |
 | 1.2 | store.py SQLite+md (T-S*)  | todo   | ⬜ | ⬜ | ⬜ | agent |       |
 | 1.3 | ingest.py .srt/.txt/.md/paste, ts optional (T-I*) | todo | ⬜ | ⬜ | ⬜ | agent | stage 0, pure |
 
