@@ -1,0 +1,30 @@
+# Railway configuration for Distil.
+# Most settings (service variables, the persistent volume, the public domain) are configured
+# in the Railway dashboard — see DEPLOY_RAILWAY.md. This file pins the build and start command.
+
+[build]
+# Build from the project Dockerfile. (Railway can also auto-build with Railpack if you omit this.)
+builder = "dockerfile"
+
+[deploy]
+# The app MUST bind 0.0.0.0 and the port Railway injects as $PORT — there is no port mapping layer.
+startCommand = "uvicorn web.app:app --host 0.0.0.0 --port $PORT"
+# A lightweight health endpoint the platform can poll.
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"
+numReplicas = 1   # single-user, single-volume — do not scale horizontally (one volume per service)
+
+# --- Set these in the Railway dashboard (Service → Variables), NOT here ---
+#   ANTHROPIC_API_KEY            your LLM key
+#   DISTIL_MODEL                 a current model string
+#   DISTIL_EMBEDDER=local        (or "api")
+#   DISTIL_EMBED_MODEL           embedding model name
+#   DISTIL_DB_PATH=/data/distil.db    points at the mounted volume
+#   DISTIL_KB_DIR=/data/kb            points at the mounted volume
+#   DISTIL_PUBLIC=true           required for public hosting
+#   DISTIL_AUTH_SECRET           REQUIRED when DISTIL_PUBLIC=true (app fails closed without it)
+#   DISTIL_RETRIEVAL_THRESHOLD, DISTIL_TOP_K, DISTIL_NOVELTY_RATIO, DISTIL_PROFILE_ALPHA (optional)
+#
+# --- Also in the dashboard: attach a Volume mounted at /data ---
+#   Volumes mount at RUNTIME only (not during build). One volume per service.
