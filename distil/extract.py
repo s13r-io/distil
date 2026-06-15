@@ -48,23 +48,26 @@ def run_extraction(
     return items
 
 
-def _parse_items(raw: str) -> list[KnowledgeItem]:
+def _parse_items_json(raw: str, *, kind: str = "extraction") -> list:
+    """Robustly parse a model response into a JSON array (tolerates code fences / prose)."""
     text = _strip_fence(raw).strip()
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
         match = re.search(r"\[.*\]", text, re.DOTALL)
         if not match:
-            raise ParseError(f"Extraction response was not a JSON array: {raw[:120]!r}") from exc
+            raise ParseError(f"{kind} response was not a JSON array: {raw[:120]!r}") from exc
         try:
             data = json.loads(match.group(0))
         except json.JSONDecodeError as exc2:
-            raise ParseError(
-                f"Extraction response was not a JSON array: {raw[:120]!r}"
-            ) from exc2
+            raise ParseError(f"{kind} response was not a JSON array: {raw[:120]!r}") from exc2
     if not isinstance(data, list):
-        raise ParseError("Extraction response must be a JSON array of items.")
+        raise ParseError(f"{kind} response must be a JSON array.")
+    return data
 
+
+def _parse_items(raw: str) -> list[KnowledgeItem]:
+    data = _parse_items_json(raw, kind="Extraction")
     items: list[KnowledgeItem] = []
     for i, obj in enumerate(data):
         if not isinstance(obj, dict):

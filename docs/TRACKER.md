@@ -54,9 +54,9 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 ## Phase 6 — Link to profile
 | ID  | Task                          | Status | T? | C? | P? | Owner | Notes |
 |-----|-------------------------------|--------|----|----|----|-------|-------|
-| 6.1 | Goal-tied links (T-L1)        | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 6.2 | Novelty reservation (T-L2)    | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 6.3 | Cold-start behavior (T-L3)    | todo   | ⬜ | ⬜ | ⬜ | agent |       |
+| 6.1 | Goal-tied links (T-L1)        | done   | ✅ | ✅ | ✅ | agent | links with unknown linked_goal_id dropped; ids validated against profile goals+focus |
+| 6.2 | Novelty reservation (T-L2)    | done   | ✅ | ✅ | ✅ | agent | deterministic ~ratio reservation; zero-ratio clears flags. 6 tests |
+| 6.3 | Cold-start behavior (T-L3)    | done   | ✅ | ✅ | ✅ | agent | confidence<0.25 → prompt shows only stable goals+active focus, no affinities |
 
 ## Phase 7 — Graph linking (v0.1)
 | ID  | Task                            | Status | T? | C? | P? | Owner | Notes |
@@ -123,6 +123,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 - 2026-06-15 Phase 3 (3.1–3.3) done; 3.4 in review: triage prompt+parse+short-circuit. 57 unit tests green. Eval tests T-T4/T-T5 written and gated but UNRUN (no API key in build env) — owner to run `pytest -m eval` with a key to confirm the checkpoint.
 - 2026-06-15 Phase 4 (4.1,4.2) done; 4.3 in review: type-routed extraction + in-code quote discipline + deterministic faithfulness gate. 71 unit tests green. The headline faithfulness EVAL (T-E3) is written/gated/UNRUN — owner to run with a key. Guarantee NOT weakened: normalize (Phase 5) drops any item failing quote_in_transcript.
 - 2026-06-15 Phase 5 (5.1) done: normalize.py pure gate (drop unverifiable, backfill provenance, merge dups, preserve stance). 78 unit tests green. Checkpoint held.
+- 2026-06-15 Phase 6 (6.1–6.3) done: link.py goal-tied application links, deterministic novelty reservation, cold-start uses stable goals. 84 unit tests green. Checkpoint held.
 
 ## Agent notes (non-blocking observations)
 - ENV: stack pins Python >=3.11 (ARCHITECTURE.md §1) and CI uses 3.11. The dev sandbox here runs 3.10, so `pip install -e .` is refused by `requires-python`; tests are run via `PYTHONPATH=.` instead. No stack change made — flagging only. If the owner wants the sandbox to do editable installs, lowering the floor to 3.10 would be a stack decision (raise in Decisions needed first).
