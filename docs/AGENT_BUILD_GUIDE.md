@@ -28,10 +28,11 @@ test first, see it fail, then implement.
 - 0.4 GitHub Actions: run `pytest tests/unit` + lint on push. Confirm green.
 - **Checkpoint:** CI is green on an empty-but-wired project. Commit, update tracker.
 
-## Phase 1 — Data layer (TDD: T-M*, T-S*)
-- 1.1 Implement Pydantic models from `SCHEMA.md` (§1, §2) — tests T-M1..M4 first.
+## Phase 1 — Data layer (TDD: T-M*, T-S*, T-I*)
+- 1.1 Implement Pydantic models from `SCHEMA.md` (§1, §2) — tests T-M1..M4 first. `provenance.timestamp` is optional; `quote` is mandatory.
 - 1.2 Implement `store.py`: SQLite index + markdown filing — tests T-S1..S3 first.
-- **Checkpoint:** can construct, persist, reload a KBEntry and a Profile.
+- 1.3 Implement `ingest.py` (stage 0, PURE): parse `.srt`/`.txt`/`.md`/pasted text into one normalized transcript; capture timestamps when present (SRT or inline `HH:MM:SS`), else `null` + a line/segment locator — tests T-I1..I6 first.
+- **Checkpoint:** can construct/persist/reload a KBEntry and Profile, and normalize any supported input (timestamped or not) into a uniform transcript.
 
 ## Phase 2 — Profile update logic (TDD: T-P*)  *(pure, do early — it's the loop's brain)*
 - 2.1 Implement `profile_update.py` from `SCHEMA.md` §3 — one test per row (T-P1..P8) first.
@@ -65,11 +66,11 @@ test first, see it fail, then implement.
 - **Checkpoint:** new entries connect to existing ones.
 
 ## Phase 8 — Pipeline orchestration (TDD: T-PL*)
-- 8.1 Wire stages 1→6 in `pipeline.py` (T-PL1); honor the short-circuit (T-PL2).
-- **Checkpoint:** one call turns transcript+profile into a filed, schema-valid entry.
+- 8.1 Wire stages 0→6 in `pipeline.py` (ingest → triage → … → file) (T-PL1); honor the short-circuit (T-PL2).
+- **Checkpoint:** one call turns raw input (any supported format) + profile into a filed, schema-valid entry.
 
 ## Phase 9 — CLI (TDD: T-C*)
-- 9.1 `distil run <transcript> [--url] [--profile]` (T-C1).
+- 9.1 `distil run <file.srt|.txt|.md>` and `distil run --paste` / stdin for pasted text → ingest → pipeline (T-C1).
 - 9.2 `distil score <entry_id> --score N --reason R` → calls profile_update (T-C2).
 - 9.3 `distil list` / `distil show <id>` for browsing; friendly errors (T-C3).
 - **Checkpoint:** full loop usable from the terminal.

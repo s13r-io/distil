@@ -33,7 +33,7 @@ into a cross-linked personal knowledge base.
 - Be open source and deployable by anyone with their own LLM API key.
 
 **Non-goals (v0)**
-- No automatic YouTube scraping at scale; transcript is supplied (pasted, uploaded, or single-URL fetch).
+- No automatic YouTube scraping / URL fetch in v0; the transcript is supplied as pasted text or an uploaded file (`.srt`, `.txt`, `.md`). URL fetch is deferred to a later release.
 - No multi-user accounts. Single-user. **No auth is acceptable only when bound to localhost** — the moment the app is exposed on a public URL (e.g. hosted on Railway), a minimal auth gate is required (see FR14). Hosting without auth would expose your API key and private knowledge base to anyone with the URL.
 - No mobile app; CLI first, minimal web UI second.
 - No fine-tuning of models; personalization lives entirely in the profile + prompts.
@@ -53,10 +53,10 @@ Primary loop:
 
 | ID   | Requirement                                                                                          | Priority |
 |------|------------------------------------------------------------------------------------------------------|----------|
-| FR1  | Accept a transcript via CLI (file/paste) and optionally fetch by YouTube URL.                        | Must     |
+| FR1  | Accept a transcript as pasted text **or** an uploaded file (`.srt`, `.txt`, `.md`). No URL fetch in v0. | Must     |
 | FR2  | Triage: classify knowledge types present, density, transcript-loss level (+evidence), and a verdict. | Must     |
 | FR3  | Extract atomic, self-contained knowledge items with type-specific fields.                            | Must     |
-| FR4  | Attach provenance (timestamp + short quote) to every knowledge item.                                 | Must     |
+| FR4  | Attach provenance to every knowledge item: a short quote always, plus a timestamp **when the source has one** (transcripts may be untimestamped). | Must |
 | FR5  | Preserve stance (fact / opinion / personal experience); never present opinion as fact.               | Must     |
 | FR6  | Generate application links tied to a specific profile goal or current-focus item.                    | Must     |
 | FR7  | Reserve a fraction of application links flagged as novelty/serendipity (anti-bubble).                | Should   |
@@ -73,6 +73,8 @@ Primary loop:
 | FR18 | Honest abstention: if no note clears the relevance threshold, say no relevant notes exist and do **not** synthesize an answer. | Must |
 | FR19 | `reindex` to embed previously filed entries (backfill when the read layer is added).                 | Must     |
 | FR20 | Surface conflicts when retrieved notes disagree, rather than silently choosing one.                  | Should   |
+| FR21 | Ingest `.srt`, `.txt`, `.md`, or pasted text into one normalized internal transcript; parse `.srt`/inline timestamps when present. | Must |
+| FR22 | Handle untimestamped transcripts gracefully: provenance degrades to quote-only (plus a line/segment locator), and the faithfulness check (quote present in source) still holds. | Must |
 
 ## 5.1 Querying the knowledge base (read layer)
 

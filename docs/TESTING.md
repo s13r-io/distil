@@ -32,6 +32,9 @@ Create at minimum these labelled transcripts (short, hand-written or trimmed rea
 - `low_value_vlog.txt` — entertainment, near-zero extractable knowledge.
 - `mixed_talk.txt` — conceptual + opinion + experiential mixed.
 
+Plus input-format fixtures for ingestion: `sample.srt` (real SRT timestamps), `inline_ts.txt`
+(plain text with inline `00:12:30` markers), and `no_timestamps.md` (prose, no timestamps at all).
+
 Each fixture has a sibling `*.expected.json` describing properties to assert (not exact output):
 e.g. `{ "verdict": "little_to_extract" }` for the vlog, `{ "transcript_loss": "high" }` for screen-share.
 
@@ -42,9 +45,17 @@ that must abstain.
 
 ## 3. Test-case catalog (write these as the build proceeds)
 
+### ingest.py (PURE — stage 0)
+- T-I1: parse `sample.srt` → ordered segments, each with text and a parsed `timestamp`.
+- T-I2: parse `inline_ts.txt` → segments with timestamps captured from inline `HH:MM:SS` markers.
+- T-I3: parse `no_timestamps.md` → segments with `timestamp = null` and a populated line/segment `locator`.
+- T-I4: pasted plain text (no file extension) is normalized the same as `.txt`.
+- T-I5: unknown/binary file or empty input → clear error, not a crash.
+- T-I6: the normalized transcript shape is identical across `.srt`/`.txt`/`.md`/paste (downstream stages don't care about source format).
+
 ### models.py
 - T-M1: Profile validates; rejects bad `status` enum.
-- T-M2: KnowledgeItem requires `provenance`; rejects missing quote.
+- T-M2: KnowledgeItem requires `provenance`; `quote` is mandatory, `timestamp` may be null.
 - T-M3: `stance` enum enforced; unknown value rejected.
 - T-M4: Round-trip serialize→deserialize is lossless.
 
@@ -58,13 +69,14 @@ that must abstain.
 ### extract.py (unit, FakeClient)
 - T-E1: routes to the heuristic extractor when triage says heuristic-dominant.
 - T-E2: heuristic items include `rationale` and `scope`; procedural items include `order_index`.
-- T-E3 (eval, FAITHFULNESS): every returned item's `provenance.quote` substring-matches the transcript. **This is the headline guarantee — zero tolerance for fabricated provenance.**
+- T-E3 (eval, FAITHFULNESS): every returned item's `provenance.quote` substring-matches the transcript, **for timestamped and untimestamped sources alike**. The quote is the format-independent faithfulness anchor. **This is the headline guarantee — zero tolerance for fabricated provenance.**
 - T-E4: each quote is < 15 words (copyright/quote discipline enforced in code).
 
 ### normalize.py (PURE)
 - T-N1: near-duplicate items are merged.
 - T-N2: an item whose provenance quote is NOT in the transcript is dropped/flagged.
 - T-N3: opinion content keeps `stance == "opinion"`; never rewritten to look like fact.
+- T-N4: for an untimestamped source, items validate with `timestamp = null` and a populated `locator`; the quote check still gates them.
 
 ### link.py (unit, FakeClient)
 - T-L1: every application_link has a valid `linked_goal_id` pointing at a real profile goal/focus.
@@ -95,7 +107,7 @@ that must abstain.
 - T-PL2: `little_to_extract` path files a minimal entry and makes no extract/link calls.
 
 ### cli.py
-- T-C1: `distil run <file>` exits 0 and prints the entry path.
+- T-C1: `distil run <file>` accepts `.srt`/`.txt`/`.md` and `distil run --paste` (or stdin) accepts pasted text; exits 0 and prints the entry path.
 - T-C2: `distil score <id> --score 5 --reason relevant` mutates the profile.
 - T-C3: missing API key → friendly error, not a stack trace.
 - T-C4: `distil ask "..."` prints an answer + source links, or the no-notes message.

@@ -88,7 +88,11 @@ the structured fields; body is the human-readable rendering) and indexed in SQLi
       "preconditions": [], "gotchas": [],  // procedural
       "stance": "fact | opinion | personal_experience",
       "speaker_confidence": "low | medium | high",
-      "provenance": { "timestamp": "00:12:30", "quote": "string < 15 words" }
+      "provenance": {
+        "quote": "string < 15 words",     // ALWAYS present — the primary anchor; must appear in the source
+        "timestamp": "00:12:30 | null",    // only when the source had one (.srt / inline markers)
+        "locator": "string|null"           // line/segment index — the fallback pointer for untimestamped sources
+      }
     }
   ],
 
@@ -161,5 +165,5 @@ Embeddings are not part of the KBEntry document — they live in a side table in
 ```
 
 Retrieval returns `item_id`s; each resolves to its `entry_id` and the item's `provenance`
-(timestamp + quote), which is what answer source-links point at. `reindex` repopulates this
-table for entries filed before the read layer, or after an `embedding_model` change.
+(quote, plus timestamp or locator), which is what answer source-links point at. `reindex`
+repopulates this table for entries filed before the read layer, or after an `embedding_model` change.

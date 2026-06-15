@@ -22,8 +22,9 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 ## Phase 1 — Data layer
 | ID  | Task                       | Status | T? | C? | P? | Owner | Notes |
 |-----|----------------------------|--------|----|----|----|-------|-------|
-| 1.1 | Pydantic models (T-M1..M4) | todo   | ⬜ | ⬜ | ⬜ | agent |       |
+| 1.1 | Pydantic models (T-M1..M4) | todo   | ⬜ | ⬜ | ⬜ | agent | timestamp optional, quote mandatory |
 | 1.2 | store.py SQLite+md (T-S*)  | todo   | ⬜ | ⬜ | ⬜ | agent |       |
+| 1.3 | ingest.py .srt/.txt/.md/paste, ts optional (T-I*) | todo | ⬜ | ⬜ | ⬜ | agent | stage 0, pure |
 
 ## Phase 2 — Profile update logic (pure)
 | ID  | Task                                | Status | T? | C? | P? | Owner | Notes |
@@ -107,13 +108,13 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 ## Decisions needed (owner answers here)
 | #  | Question                                                            | Default                        | Owner decision |
 |----|---------------------------------------------------------------------|--------------------------------|----------------|
-| D1 | Score per-document or per-application-link?                         | per-document (per-link optional) |                |
-| D2 | Include YouTube URL fetch in MVP, or transcript text only?          | text only in MVP               |                |
-| D3 | Commit generated `kb/` to git, or keep local/gitignored?           | gitignored (git-remote backup) |                |
-| D4 | LLM provider/model to default to?                                   | Claude API, model via env      |                |
-| D5 | Embeddings: local model or API?                                     | local (provider-independent)   |                |
-| D6 | Hosting target?                                                     | Railway (auth required)        |                |
-| D7 | Auth method when hosted?                                            | built-in single-user secret    |                |
+| D1 | Score per-document or per-application-link?                         | per-document (per-link optional) | **per-document** |
+| D2 | Include YouTube URL fetch in MVP, or transcript text only?          | text only in MVP               | **text only; paste OR file upload (.srt/.txt/.md); handle transcripts with or without timestamps** (FR1, FR21, FR22) |
+| D3 | Commit generated `kb/` to git, or keep local/gitignored?           | gitignored (git-remote backup) | **gitignored; back up via scheduled push to a separate private repo** |
+| D4 | LLM provider/model to default to?                                   | Claude API, model via env      | **Claude API, model via env** |
+| D5 | Embeddings: local model or API?                                     | local (provider-independent)   | **local** (watch instance RAM when hosted — ARCH §8.4) |
+| D6 | Hosting target?                                                     | Railway (auth required)        | **Railway, auth required** |
+| D7 | Auth method when hosted?                                            | built-in single-user secret    | **built-in single-user secret** |
 
 ## Changelog (agent appends)
 - _(empty — agent adds dated entries: "2026-06-15 0.1 done, CI green, abc1234")_

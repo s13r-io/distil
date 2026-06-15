@@ -33,8 +33,11 @@ A transcript flows through ordered stages. Each stage is a module with a pure in
 LLM-backed stages take an injected `LLMClient` so tests can mock it.
 
 ```
-transcript + profile
+raw input (pasted text or .srt / .txt / .md file) + profile
         │
+        ▼
+[0] Ingest ──────────► normalized transcript: list of segments {text, timestamp?, locator}
+        │              (parses .srt and inline timestamps; tolerates none — PURE, no LLM)
         ▼
 [1] Triage ──────────► triage verdict (types, density, loss, verdict)
         │                     │
@@ -52,15 +55,20 @@ transcript + profile
 [5] Graph-link ────────► related_entries (match against existing KB index)
         │
         ▼
-[6] File ──────────────► write markdown entry to kb/, index row in SQLite
+[6] File ──────────────► write markdown entry to kb/, index row in SQLite (+ embed items, §9)
         │
         ▼
 [7] Feedback (later) ──► score+reason → profile update (pure logic, SCHEMA §3)
 ```
 
 LLM-backed stages: **1, 2, 4, 5** (5 only needs the LLM for relation classification; candidate
-matching is a deterministic index lookup first). Pure/deterministic stages: **3, 6, 7**.
+matching is a deterministic index lookup first). Pure/deterministic stages: **0, 3, 6, 7**.
 Keep the LLM-call count per transcript bounded (target ≤ 4).
+
+**Timestamps are optional.** Stage 0 captures a timestamp per segment when the source has one
+(`.srt`, or inline markers like `00:12:30`), and leaves it null otherwise, always keeping a
+line/segment `locator`. Downstream, provenance uses the quote as the always-present anchor and
+attaches a timestamp only when one exists (SCHEMA §2).
 
 ## 3. Module layout
 
@@ -68,6 +76,7 @@ Keep the LLM-call count per transcript bounded (target ≤ 4).
 distil/
   __init__.py
   models.py          # Pydantic models: Profile, KBEntry, KnowledgeItem, ApplicationLink, Feedback
+  ingest.py          # stage 0 (PURE): parse .srt/.txt/.md/pasted text → normalized transcript (timestamps optional)
   llm.py             # LLMClient protocol + AnthropicClient + FakeClient (tests)
   prompts/           # prompt templates, one per LLM stage (versioned strings)
   triage.py          # stage 1
@@ -148,6 +157,12 @@ variables; a public URL comes from **Generate Domain** (do this *after* auth is 
 **Backup:** prefer the provider-independent route — a scheduled job that commits `kb/` to a
 private git remote — so the knowledge base is never trapped on one cloud volume. Railway's
 own volume backups are a fallback.
+
+4. **Local embeddings need memory.** The chosen default is local embeddings (`DISTIL_EMBEDDER=local`),
+   which loads a small model into the service's RAM. Size the Railway instance accordingly, and
+   ship the model in the image (downloaded at *build* time — never to the runtime volume). On a
+   very small instance, set `DISTIL_EMBEDDER=api` instead; the `Embedder` abstraction makes this a
+   config change only.
 
 ## 9. Querying the knowledge base (read layer)
 

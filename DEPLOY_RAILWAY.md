@@ -49,6 +49,11 @@ DISTIL_AUTH_SECRET   = <a long random secret>   # REQUIRED for public hosting
 Optional tuning: `DISTIL_RETRIEVAL_THRESHOLD`, `DISTIL_TOP_K`, `DISTIL_NOVELTY_RATIO`,
 `DISTIL_PROFILE_ALPHA`. Never commit these — they live only in Railway.
 
+> **Local embeddings + Railway:** with `DISTIL_EMBEDDER=local` (the chosen default) a small
+> embedding model loads into the service's RAM and should be baked into the image at build
+> time. Pick an instance with enough memory for it. On a very small instance, set
+> `DISTIL_EMBEDDER=api` instead — it's a config change only, no code change.
+
 ### 4. Confirm the start command
 `railway.toml` already sets it to bind the injected port:
 `uvicorn web.app:app --host 0.0.0.0 --port $PORT`. If you configure the service manually
