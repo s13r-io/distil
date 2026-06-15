@@ -79,9 +79,9 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 ## Phase 10 — Querying the knowledge base / read layer
 | ID   | Task                                             | Status | T? | C? | P? | Owner | Notes |
 |------|--------------------------------------------------|--------|----|----|----|-------|-------|
-| 10.1 | Embedder protocol + Fake + real (T-X3)           | todo   | ⬜ | ⬜ | ⬜ | agent |       |
-| 10.2 | sqlite-vec store; embed items at file (T-X1)     | todo   | ⬜ | ⬜ | ⬜ | agent | pin version |
-| 10.3 | `distil reindex` backfill (T-X2,T-C5)            | todo   | ⬜ | ⬜ | ⬜ | agent |       |
+| 10.1 | Embedder protocol + Fake + real (T-X3)           | done   | ✅ | ✅ | ✅ | agent | Embedder protocol; FakeEmbedder (hashed BoW, overlap→similarity); LocalEmbedder/ApiEmbedder lazy; make_embedder(). 6 tests |
+| 10.2 | sqlite-vec store; embed items at file (T-X1)     | done   | ✅ | ✅ | ✅ | agent | sqlite-vec 0.1.6 loads in env; vectors stored as JSON in item_vectors_meta (portable both backends); embed at file w/ embedder. 7 tests |
+| 10.3 | `distil reindex` backfill (T-X2,T-C5)            | review | ✅ | ✅ | ⬜ | agent | store.reindex() idempotent + re-embeds on model change (T-X2 done). CLI `distil reindex` (T-C5) still TODO |
 | 10.4 | Retrieval + ranking (T-Q1)                       | todo   | ⬜ | ⬜ | ⬜ | agent |       |
 | 10.5 | Relevance gate / abstention (T-Q2)               | todo   | ⬜ | ⬜ | ⬜ | agent | no-hallucination |
 | 10.6 | Grounded synthesis + sources + conflict (T-Q3..Q6)| todo  | ⬜ | ⬜ | ⬜ | agent |       |
