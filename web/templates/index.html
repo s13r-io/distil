@@ -21,10 +21,10 @@
 </section>
 
 <section class="card collapsed" id="add-panel">
-  <div class="collapse-head" id="add-head">
+  <button type="button" class="collapse-head" id="add-head" aria-expanded="false" aria-controls="add-panel">
     <span class="label">Add knowledge</span>
     <span class="chev">▾</span>
-  </div>
+  </button>
   <div class="collapse-body" style="margin-top:12px;">
     <textarea id="paste" placeholder="Paste a transcript…"></textarea>
     <div class="row wrap" style="margin-top:10px;">
@@ -64,12 +64,12 @@
   </div>
 
   <div class="row wrap" id="filter-chips" style="margin-bottom:12px;">
-    <span class="chip" data-filter="scored">Scored</span>
-    <span class="chip" data-filter="unscored">Unscored</span>
-    <span class="chip" data-filter="star5">5★</span>
-    <span class="chip" data-filter="star4">4★</span>
-    <span class="chip" data-filter="star3">3★</span>
-    {% for t in all_tags %}<span class="chip" data-tag="{{ t }}">{{ t }}</span>{% endfor %}
+    <button type="button" class="chip" data-filter="scored">Scored</button>
+    <button type="button" class="chip" data-filter="unscored">Unscored</button>
+    <button type="button" class="chip" data-filter="star5">5★</button>
+    <button type="button" class="chip" data-filter="star4">4★</button>
+    <button type="button" class="chip" data-filter="star3">3★</button>
+    {% for t in all_tags %}<button type="button" class="chip" data-tag="{{ t }}">{{ t }}</button>{% endfor %}
   </div>
 
   <div id="lib-list"></div>
@@ -177,7 +177,9 @@ async function streamAsk(q){
 
 /* ---------- Add knowledge ---------- */
 document.getElementById('add-head').addEventListener('click',()=>{
-  document.getElementById('add-panel').classList.toggle('collapsed');
+  const panel=document.getElementById('add-panel');
+  panel.classList.toggle('collapsed');
+  document.getElementById('add-head').setAttribute('aria-expanded', !panel.classList.contains('collapsed'));
 });
 document.getElementById('distil-btn').addEventListener('click', async () => {
   const fd=new FormData();
@@ -211,32 +213,36 @@ async function loadJobs(){
   if(_jobsLoading) return;
   _jobsLoading=true;
   if(_jobsPollTimer){clearTimeout(_jobsPollTimer);_jobsPollTimer=null;}
-  const r=await fetch('/jobs',{headers:{accept:'application/json'}});
-  if(!r.ok){_jobsLoading=false;return;} const jobs=await r.json();
-  const box=document.getElementById('activity');
-  if(!jobs.length){box.innerHTML='<p class="muted">No distill jobs yet — add a transcript above.</p>';}
-  else{
-    box.innerHTML=jobs.map(j=>{
-      let detail='';
-      if(j.status==='done') detail='<a href="/entries/'+encodeURIComponent(j.entry_id)+'">'+esc(j.summary||'')+' · View entry →</a>';
-      else if(j.status==='low_value') detail=esc(j.summary||'');
-      else if(j.status==='failed') detail='<span style="color:var(--danger)">'+esc(j.error||'failed')+'</span> · <a href="#" data-retry="'+j.job_id+'">Retry</a>';
-      else if(j.status==='queued') detail='<a href="#" data-remove="'+j.job_id+'">Remove</a>';
-      else if(j.status==='running') detail='extracting items…';
-      return '<div class="jobrow"><div class="top"><span>'+esc(j.title)+'</span>'+jobBadge(j.status)+'</div>'
-        +'<div class="meta-line muted">'+detail+'</div></div>';
-    }).join('');
-  }
-  const hasFinished=jobs.some(j=>['done','low_value','removed'].includes(j.status));
-  const hasFailed=jobs.some(j=>j.status==='failed');
-  document.getElementById('clear-finished').classList.toggle('hide',!hasFinished);
-  document.getElementById('clear-failed').classList.toggle('hide',!hasFailed);
-  // wire row actions
-  box.querySelectorAll('[data-remove]').forEach(a=>a.onclick=async e=>{e.preventDefault();await fetch('/jobs/'+a.dataset.remove+'/remove',{method:'POST'});loadJobs();});
-  box.querySelectorAll('[data-retry]').forEach(a=>a.onclick=async e=>{e.preventDefault();await fetch('/jobs/'+a.dataset.retry+'/retry',{method:'POST'});loadJobs();});
-  // keep polling while any job is active
+  try{
+    const r=await fetch('/jobs',{headers:{accept:'application/json'}});
+    if(!r.ok) return;
+    const jobs=await r.json();
+    const box=document.getElementById('activity');
+    if(!jobs.length){box.innerHTML='<p class="muted">No distill jobs yet — add a transcript above.</p>';}
+    else{
+      box.innerHTML=jobs.map(j=>{
+        let detail='';
+        if(j.status==='done') detail='<a href="/entries/'+encodeURIComponent(j.entry_id)+'">'+esc(j.summary||'')+' · View entry →</a>';
+        else if(j.status==='low_value') detail=esc(j.summary||'');
+        else if(j.status==='failed') detail='<span style="color:var(--danger)">'+esc(j.error||'failed')+'</span> · <a href="#" data-retry="'+j.job_id+'">Retry</a>';
+        else if(j.status==='queued') detail='<a href="#" data-remove="'+j.job_id+'">Remove</a>';
+        else if(j.status==='running') detail='extracting items…';
+        return '<div class="jobrow"><div class="top"><span>'+esc(j.title)+'</span>'+jobBadge(j.status)+'</div>'
+          +'<div class="meta-line muted">'+detail+'</div></div>';
+      }).join('');
+    }
+    const hasFinished=jobs.some(j=>['done','low_value','removed'].includes(j.status));
+    const hasFailed=jobs.some(j=>j.status==='failed');
+    document.getElementById('clear-finished').classList.toggle('hide',!hasFinished);
+    document.getElementById('clear-failed').classList.toggle('hide',!hasFailed);
+    // wire row actions
+    box.querySelectorAll('[data-remove]').forEach(a=>a.onclick=async e=>{e.preventDefault();await fetch('/jobs/'+a.dataset.remove+'/remove',{method:'POST'});loadJobs();});
+    box.querySelectorAll('[data-retry]').forEach(a=>a.onclick=async e=>{e.preventDefault();await fetch('/jobs/'+a.dataset.retry+'/retry',{method:'POST'});loadJobs();});
+    // keep polling while any job is active
+    if(jobs.some(j=>ACTIVE.has(j.status))) _jobsPollTimer=setTimeout(loadJobs,2000);
+  }finally{
     _jobsLoading=false;
-  if(jobs.some(j=>ACTIVE.has(j.status))) _jobsPollTimer=setTimeout(loadJobs,2000);
+  }
 }
 document.getElementById('clear-finished').onclick=async e=>{e.preventDefault();await fetch('/jobs/clear?scope=finished',{method:'POST'});loadJobs();};
 document.getElementById('clear-failed').onclick=async e=>{e.preventDefault();await fetch('/jobs/clear?scope=failed',{method:'POST'});loadJobs();};
