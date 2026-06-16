@@ -111,7 +111,11 @@ def run(
         entry = run_pipeline(
             transcript, profile, store, client,
             source_title=title,
-            config=PipelineConfig(novelty_ratio=_novelty_ratio(), enable_graph=not no_graph),
+            config=PipelineConfig(
+                novelty_ratio=_novelty_ratio(),
+                enable_graph=not no_graph,
+                model_version=os.environ.get("DISTIL_MODEL", ""),
+            ),
             embedder=embedder,
         )
     except RuntimeError as exc:

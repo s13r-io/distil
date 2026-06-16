@@ -44,6 +44,7 @@ def run_extraction(
     prompt = build_extract_prompt(ktype, transcript.full_text())
     raw = client.complete(prompt, system=SYSTEM)
     items = _parse_items(raw)
+    _truncate_overlong_quotes(items)
     _enforce_quote_discipline(items)
     return items
 
@@ -78,6 +79,20 @@ def _parse_items(raw: str) -> list[KnowledgeItem]:
         except ValidationError as exc:
             raise ParseError(f"Extracted item {i} did not match the schema: {exc}") from exc
     return items
+
+
+def _truncate_overlong_quotes(items: list[KnowledgeItem]) -> None:
+    """Silently trim quotes that exceed the word limit to exactly _MAX_QUOTE_WORDS-1 words.
+
+    The LLM occasionally returns a genuine verbatim quote that is one or two words over the
+    limit.  Truncating preserves faithfulness (a leading substring is still verbatim) while
+    satisfying the copyright/length guardrail.  This runs *before* _enforce_quote_discipline
+    so the hard guard only fires for genuinely fabricated / runaway quotes.
+    """
+    for item in items:
+        words = item.provenance.quote.split()
+        if len(words) >= _MAX_QUOTE_WORDS:
+            item.provenance.quote = " ".join(words[: _MAX_QUOTE_WORDS - 1])
 
 
 def _enforce_quote_discipline(items: list[KnowledgeItem]) -> None:
