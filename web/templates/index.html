@@ -64,12 +64,12 @@
   </div>
 
   <div class="row wrap" id="filter-chips" style="margin-bottom:12px;">
-    <button type="button" class="chip" data-filter="scored">Scored</button>
-    <button type="button" class="chip" data-filter="unscored">Unscored</button>
-    <button type="button" class="chip" data-filter="star5">5★</button>
-    <button type="button" class="chip" data-filter="star4">4★</button>
-    <button type="button" class="chip" data-filter="star3">3★</button>
-    {% for t in all_tags %}<button type="button" class="chip" data-tag="{{ t }}">{{ t }}</button>{% endfor %}
+    <button type="button" class="chip" data-filter="scored" aria-pressed="false">Scored</button>
+    <button type="button" class="chip" data-filter="unscored" aria-pressed="false">Unscored</button>
+    <button type="button" class="chip" data-filter="star5" aria-pressed="false">5★</button>
+    <button type="button" class="chip" data-filter="star4" aria-pressed="false">4★</button>
+    <button type="button" class="chip" data-filter="star3" aria-pressed="false">3★</button>
+    {% for t in all_tags %}<button type="button" class="chip" data-tag="{{ t }}" aria-pressed="false">{{ t }}</button>{% endfor %}
   </div>
 
   <div id="lib-list"></div>
@@ -193,7 +193,9 @@ document.getElementById('distil-btn').addEventListener('click', async () => {
     const r=await fetch('/ingest',{method:'POST',body:fd});
     if(r.ok){
       document.getElementById('paste').value=''; document.getElementById('file').value='';
-      document.getElementById('add-panel').classList.add('collapsed');
+      const panel=document.getElementById('add-panel');
+      panel.classList.add('collapsed');
+      document.getElementById('add-head').setAttribute('aria-expanded','false');
       msg.textContent=''; loadJobs();
     }else{const d=await r.json();msg.textContent=d.detail||'Could not queue.';}
   }finally{btn.disabled=false;}
@@ -288,15 +290,16 @@ document.getElementById('sort').onchange=renderLib;
 document.getElementById('show-more').onclick=()=>{shown+=PAGE;renderLib();};
 document.querySelectorAll('#filter-chips .chip').forEach(chip=>{
   chip.onclick=()=>{
-    chip.classList.toggle('on');
-    if(chip.dataset.tag){chip.classList.contains('on')?activeTags.add(chip.dataset.tag):activeTags.delete(chip.dataset.tag);}
-    else{chip.classList.contains('on')?activeFilters.add(chip.dataset.filter):activeFilters.delete(chip.dataset.filter);}
+    const isOn=chip.classList.toggle('on');
+    chip.setAttribute('aria-pressed', String(isOn));
+    if(chip.dataset.tag){isOn?activeTags.add(chip.dataset.tag):activeTags.delete(chip.dataset.tag);}
+    else{isOn?activeFilters.add(chip.dataset.filter):activeFilters.delete(chip.dataset.filter);}
     shown=PAGE; renderLib();
   };
 });
 document.getElementById('clear-filters').onclick=e=>{
   e.preventDefault(); activeTags.clear(); activeFilters.clear();
-  document.querySelectorAll('#filter-chips .chip.on').forEach(c=>c.classList.remove('on'));
+  document.querySelectorAll('#filter-chips .chip.on').forEach(c=>{c.classList.remove('on');c.setAttribute('aria-pressed','false');});
   shown=PAGE; renderLib();
 };
 renderLib();
