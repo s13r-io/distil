@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}{{ e.source.title }} — Distil{% endblock %}
+{% block content %}
+
+<p style="margin:0 0 12px;"><a href="/">← Back</a></p>
+
+<section class="card">
+  <h2 style="margin:0 0 4px; font-size:18px; font-weight:500;">{{ e.source.title }}</h2>
+  <p class="muted" style="margin:0 0 14px;">Captured {{ e.source.captured_at[:16].replace("T"," ") }}</p>
+
+  <div class="row wrap" style="margin-bottom:6px;">
+    <span class="badge {% if e.triage.verdict == 'rich' %}ok{% elif e.triage.verdict == 'little_to_extract' %}warn{% endif %}">verdict: {{ e.triage.verdict }}</span>
+    <span class="badge">density: {{ e.triage.density }}</span>
+    <span class="badge">loss: {{ e.triage.transcript_loss.level }}</span>
+  </div>
+  {% if mix %}<p class="muted" style="margin:0 0 4px;">Mix: {% for t, pct in mix %}{{ t }} {{ pct }}%{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+</section>
+
+<section class="card">
+  <p class="label" style="margin:0 0 12px;">Knowledge · {{ e.knowledge_items|length }} item{{ 's' if e.knowledge_items|length != 1 else '' }}</p>
+
+  {% for it in e.knowledge_items %}
+  <div class="item" id="{{ it.item_id }}">
+    <div class="row wrap" style="margin-bottom:8px;">
+      <span class="badge info">{{ it.type }}</span>
+      <span class="badge {% if it.stance == 'opinion' %}warn{% endif %}">{{ it.stance.replace('_',' ') }}</span>
+    </div>
+    <p class="stmt">{{ it.statement }}</p>
+    {% if it.rationale %}<p class="sub"><b>Why:</b> {{ it.rationale }}</p>{% endif %}
+    {% if it.scope %}<p class="sub"><b>Scope:</b> {{ it.scope }}</p>{% endif %}
+    {% if it.preconditions %}<p class="sub"><b>Preconditions:</b> {{ it.preconditions|join('; ') }}</p>{% endif %}
+    {% if it.gotchas %}<p class="sub"><b>Gotchas:</b> {{ it.gotchas|join('; ') }}</p>{% endif %}
+    <blockquote>"{{ it.provenance.quote }}"{% if it.provenance.timestamp %} <span class="muted">@ {{ it.provenance.timestamp }}</span>{% endif %}</blockquote>
+  </div>
+  {% endfor %}
+
+  {% if e.application_links %}
+  <p class="label" style="margin:16px 0 10px;">Application links</p>
+  {% for link in e.application_links %}
+  <div class="item">
+    <div class="row wrap" style="margin-bottom:6px;">
+      <span class="badge">{{ link.application_form }}</span>
+      {% if link.novelty_flag %}<span class="badge info">novelty</span>{% endif %}
+    </div>
+    <p class="stmt" style="margin:0;">{{ link.scenario }}</p>
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  {% if e.related_entries %}
+  <p class="label" style="margin:16px 0 10px;">Related entries</p>
+  {% for rel in e.related_entries %}
+  <p class="sub" style="margin:0 0 6px;">
+    <span class="badge">{{ rel.relation.replace('_',' ') }}</span>
+    <a href="/entries/{{ rel.target }}">{{ rel.target }}</a>
+  </p>
+  {% endfor %}
+  {% endif %}
+
+  {% if not e.application_links and not e.related_entries %}
+  <p class="muted" style="margin:14px 0 0;">No application or related links yet.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="score-panel">
+    <p class="label" style="margin:0 0 2px; font-size:13px;">How useful was this?</p>
+    <p class="muted" id="score-state" style="margin:0;">
+      {% if e.feedback.score %}Scored {{ e.feedback.score }}{% if e.feedback.reason %} · {{ e.feedback.reason }}{% endif %} ✓{% else %}Not scored yet{% endif %}
+    </p>
+    <div class="score-btns">
+      {% for n in [1,2,3,4,5] %}
+      <button data-score="{{ n }}" {% if e.feedback.score == n %}class="on"{% endif %}>{{ n }}</button>
+      {% endfor %}
+    </div>
+    <select id="reason">
+      <option value="">Why? (reason)</option>
+      {% for r in reasons %}<option value="{{ r }}" {% if e.feedback.reason == r %}selected{% endif %}>{{ r }}</option>{% endfor %}
+    </select>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let chosen={{ e.feedback.score or 'null' }};
+const btns=document.querySelectorAll('.score-btns button');
+btns.forEach(b=>b.onclick=()=>{chosen=Number(b.dataset.score);btns.forEach(x=>x.classList.remove('on'));b.classList.add('on');submitScore();});
+document.getElementById('reason').onchange=submitScore;
+async function submitScore(){
+  const reason=document.getElementById('reason').value;
+  if(!chosen||!reason) return;
+  const fd=new FormData(); fd.append('score',chosen); fd.append('reason',reason);
+  const r=await fetch('/entries/{{ e.entry_id }}/score',{method:'POST',body:fd});
+  const state=document.getElementById('score-state');
+  state.textContent = r.ok ? ('Scored '+chosen+' · '+reason+' ✓') : 'Could not save score.';
+}
+</script>
+{% endblock %}

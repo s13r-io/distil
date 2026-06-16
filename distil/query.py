@@ -147,6 +147,87 @@ def ask(
     )
 
 
+@dataclass
+class StreamEvent:
+    """One event in a streaming ask. Exactly one field is set per event."""
+
+    kind: str  # "delta" | "abstain" | "final" | "error"
+    text: str = ""  # for delta / abstain / error
+    result: AskResult | None = None  # for final / abstain
+
+
+def stream_ask(
+    question: str,
+    store: Store,
+    embedder: Embedder,
+    client: LLMClient,
+    *,
+    threshold: float = 0.35,
+    top_k: int = 6,
+):
+    """Streaming sibling of :func:`ask` (WEB_UI_SPEC §9).
+
+    Yields :class:`StreamEvent`:
+      * ``abstain`` — nothing cleared the threshold; zero synthesis calls (same gate as ``ask``).
+      * ``delta`` — a chunk of answer text, as the model produces it.
+      * ``final`` — terminal event carrying the resolved :class:`AskResult` (sources, grounded
+        citations, conflict). Sources resolve only after the stream completes.
+      * ``error`` — the stream failed partway; callers discard any partial answer and offer retry.
+
+    The answer is streamed using inline ``[item_id]`` citation markers (the synthesis prompt
+    already asks for these); citations and conflict are parsed once the stream closes, so the
+    JSON-or-inline parsing in :func:`_parse_synthesis` is reused without needing a valid-JSON
+    prefix mid-stream.
+    """
+    results = retrieve(question, store, embedder, top_k=top_k)
+    cleared = [r for r in results if r.similarity >= threshold]
+    if not cleared:
+        abstain = AskResult(
+            abstained=True,
+            message="No relevant notes found. Distil answers only from your knowledge base, "
+                    "so it won't guess from outside knowledge.",
+        )
+        yield StreamEvent(kind="abstain", text=abstain.message, result=abstain)
+        return
+
+    sources = [Source(r.item_id, r.entry_id, r.quote, r.timestamp) for r in cleared]
+    notes_block = _render_notes(cleared)
+    prompt = build_synthesis_prompt(question, notes_block)
+
+    chunks: list[str] = []
+    try:
+        stream_iter = client.stream(prompt, system=SYSTEM)
+    except (AttributeError, NotImplementedError):
+        # Fallback: client only implements complete() — yield the full response as one chunk
+        stream_iter = iter([client.complete(prompt, system=SYSTEM)])
+
+    try:
+        for delta in stream_iter:
+            if not delta:
+                continue
+            chunks.append(delta)
+            yield StreamEvent(kind="delta", text=delta)
+    except Exception as exc:  # WEB_UI_SPEC §9: discard partial, signal retry
+        yield StreamEvent(kind="error", text=str(exc) or exc.__class__.__name__)
+        return
+
+    raw = "".join(chunks)
+    answer, cited, conflict = _parse_synthesis(raw)
+    retrieved_ids = {r.item_id for r in cleared}
+    grounded = [c for c in cited if c in retrieved_ids]
+    ungrounded = [c for c in cited if c not in retrieved_ids]
+    if not conflict:
+        conflict = _detect_contradiction(store, cleared)
+
+    yield StreamEvent(
+        kind="final",
+        result=AskResult(
+            abstained=False, answer=answer, sources=sources,
+            cited_item_ids=grounded, ungrounded_citations=ungrounded, conflict=conflict,
+        ),
+    )
+
+
 # ---- helpers ----------------------------------------------------------------------------
 
 

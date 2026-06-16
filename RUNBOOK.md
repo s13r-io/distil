@@ -63,7 +63,7 @@ embeddings + vector search + dev/test tools):
 
 ```
 $ pip install --upgrade pip
-$ pip install -e ".[anthropic,embed-local,vec,dev]"
+$ pip install -e ".[anthropic,embed-local,vec,dev,web]"
 ```
 
 This takes a few minutes the first time (it downloads PyTorch for local embeddings). When it
@@ -99,6 +99,14 @@ DISTIL_DB_PATH=./data/distil.db
 DISTIL_KB_DIR=./kb
 DISTIL_PUBLIC=false
 ```
+
+> **Optional:** If you see `Warning: unauthenticated requests to the HF Hub` when running
+> `distil run` or `distil ask`, you can silence it by adding a Hugging Face token to `.env`:
+> ```
+> HF_TOKEN=hf_...your token...
+> ```
+> Get one free at https://huggingface.co/settings/tokens (read-only scope is enough).
+> This is cosmetic only — the local embedder works fine without it.
 
 Load the variables into your current terminal session (so the `distil` command can read them):
 
@@ -202,6 +210,8 @@ This should print `key set? yes` and your model string. If not, redo step 2.
 ```
 $ pytest -m eval -v
 ```
+> Always use `-v` (verbose). Without it pytest prints nothing until all tests finish — evals
+> take ~2 minutes and the silence can look like a hang.
 
 ### 6.3 Read the results — this IS the scoring
 pytest prints one line per test. Here's how to interpret them:
@@ -221,12 +231,12 @@ pytest prints one line per test. Here's how to interpret them:
 
 ### 6.4 Run the full suite (unit + eval) once, to confirm everything is green together
 ```
-$ pytest -m "unit or eval"
+$ pytest -m "unit or eval" -v
 ```
-Expect a line like `XXX passed` (≈135 unit + the eval tests). If unit tests fail but evals
+Expect a line like `XXX passed` (≈154 unit + the eval tests). If unit tests fail but evals
 were untouched, something in your environment differs — tell me what failed.
 
-> The fast, no-key, no-cost suite you can run anytime is just: `$ pytest tests/unit`
+> The fast, no-key, no-cost suite you can run anytime is just: `$ pytest tests/unit -v`
 
 ---
 
@@ -321,7 +331,7 @@ $ distil ask "your question"               # query your notes
 ```
 
 ## What I (the builder) already verified vs. what needs YOU
-- ✅ Done & verified by me: all code, 135 unit tests green, lint clean, the faithfulness and
+- ✅ Done & verified by me: all code, 154 unit tests green, lint clean, the faithfulness and
   abstention guarantees reviewed in code.
 - ⬜ Needs you (this runbook): install on a 3.11 machine, add your API key, run the **eval
   suite** (only your key can), push commits + the `v0.0.1` tag, and (optionally) deploy.

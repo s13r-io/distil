@@ -1,0 +1,307 @@
+{% extends "base.html" %}
+{% block content %}
+
+<section class="card">
+  <label class="label" for="q">Ask your notes</label>
+  <textarea id="q" placeholder="e.g. What did I learn about naming functions?" style="margin-top:10px;"></textarea>
+  <div class="row" style="margin-top:12px;">
+    <button class="primary" id="ask-btn" style="flex:1;">Ask</button>
+    <label class="row" style="font-size:13px; color:var(--text-2); white-space:nowrap;">
+      <input type="checkbox" id="lookup" style="width:auto; min-height:auto;"> Sources only
+    </label>
+  </div>
+  <div id="ask-status" class="banner info hide"><span class="spinner"></span>Searching your notes…</div>
+  <div id="ask-result" class="hide" style="margin-top:14px;">
+    <p class="muted" style="margin:0 0 8px;">Answer</p>
+    <div class="ask-answer" id="ask-answer"></div>
+    <div id="ask-conflict" class="banner warn hide"></div>
+    <div id="ask-sources"></div>
+  </div>
+  <div id="ask-abstain" class="banner info hide"></div>
+</section>
+
+<section class="card collapsed" id="add-panel">
+  <button type="button" class="collapse-head" id="add-head" aria-expanded="false" aria-controls="add-panel">
+    <span class="label">Add knowledge</span>
+    <span class="chev">▾</span>
+  </button>
+  <div class="collapse-body" style="margin-top:12px;">
+    <textarea id="paste" placeholder="Paste a transcript…"></textarea>
+    <div class="row wrap" style="margin-top:10px;">
+      <input type="file" id="file" accept=".srt,.txt,.md" style="flex:1; border:none; padding-left:0;">
+    </div>
+    <div id="add-msg" class="muted" style="margin-top:8px;"></div>
+    <div class="sticky-bar">
+      <button class="primary" id="distil-btn" style="flex:1;">Distil it</button>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <div class="section-head">
+    <h2>Activity</h2>
+    <span class="row" style="gap:12px;">
+      <a href="#" id="clear-finished" class="hide" style="font-size:12px;">Clear finished</a>
+      <a href="#" id="clear-failed" class="hide" style="font-size:12px;">Clear failed</a>
+    </span>
+  </div>
+  <div id="activity"><p class="muted" id="activity-empty">No distill jobs yet — add a transcript above.</p></div>
+</section>
+
+<section class="card">
+  <div class="section-head">
+    <h2>Library</h2>
+    <span class="muted" id="lib-count">{{ entries|length }} entries</span>
+  </div>
+
+  <div class="row" style="margin-bottom:10px;">
+    <select id="sort" style="width:auto;">
+      <option value="newest">Newest</option>
+      <option value="oldest">Oldest</option>
+    </select>
+    <a href="#" id="clear-filters" class="hide muted">Clear all</a>
+    <span class="muted" id="lib-showing" style="margin-left:auto;"></span>
+  </div>
+
+  <div class="row wrap" id="filter-chips" style="margin-bottom:12px;">
+    <button type="button" class="chip" data-filter="scored" aria-pressed="false">Scored</button>
+    <button type="button" class="chip" data-filter="unscored" aria-pressed="false">Unscored</button>
+    <button type="button" class="chip" data-filter="star5" aria-pressed="false">5★</button>
+    <button type="button" class="chip" data-filter="star4" aria-pressed="false">4★</button>
+    <button type="button" class="chip" data-filter="star3" aria-pressed="false">3★</button>
+    {% for t in all_tags %}<button type="button" class="chip" data-tag="{{ t }}" aria-pressed="false">{{ t }}</button>{% endfor %}
+  </div>
+
+  <div id="lib-list"></div>
+  {% if not entries %}
+  <div class="empty" id="lib-empty">
+    <p style="margin:0 0 4px;">No entries yet</p>
+    <p class="muted" style="margin:0;">Add a transcript above to build your knowledge base.</p>
+  </div>
+  {% endif %}
+  <div style="text-align:center; margin-top:12px;">
+    <button id="show-more" class="hide">Show more</button>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script id="entry-data" type="application/json">{{ entries|tojson }}</script>
+<script>
+const ENTRIES = JSON.parse(document.getElementById('entry-data').textContent);
+
+/* ---------- Ask ---------- */
+const askBtn = document.getElementById('ask-btn');
+const qEl = document.getElementById('q');
+function esc(s){const d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML;}
+function resetAsk(){
+  document.getElementById('ask-result').classList.add('hide');
+  document.getElementById('ask-abstain').classList.add('hide');
+  document.getElementById('ask-conflict').classList.add('hide');
+  document.getElementById('ask-answer').innerHTML='';
+  document.getElementById('ask-sources').innerHTML='';
+}
+function renderSources(srcs){
+  if(!srcs||!srcs.length) return '';
+  let h='<p class="muted" style="margin:14px 0 8px;">Sources · '+srcs.length+'</p>';
+  for(const s of srcs){
+    const ts=s.timestamp?(' @ '+esc(s.timestamp)):'';
+    h+='<a class="source" href="/entries/'+encodeURIComponent(s.entry_id)+'#'+esc(s.item_id)+'">'
+      +'<span class="q">"'+esc(s.quote)+'"</span>'
+      +'<span class="ref">'+esc(s.entry_id)+' · '+esc(s.item_id)+ts+' →</span></a>';
+  }
+  return h;
+}
+function showFinal(p){
+  if(p.abstained){
+    const a=document.getElementById('ask-abstain');
+    a.textContent=p.message; a.classList.remove('hide'); return;
+  }
+  document.getElementById('ask-result').classList.remove('hide');
+  if(p.answer!=null) document.getElementById('ask-answer').textContent=p.answer;
+  if(p.conflict){const c=document.getElementById('ask-conflict');c.textContent='⚠ '+p.conflict;c.classList.remove('hide');}
+  document.getElementById('ask-sources').innerHTML=renderSources(p.sources);
+}
+askBtn.addEventListener('click', async () => {
+  const q=qEl.value.trim(); if(!q) return;
+  const lookup=document.getElementById('lookup').checked;
+  resetAsk();
+  document.getElementById('ask-status').classList.remove('hide');
+  askBtn.disabled=true;
+  try{
+    if(lookup){
+      const r=await fetch('/ask?q='+encodeURIComponent(q)+'&lookup=true',{headers:{accept:'application/json'}});
+      showFinal(await r.json());
+    } else {
+      await streamAsk(q);
+    }
+  }catch(e){
+    const a=document.getElementById('ask-abstain');
+    a.textContent='Something went wrong. Please try again.'; a.classList.remove('hide');
+  }finally{
+    document.getElementById('ask-status').classList.add('hide');
+    askBtn.disabled=false;
+  }
+});
+async function streamAsk(q){
+  const res=await fetch('/ask/stream?q='+encodeURIComponent(q),{headers:{accept:'text/event-stream'}});
+  if(!res.ok || !res.body){ // fallback to all-at-once JSON
+    const r=await fetch('/ask?q='+encodeURIComponent(q),{headers:{accept:'application/json'}});
+    showFinal(await r.json()); return;
+  }
+  const reader=res.body.getReader(); const dec=new TextDecoder(); let buf='';
+  let answerStarted=false; const ansEl=document.getElementById('ask-answer');
+  while(true){
+    const {done,value}=await reader.read(); if(done) break;
+    buf+=dec.decode(value,{stream:true});
+    const parts=buf.split('\n\n'); buf=parts.pop();
+    for(const part of parts){
+      const line=part.replace(/^data: /,'').trim(); if(!line) continue;
+      let ev; try{ev=JSON.parse(line);}catch(_){continue;}
+      if(ev.type==='delta'){
+        if(!answerStarted){answerStarted=true;document.getElementById('ask-status').classList.add('hide');document.getElementById('ask-result').classList.remove('hide');document.querySelector('#ask-result .muted').textContent='Answer';}
+        ansEl.textContent+=ev.text;
+      }else if(ev.type==='abstain'){
+        const a=document.getElementById('ask-abstain');a.textContent=ev.message;a.classList.remove('hide');
+      }else if(ev.type==='error'){
+        resetAsk();const a=document.getElementById('ask-abstain');a.className='banner danger';
+        a.innerHTML='Answer interrupted. <a href="#" id="retry">Retry</a>';a.classList.remove('hide');
+        document.getElementById('retry').onclick=(e)=>{e.preventDefault();a.className='banner info';askBtn.click();};
+      }else if(ev.type==='final'){
+        if(ev.conflict){const c=document.getElementById('ask-conflict');c.textContent='⚠ '+ev.conflict;c.classList.remove('hide');}
+        document.getElementById('ask-sources').innerHTML=renderSources(ev.sources);
+      }
+    }
+  }
+}
+
+/* ---------- Add knowledge ---------- */
+document.getElementById('add-head').addEventListener('click',()=>{
+  const panel=document.getElementById('add-panel');
+  panel.classList.toggle('collapsed');
+  document.getElementById('add-head').setAttribute('aria-expanded', !panel.classList.contains('collapsed'));
+});
+document.getElementById('distil-btn').addEventListener('click', async () => {
+  const fd=new FormData();
+  const file=document.getElementById('file').files[0];
+  const paste=document.getElementById('paste').value;
+  if(file) fd.append('file',file); else fd.append('paste',paste);
+  const msg=document.getElementById('add-msg');
+  if(!file && !paste.trim()){msg.textContent='Paste a transcript or choose a file first.';return;}
+  const btn=document.getElementById('distil-btn'); btn.disabled=true;
+  try{
+    const r=await fetch('/ingest',{method:'POST',body:fd});
+    if(r.ok){
+      document.getElementById('paste').value=''; document.getElementById('file').value='';
+      const panel=document.getElementById('add-panel');
+      panel.classList.add('collapsed');
+      document.getElementById('add-head').setAttribute('aria-expanded','false');
+      msg.textContent=''; loadJobs();
+    }else{const d=await r.json();msg.textContent=d.detail||'Could not queue.';}
+  }finally{btn.disabled=false;}
+});
+
+/* ---------- Activity ---------- */
+const ACTIVE=new Set(['queued','running']);
+let _jobsPollTimer=null;
+let _jobsLoading=false;
+function jobBadge(s){
+  const map={queued:['','Queued'],running:['info','<span class="spinner"></span>Distilling'],
+    done:['ok','✓ Done'],low_value:['warn','Low-value'],failed:['danger','Failed']};
+  const [cls,txt]=map[s]||['','?'];
+  return '<span class="badge '+cls+'">'+txt+'</span>';
+}
+async function loadJobs(){
+  if(_jobsLoading) return;
+  _jobsLoading=true;
+  if(_jobsPollTimer){clearTimeout(_jobsPollTimer);_jobsPollTimer=null;}
+  try{
+    const r=await fetch('/jobs',{headers:{accept:'application/json'}});
+    if(!r.ok) return;
+    const jobs=await r.json();
+    const box=document.getElementById('activity');
+    if(!jobs.length){box.innerHTML='<p class="muted">No distill jobs yet — add a transcript above.</p>';}
+    else{
+      box.innerHTML=jobs.map(j=>{
+        let detail='';
+        if(j.status==='done') detail='<a href="/entries/'+encodeURIComponent(j.entry_id)+'">'+esc(j.summary||'')+' · View entry →</a>';
+        else if(j.status==='low_value') detail=esc(j.summary||'');
+        else if(j.status==='failed') detail='<span style="color:var(--danger)">'+esc(j.error||'failed')+'</span> · <a href="#" data-retry="'+j.job_id+'">Retry</a>';
+        else if(j.status==='queued') detail='<a href="#" data-remove="'+j.job_id+'">Remove</a>';
+        else if(j.status==='running') detail='extracting items…';
+        return '<div class="jobrow"><div class="top"><span>'+esc(j.title)+'</span>'+jobBadge(j.status)+'</div>'
+          +'<div class="meta-line muted">'+detail+'</div></div>';
+      }).join('');
+    }
+    const hasFinished=jobs.some(j=>['done','low_value','removed'].includes(j.status));
+    const hasFailed=jobs.some(j=>j.status==='failed');
+    document.getElementById('clear-finished').classList.toggle('hide',!hasFinished);
+    document.getElementById('clear-failed').classList.toggle('hide',!hasFailed);
+    // wire row actions
+    box.querySelectorAll('[data-remove]').forEach(a=>a.onclick=async e=>{e.preventDefault();await fetch('/jobs/'+a.dataset.remove+'/remove',{method:'POST'});loadJobs();});
+    box.querySelectorAll('[data-retry]').forEach(a=>a.onclick=async e=>{e.preventDefault();await fetch('/jobs/'+a.dataset.retry+'/retry',{method:'POST'});loadJobs();});
+    // keep polling while any job is active
+    if(jobs.some(j=>ACTIVE.has(j.status))) _jobsPollTimer=setTimeout(loadJobs,2000);
+  }finally{
+    _jobsLoading=false;
+  }
+}
+document.getElementById('clear-finished').onclick=async e=>{e.preventDefault();await fetch('/jobs/clear?scope=finished',{method:'POST'});loadJobs();};
+document.getElementById('clear-failed').onclick=async e=>{e.preventDefault();await fetch('/jobs/clear?scope=failed',{method:'POST'});loadJobs();};
+loadJobs();
+
+/* ---------- Library ---------- */
+const PAGE=20; let shown=PAGE;
+const activeTags=new Set(); const activeFilters=new Set();
+function matches(en){
+  for(const f of activeFilters){
+    if(f==='scored' && en.score==null) return false;
+    if(f==='unscored' && en.score!=null) return false;
+    if(f.startsWith('star') && en.score!=Number(f.slice(4))) return false;
+  }
+  if(activeTags.size){
+    const tags=new Set([...(en.topics||[]),...(en.knowledge_types||[])]);
+    for(const t of activeTags) if(!tags.has(t)) return false;
+  }
+  return true;
+}
+function renderLib(){
+  const sort=document.getElementById('sort').value;
+  let list=ENTRIES.filter(matches);
+  list.sort((a,b)=> sort==='oldest' ? (a.created_at>b.created_at?1:-1) : (a.created_at<b.created_at?1:-1));
+  const total=list.length; const view=list.slice(0,shown);
+  document.getElementById('lib-list').innerHTML=view.map(en=>{
+    const badge = en.score!=null
+      ? '<span class="badge ok">★ '+en.score+'</span>'
+      : '<span class="badge">unscored</span>';
+    const tags=[...(en.topics||[]),...(en.knowledge_types||[])].slice(0,3)
+      .map(t=>'<span class="badge">'+esc(t)+'</span>').join(' ');
+    return '<a class="entryrow" href="/entries/'+encodeURIComponent(en.entry_id)+'">'
+      +'<div class="top"><span>'+esc(en.title)+'</span>'+badge+'</div>'
+      +'<div class="meta-line">'+tags+'</div></a>';
+  }).join('');
+  const filtered = activeTags.size||activeFilters.size;
+  document.getElementById('lib-showing').textContent = filtered ? ('showing '+total+' of '+ENTRIES.length) : '';
+  document.getElementById('clear-filters').classList.toggle('hide',!filtered);
+  document.getElementById('show-more').classList.toggle('hide', shown>=total);
+  const empty=document.getElementById('lib-empty'); if(empty) empty.classList.toggle('hide', total>0);
+}
+document.getElementById('sort').onchange=renderLib;
+document.getElementById('show-more').onclick=()=>{shown+=PAGE;renderLib();};
+document.querySelectorAll('#filter-chips .chip').forEach(chip=>{
+  chip.onclick=()=>{
+    const isOn=chip.classList.toggle('on');
+    chip.setAttribute('aria-pressed', String(isOn));
+    if(chip.dataset.tag){isOn?activeTags.add(chip.dataset.tag):activeTags.delete(chip.dataset.tag);}
+    else{isOn?activeFilters.add(chip.dataset.filter):activeFilters.delete(chip.dataset.filter);}
+    shown=PAGE; renderLib();
+  };
+});
+document.getElementById('clear-filters').onclick=e=>{
+  e.preventDefault(); activeTags.clear(); activeFilters.clear();
+  document.querySelectorAll('#filter-chips .chip.on').forEach(c=>{c.classList.remove('on');c.setAttribute('aria-pressed','false');});
+  shown=PAGE; renderLib();
+};
+renderLib();
+</script>
+{% endblock %}

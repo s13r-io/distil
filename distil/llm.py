@@ -12,6 +12,7 @@ string; ARCHITECTURE.md §1).
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -22,6 +23,14 @@ class LLMClient(Protocol):
 
     def complete(self, prompt: str, *, system: str | None = None) -> str:
         """Return the model's text completion for ``prompt`` (optionally guided by ``system``)."""
+        ...
+
+    def stream(self, prompt: str, *, system: str | None = None) -> Iterator[str]:
+        """Yield text deltas for ``prompt``. Providers without native streaming may yield once.
+
+        Optional in practice: callers should fall back to :meth:`complete` if a client doesn't
+        implement streaming (WEB_UI_SPEC §9 safety valve).
+        """
         ...
 
 
@@ -50,6 +59,13 @@ class FakeClient:
         response = self._responses[self._cursor]
         self._cursor += 1
         return response
+
+    def stream(self, prompt: str, *, system: str | None = None):
+        """Yield the next canned response in word-sized chunks (records the call like complete)."""
+        response = self.complete(prompt, system=system)
+        words = response.split(" ")
+        for i, w in enumerate(words):
+            yield (w if i == 0 else " " + w)
 
     @property
     def call_count(self) -> int:
@@ -99,3 +115,25 @@ class AnthropicClient:
             kwargs["system"] = system
         message = client.messages.create(**kwargs)
         return "".join(block.text for block in message.content if block.type == "text")
+
+    def stream(self, prompt: str, *, system: str | None = None):  # pragma: no cover - network
+        if not self._api_key:
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set. Add it to your .env (see .env.example) to use "
+                "the Anthropic provider, or inject a different LLMClient."
+            )
+        try:
+            import anthropic
+        except ImportError as exc:
+            raise RuntimeError(
+                "The 'anthropic' package is not installed. Install it with "
+                "`pip install distil[anthropic]`."
+            ) from exc
+
+        client = anthropic.Anthropic(api_key=self._api_key)
+        kwargs: dict = {"model": self.model, "max_tokens": 4096,
+                        "messages": [{"role": "user", "content": prompt}]}
+        if system:
+            kwargs["system"] = system
+        with client.messages.stream(**kwargs) as stream:
+            yield from stream.text_stream
