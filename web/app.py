@@ -66,7 +66,11 @@ def _distill_job(job: jobsmod.Job) -> dict:
     store = _store()
     profile = store.load_profile(_USER_ID) or _default_profile()
     if job.kind == "file":
-        transcript = ingest_file(job.payload)
+        p = Path(job.payload)
+        try:
+            transcript = ingest_file(str(p))
+        finally:
+            p.unlink(missing_ok=True)
     else:
         transcript = ingest_text(job.payload)
     client = _make_client()

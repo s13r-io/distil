@@ -233,7 +233,7 @@ pytest prints one line per test. Here's how to interpret them:
 ```
 $ pytest -m "unit or eval" -v
 ```
-Expect a line like `XXX passed` (≈136 unit + the eval tests). If unit tests fail but evals
+Expect a line like `XXX passed` (≈154 unit + the eval tests). If unit tests fail but evals
 were untouched, something in your environment differs — tell me what failed.
 
 > The fast, no-key, no-cost suite you can run anytime is just: `$ pytest tests/unit -v`
@@ -331,7 +331,7 @@ $ distil ask "your question"               # query your notes
 ```
 
 ## What I (the builder) already verified vs. what needs YOU
-- ✅ Done & verified by me: all code, 135 unit tests green, lint clean, the faithfulness and
+- ✅ Done & verified by me: all code, 154 unit tests green, lint clean, the faithfulness and
   abstention guarantees reviewed in code.
 - ⬜ Needs you (this runbook): install on a 3.11 machine, add your API key, run the **eval
   suite** (only your key can), push commits + the `v0.0.1` tag, and (optionally) deploy.

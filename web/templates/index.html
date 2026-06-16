@@ -199,6 +199,8 @@ document.getElementById('distil-btn').addEventListener('click', async () => {
 
 /* ---------- Activity ---------- */
 const ACTIVE=new Set(['queued','running']);
+let _jobsPollTimer=null;
+let _jobsLoading=false;
 function jobBadge(s){
   const map={queued:['','Queued'],running:['info','<span class="spinner"></span>Distilling'],
     done:['ok','✓ Done'],low_value:['warn','Low-value'],failed:['danger','Failed']};
@@ -206,8 +208,11 @@ function jobBadge(s){
   return '<span class="badge '+cls+'">'+txt+'</span>';
 }
 async function loadJobs(){
+  if(_jobsLoading) return;
+  _jobsLoading=true;
+  if(_jobsPollTimer){clearTimeout(_jobsPollTimer);_jobsPollTimer=null;}
   const r=await fetch('/jobs',{headers:{accept:'application/json'}});
-  if(!r.ok) return; const jobs=await r.json();
+  if(!r.ok){_jobsLoading=false;return;} const jobs=await r.json();
   const box=document.getElementById('activity');
   if(!jobs.length){box.innerHTML='<p class="muted">No distill jobs yet — add a transcript above.</p>';}
   else{
@@ -230,7 +235,8 @@ async function loadJobs(){
   box.querySelectorAll('[data-remove]').forEach(a=>a.onclick=async e=>{e.preventDefault();await fetch('/jobs/'+a.dataset.remove+'/remove',{method:'POST'});loadJobs();});
   box.querySelectorAll('[data-retry]').forEach(a=>a.onclick=async e=>{e.preventDefault();await fetch('/jobs/'+a.dataset.retry+'/retry',{method:'POST'});loadJobs();});
   // keep polling while any job is active
-  if(jobs.some(j=>ACTIVE.has(j.status))) setTimeout(loadJobs,2000);
+    _jobsLoading=false;
+  if(jobs.some(j=>ACTIVE.has(j.status))) _jobsPollTimer=setTimeout(loadJobs,2000);
 }
 document.getElementById('clear-finished').onclick=async e=>{e.preventDefault();await fetch('/jobs/clear?scope=finished',{method:'POST'});loadJobs();};
 document.getElementById('clear-failed').onclick=async e=>{e.preventDefault();await fetch('/jobs/clear?scope=failed',{method:'POST'});loadJobs();};

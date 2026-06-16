@@ -146,14 +146,18 @@ class JobStore:
 
     def claim_next_queued(self) -> Job | None:
         """Atomically move the oldest queued job to running and return it."""
-        r = self._conn.execute(
-            "SELECT * FROM jobs WHERE status=? ORDER BY created_at ASC LIMIT 1",
-            (STATUS_QUEUED,),
-        ).fetchone()
-        if not r:
-            return None
-        job = self._row(r)
-        self._set_status(job.job_id, STATUS_RUNNING)
+        with self._conn:
+            r = self._conn.execute(
+                "SELECT * FROM jobs WHERE status=? ORDER BY created_at ASC LIMIT 1",
+                (STATUS_QUEUED,),
+            ).fetchone()
+            if not r:
+                return None
+            job = self._row(r)
+            self._conn.execute(
+                "UPDATE jobs SET status=?, updated_at=? WHERE job_id=? AND status=?",
+                (STATUS_RUNNING, _now(), job.job_id, STATUS_QUEUED),
+            )
         job.status = STATUS_RUNNING
         return job
 
@@ -273,6 +277,7 @@ class Worker:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        self._stop.clear()
         # Recover interrupted jobs on its own connection before the loop begins.
         JobStore(self._db_path).recover_interrupted()
         self._thread = threading.Thread(target=self._run, name="distil-worker", daemon=True)
@@ -317,7 +322,7 @@ class Worker:
             )
         elif status == STATUS_DONE:
             store.mark_done(
-                job.job_id, entry_id=result["entry_id"], summary=result.get("summary", ""),
+                job.job_id, entry_id=result.get("entry_id", ""), summary=result.get("summary", ""),
             )
         else:
             store.mark_failed(job.job_id, error=result.get("error", "unknown pipeline result"))

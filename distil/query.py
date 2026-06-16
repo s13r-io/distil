@@ -196,7 +196,13 @@ def stream_ask(
 
     chunks: list[str] = []
     try:
-        for delta in client.stream(prompt, system=SYSTEM):
+        stream_iter = client.stream(prompt, system=SYSTEM)
+    except (AttributeError, NotImplementedError):
+        # Fallback: client only implements complete() — yield the full response as one chunk
+        stream_iter = iter([client.complete(prompt, system=SYSTEM)])
+
+    try:
+        for delta in stream_iter:
             if not delta:
                 continue
             chunks.append(delta)
