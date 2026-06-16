@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import os
 
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from distil.cli import _make_client, _make_embedder  # reuse seams
 from distil.profile_update import apply_feedback
@@ -34,13 +34,29 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
         if not auth.path_is_open(request.url.path):
-            if not auth.request_is_authorized(request.headers.get("Authorization")):
+            if not auth.request_is_authorized(request):
+                # Browser requests → redirect to login; API requests → 401
+                accepts_html = "text/html" in request.headers.get("accept", "")
+                if accepts_html:
+                    return RedirectResponse(url="/login", status_code=303)
                 return JSONResponse({"detail": "Unauthorized"}, status_code=401)
         return await call_next(request)
 
     @app.get("/health")
     def health():
         return {"status": "ok"}
+
+    @app.get("/login", response_class=HTMLResponse)
+    def login_get():
+        return auth.login_page()
+
+    @app.post("/login")
+    def login_post(secret: str = Form(...)):
+        return auth.login_response(secret)
+
+    @app.get("/logout")
+    def logout():
+        return auth.logout_response()
 
     @app.get("/", response_class=HTMLResponse)
     def index():
@@ -56,6 +72,7 @@ def create_app() -> FastAPI:
             '<form action="/ask" method="get"><input name="q" placeholder="Ask your notes…">'
             '<button>Ask</button></form>'
             f"<ul>{items or '<li>No entries yet.</li>'}</ul>"
+            '<p><a href="/logout">Sign out</a></p>'
             "</body></html>"
         )
 

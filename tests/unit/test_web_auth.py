@@ -47,18 +47,26 @@ def test_a1_public_with_secret_starts(seeded, monkeypatch):
 
 
 @pytest.mark.unit
-def test_a2_public_data_route_requires_auth(seeded, monkeypatch):
+def test_a2_public_data_route_redirects_browser_to_login(seeded, monkeypatch):
     monkeypatch.setenv("DISTIL_PUBLIC", "true")
     monkeypatch.setenv("DISTIL_AUTH_SECRET", "s3cret")
-    client = TestClient(create_app())
-    r = client.get("/entries")
-    assert r.status_code == 401
-    # never leaks data
-    assert "entry" not in r.text.lower() or "unauthor" in r.text.lower()
+    client = TestClient(create_app(), follow_redirects=False)
+    r = client.get("/entries", headers={"accept": "text/html"})
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login"
 
 
 @pytest.mark.unit
-def test_a2_public_data_route_with_secret_ok(seeded, monkeypatch):
+def test_a2_public_data_route_returns_401_for_api(seeded, monkeypatch):
+    monkeypatch.setenv("DISTIL_PUBLIC", "true")
+    monkeypatch.setenv("DISTIL_AUTH_SECRET", "s3cret")
+    client = TestClient(create_app())
+    r = client.get("/entries", headers={"accept": "application/json"})
+    assert r.status_code == 401
+
+
+@pytest.mark.unit
+def test_a2_public_data_route_with_bearer_ok(seeded, monkeypatch):
     monkeypatch.setenv("DISTIL_PUBLIC", "true")
     monkeypatch.setenv("DISTIL_AUTH_SECRET", "s3cret")
     client = TestClient(create_app())
@@ -114,3 +122,63 @@ def test_index_page_renders(seeded, monkeypatch):
     r = client.get("/")
     assert r.status_code == 200
     assert "Distil" in r.text
+
+
+# ---- login / logout flow ----
+
+
+@pytest.mark.unit
+def test_login_page_renders(seeded, monkeypatch):
+    monkeypatch.setenv("DISTIL_PUBLIC", "true")
+    monkeypatch.setenv("DISTIL_AUTH_SECRET", "s3cret")
+    client = TestClient(create_app())
+    r = client.get("/login")
+    assert r.status_code == 200
+    assert "Sign in" in r.text
+
+
+@pytest.mark.unit
+def test_login_correct_secret_sets_cookie_and_redirects(seeded, monkeypatch):
+    monkeypatch.setenv("DISTIL_PUBLIC", "true")
+    monkeypatch.setenv("DISTIL_AUTH_SECRET", "s3cret")
+    client = TestClient(create_app(), follow_redirects=False)
+    r = client.post("/login", data={"secret": "s3cret"})
+    assert r.status_code == 303
+    assert r.headers["location"] == "/"
+    assert "distil_session" in r.cookies
+
+
+@pytest.mark.unit
+def test_login_wrong_secret_shows_error(seeded, monkeypatch):
+    monkeypatch.setenv("DISTIL_PUBLIC", "true")
+    monkeypatch.setenv("DISTIL_AUTH_SECRET", "s3cret")
+    client = TestClient(create_app())
+    r = client.post("/login", data={"secret": "wrongpassword"})
+    assert r.status_code == 200
+    assert "Incorrect secret" in r.text
+
+
+@pytest.mark.unit
+def test_session_cookie_grants_access(seeded, monkeypatch):
+    monkeypatch.setenv("DISTIL_PUBLIC", "true")
+    monkeypatch.setenv("DISTIL_AUTH_SECRET", "s3cret")
+    # Use https base URL so httpx honours the Secure cookie flag (mirrors Railway HTTPS)
+    client = TestClient(create_app(), follow_redirects=False, base_url="https://testserver")
+    # Log in to get the cookie
+    login = client.post("/login", data={"secret": "s3cret"})
+    assert "distil_session" in login.cookies
+    # Cookie is automatically sent on subsequent requests by TestClient
+    r = client.get("/entries")
+    assert r.status_code == 200
+
+
+@pytest.mark.unit
+def test_logout_clears_cookie(seeded, monkeypatch):
+    monkeypatch.setenv("DISTIL_PUBLIC", "true")
+    monkeypatch.setenv("DISTIL_AUTH_SECRET", "s3cret")
+    # Use https base URL so httpx honours the Secure cookie flag (mirrors Railway HTTPS)
+    client = TestClient(create_app(), follow_redirects=False, base_url="https://testserver")
+    client.post("/login", data={"secret": "s3cret"})
+    r = client.get("/logout")
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login"
