@@ -8,7 +8,7 @@ builder = "dockerfile"
 
 [deploy]
 # The app MUST bind 0.0.0.0 and the port Railway injects as $PORT — there is no port mapping layer.
-startCommand = "uvicorn web.app:app --host 0.0.0.0 --port $PORT"
+startCommand = "sh -c 'uvicorn web.app:app --host 0.0.0.0 --port ${PORT:-8000}'"
 # A lightweight health endpoint the platform can poll.
 healthcheckPath = "/health"
 healthcheckTimeout = 30
