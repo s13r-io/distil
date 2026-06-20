@@ -6,17 +6,23 @@ from distil.models import KBEntry
 from distil.store import Store
 
 
-def _entry(entry_id: str = "e_01", title: str = "A talk", score: int | None = None) -> KBEntry:
-    return KBEntry(
-        entry_id=entry_id,
-        source={"title": title, "captured_at": "2026-06-15T00:00:00"},
-        triage={
+def _entry(
+    entry_id: str = "e_01",
+    title: str = "A talk",
+    score: int | None = None,
+    *,
+    with_note: bool = False,
+) -> KBEntry:
+    data = {
+        "entry_id": entry_id,
+        "source": {"title": title, "captured_at": "2026-06-15T00:00:00"},
+        "triage": {
             "knowledge_types_present": [{"type": "heuristic", "share": 1.0}],
             "density": "high",
             "transcript_loss": {"level": "low", "evidence": []},
             "verdict": "rich",
         },
-        knowledge_items=[
+        "knowledge_items": [
             {
                 "item_id": "k_01",
                 "type": "heuristic",
@@ -25,10 +31,21 @@ def _entry(entry_id: str = "e_01", title: str = "A talk", score: int | None = No
                 "provenance": {"quote": "keep functions small", "timestamp": "00:12:30"},
             }
         ],
-        tags={"topics": ["python"], "knowledge_types": ["heuristic"], "application_forms": []},
-        feedback={"score": score} if score is not None else {},
-        meta={"created_at": "2026-06-15T00:00:00", "model_version": "test"},
-    )
+        "tags": {"topics": ["python"], "knowledge_types": ["heuristic"], "application_forms": []},
+        "feedback": {"score": score} if score is not None else {},
+        "meta": {"created_at": "2026-06-15T00:00:00", "model_version": "test"},
+    }
+    if with_note:
+        data["distilled_note"] = {
+            "title": "Small functions",
+            "core_takeaway": {
+                "text": "Small functions are easier to understand.",
+                "item_ids": ["k_01"],
+            },
+            "key_points": [{"text": "Keep one behavior per function.", "item_ids": ["k_01"]}],
+            "topics": ["python"],
+        }
+    return KBEntry.model_validate(data)
 
 
 @pytest.fixture
@@ -60,6 +77,16 @@ def test_front_matter_round_trips_to_entry(store):
     store.file_entry(entry)
     reloaded = store.load_entry("e_01")
     assert reloaded == entry
+
+
+@pytest.mark.unit
+def test_new_note_entries_render_teaching_note_and_evidence(store):
+    path = store.file_entry(_entry(with_note=True))
+    text = path.read_text()
+    assert "## Core takeaway" in text
+    assert "Small functions are easier to understand." in text
+    assert "## Evidence" in text
+    assert "keep functions small" in text
 
 
 # ---- T-S2: index row inserted; re-filing same id updates, not duplicates ----

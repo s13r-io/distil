@@ -1,12 +1,13 @@
 # Distil — Personal Knowledge Distiller
 
-Turn a YouTube video transcript into faithfully extracted knowledge **and** concrete ideas
-for applying it to *your* goals — filed into a growing, cross-linked personal knowledge base
-that learns what's useful to you over time.
+Turn a YouTube video transcript into a useful teaching note backed by faithfully extracted
+evidence **and** concrete ideas for applying it to *your* goals — filed into a growing,
+cross-linked personal knowledge base that learns what's useful to you over time.
 
 Distil routes extraction by knowledge type, anchors every item to the transcript (no invented
-insights), and is honest when a video has little to offer. You score each result; the score
-plus a reason refines your profile, so it gets more personally useful the more you use it.
+insights), then synthesizes the verified items into a reader-facing note: core takeaway, key
+points, why it matters, how to apply it, caveats, and review questions. You score each result;
+the score plus a reason refines your profile, so it gets more personally useful the more you use it.
 
 > Status: **v0 / pre-release.** Built test-first. Self-hosted, single-user, MIT-licensed.
 
@@ -18,7 +19,8 @@ transcript + your profile
   → extract (routed by type, provenance-anchored)
   → normalize (atomic, faithful, stance-preserving)
   → link (application ideas tied to YOUR goals)
-  → file (markdown entry, cross-linked to your KB)
+  → synthesize (teaching note grounded in verified items)
+  → file (markdown note + evidence, cross-linked to your KB)
   → you score it → your profile improves
 
 later, ask your knowledge base questions:

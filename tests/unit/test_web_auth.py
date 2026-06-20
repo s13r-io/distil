@@ -7,7 +7,7 @@ secret, and never serve data to an unauthenticated request when public.
 import pytest
 from fastapi.testclient import TestClient
 
-from distil.models import Profile
+from distil.models import KBEntry, Profile
 from distil.store import Store
 from web import auth
 from web.app import create_app
@@ -122,6 +122,45 @@ def test_index_page_renders(seeded, monkeypatch):
     r = client.get("/")
     assert r.status_code == 200
     assert "Distil" in r.text
+
+
+@pytest.mark.unit
+def test_entry_page_renders_distilled_note(seeded, monkeypatch):
+    monkeypatch.setenv("DISTIL_PUBLIC", "false")
+    store = Store(db_path=seeded / "distil.db", kb_dir=seeded / "kb")
+    store.file_entry(KBEntry.model_validate({
+        "entry_id": "e_note",
+        "source": {"title": "A talk", "captured_at": "2026-06-15T00:00:00"},
+        "triage": {
+            "knowledge_types_present": [{"type": "heuristic", "share": 1.0}],
+            "density": "high",
+            "transcript_loss": {"level": "low", "evidence": []},
+            "verdict": "rich",
+        },
+        "knowledge_items": [{
+            "item_id": "k_01",
+            "type": "heuristic",
+            "statement": "Keep functions small.",
+            "stance": "opinion",
+            "provenance": {"quote": "keep functions small"},
+        }],
+        "distilled_note": {
+            "title": "Small functions",
+            "core_takeaway": {
+                "text": "Small functions are easier to understand.",
+                "item_ids": ["k_01"],
+            },
+            "key_points": [{"text": "Keep one behavior per function.", "item_ids": ["k_01"]}],
+            "topics": ["function_design"],
+        },
+        "meta": {"created_at": "2026-06-15T00:00:00", "model_version": "test"},
+    }))
+    client = TestClient(create_app())
+    r = client.get("/entries/e_note")
+    assert r.status_code == 200
+    assert "Teaching note" in r.text
+    assert "Core takeaway" in r.text
+    assert "Evidence" in r.text
 
 
 # ---- login / logout flow ----

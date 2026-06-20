@@ -29,6 +29,16 @@ _LINK = json.dumps([{
     "knowledge_item_ids": ["k_01"], "linked_goal_id": "g_01",
     "application_form": "checklist", "scenario": "refactor", "novelty_flag": False,
 }])
+_NOTE = json.dumps({
+    "title": "Small functions",
+    "core_takeaway": {"text": "Small functions are easier to reason about.", "item_ids": ["k_01"]},
+    "key_points": [],
+    "why_it_matters": [],
+    "how_to_apply": [],
+    "caveats": [],
+    "review_questions": [],
+    "topics": ["function design"],
+})
 
 
 @pytest.fixture
@@ -56,7 +66,7 @@ def _fake(monkeypatch, responses):
 
 @pytest.mark.unit
 def test_c1_run_file_exits_zero_and_prints_path(env, monkeypatch, tmp_path):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK])
+    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     src = tmp_path / "t.txt"
     src.write_text("Keep functions small and focused.")
     result = runner.invoke(cli.app, ["run", str(src), "--no-graph"])
@@ -66,7 +76,7 @@ def test_c1_run_file_exits_zero_and_prints_path(env, monkeypatch, tmp_path):
 
 @pytest.mark.unit
 def test_c1_run_paste_via_option(env, monkeypatch):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK])
+    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     result = runner.invoke(
         cli.app, ["run", "--paste", "Keep functions small and focused.", "--no-graph"]
     )
@@ -79,7 +89,7 @@ def test_c1_run_paste_via_option(env, monkeypatch):
 
 @pytest.mark.unit
 def test_c2_score_mutates_profile(env, monkeypatch):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK])
+    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     run = runner.invoke(cli.app, ["run", "--paste", "Keep functions small.", "--no-graph"])
     entry_id = run.output.strip().split("/")[-1].replace(".md", "").strip()
 
@@ -95,7 +105,7 @@ def test_c2_score_mutates_profile(env, monkeypatch):
 
 @pytest.mark.unit
 def test_c3_list_and_show(env, monkeypatch):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK])
+    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     run = runner.invoke(cli.app, ["run", "--paste", "Keep functions small.", "--no-graph"])
     entry_id = run.output.strip().split("/")[-1].replace(".md", "").strip()
 
@@ -106,6 +116,7 @@ def test_c3_list_and_show(env, monkeypatch):
     show = runner.invoke(cli.app, ["show", entry_id])
     assert show.exit_code == 0
     assert "Keep functions small." in show.output
+    assert "Core takeaway" in show.output
 
 
 @pytest.mark.unit

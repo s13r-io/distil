@@ -162,6 +162,42 @@ def test_kbentry_round_trip_lossless():
     dumped = entry.model_dump_json()
     restored = KBEntry.model_validate_json(dumped)
     assert restored == entry
+    assert restored.distilled_note is None
+
+
+@pytest.mark.unit
+def test_kbentry_round_trip_with_distilled_note():
+    entry = KBEntry(
+        entry_id="e_01",
+        source={"title": "A talk", "captured_at": "2026-06-15T00:00:00"},
+        triage={
+            "knowledge_types_present": [{"type": "heuristic", "share": 1.0}],
+            "density": "high",
+            "transcript_loss": {"level": "low", "evidence": []},
+            "verdict": "rich",
+        },
+        knowledge_items=[
+            KnowledgeItem(
+                item_id="k_01",
+                type="heuristic",
+                statement="Keep functions small.",
+                stance="opinion",
+                provenance={"quote": "keep functions small"},
+            )
+        ],
+        distilled_note={
+            "title": "Small functions",
+            "core_takeaway": {
+                "text": "Small functions are easier to reason about.",
+                "item_ids": ["k_01"],
+            },
+            "topics": ["function_design"],
+        },
+        meta={"created_at": "2026-06-15T00:00:00", "model_version": "test"},
+    )
+    restored = KBEntry.model_validate_json(entry.model_dump_json())
+    assert restored == entry
+    assert restored.distilled_note.core_takeaway.item_ids == ["k_01"]
 
 
 @pytest.mark.unit

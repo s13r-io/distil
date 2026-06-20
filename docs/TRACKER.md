@@ -64,10 +64,16 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 | 7.1 | Candidate lookup (T-G1)         | done   | ✅ | ✅ | ✅ | agent | deterministic topic-overlap lookup (type alone too broad); no candidates → no LLM call |
 | 7.2 | Relation classify (T-G2)        | done   | ✅ | ✅ | ✅ | agent | LLM labels each candidate; only enum relations kept; 'none'/invalid dropped; capped at 3 candidates (LLM budget). 5 tests |
 
+## Phase 7.5 — Note v1 reader-facing synthesis
+| ID   | Task                                      | Status | T? | C? | P? | Owner | Notes |
+|------|-------------------------------------------|--------|----|----|----|-------|-------|
+| 7.5.1 | DistilledNote schema + note.py (T-DN*)    | done   | ✅ | ✅ | ✅ | agent | grounded teaching-note schema; cite-validating parser; topic normalization; deterministic fallback. 5 note tests |
+| 7.5.2 | Pipeline/render/query/web integration     | done   | ✅ | ✅ | ✅ | agent | pipeline adds bounded note call; markdown/web show note before evidence; query vectors/prompts include cited note context; legacy entries load |
+
 ## Phase 8 — Pipeline
 | ID  | Task                          | Status | T? | C? | P? | Owner | Notes |
 |-----|-------------------------------|--------|----|----|----|-------|-------|
-| 8.1 | Orchestrate 1→6 (T-PL1,T-PL2) | done   | ✅ | ✅ | ✅ | agent | ingest→triage→[short-circuit]→extract→normalize→link→graph→file; low-value files minimal w/ 1 LLM call; budget≤4 w/o graph. 4 tests. NOTE: topic tags empty for now (weakens topic-based graph candidacy) — follow-up |
+| 8.1 | Orchestrate 1→7 (T-PL1,T-PL3) | done   | ✅ | ✅ | ✅ | agent | ingest→triage→[short-circuit]→extract→normalize→link→note→graph→file; low-value files minimal w/ 1 LLM call; useful path budget≤4 w/o graph; note topics feed tags. 4 tests |
 
 ## Phase 9 — CLI
 | ID  | Task                        | Status | T? | C? | P? | Owner | Notes |
@@ -131,6 +137,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 - 2026-06-15 Phase 11.2/11.3 + 12.1 done: auth gate (fail-closed when public w/o secret, 401 on data routes, localhost open), FastAPI app (list/view/score+ask box), $PORT bind. 135 unit tests green (T-A1..A4 + UI).
 - 2026-06-15 Phase 11 complete: Dockerfile (model baked at build, binds 0.0.0.0:$PORT), docker-compose (volume-backed kb/+data/), .dockerignore, scripts/backup_kb.sh (git-remote KB backup), release.yml (test-gated). README verified against all 6 CLI commands. 11.7 tag deferred to owner. BUILD COMPLETE through v0.2 scope; only gated evals + the v0.0.1 tag push remain for the owner.
 - 2026-06-15 VERIFICATION: independent subagent review confirmed both headline guarantees HOLD in code (faithfulness drop-gate in normalize.py:29; abstention gate unreachable-synthesis in query.py:111-118; grounding filter query.py:131-145). No bypass paths.
+- 2026-06-21 Note v1 done: added DistilledNote + note.py grounded synthesis, bounded extra note call, fallback on malformed output, markdown/web teaching-note rendering, note topics as entry tags, and query retrieval context from cited note sections. 163 unit tests green.
 
 ## Agent notes (non-blocking observations)
 - ENV: stack pins Python >=3.11 (ARCHITECTURE.md §1) and CI uses 3.11. The dev sandbox here runs 3.10, so `pip install -e .` is refused by `requires-python`; tests are run via `PYTHONPATH=.` instead. No stack change made — flagging only. If the owner wants the sandbox to do editable installs, lowering the floor to 3.10 would be a stack decision (raise in Decisions needed first).

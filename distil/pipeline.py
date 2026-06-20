@@ -2,7 +2,8 @@
 
 One call turns a normalized transcript + profile into a filed, schema-valid :class:`KBEntry`:
 
-    ingest (done by caller) → triage → [short-circuit] → extract → normalize → link → graph → file
+    ingest (done by caller) → triage → [short-circuit] → extract → normalize → link
+    → note synthesis → graph → file
 
 The ``little_to_extract`` verdict short-circuits: a minimal entry is filed and **no**
 extract/link/graph LLM calls are made (T-PL2). The LLM-call budget is kept bounded
@@ -23,6 +24,7 @@ from .link import generate_links
 from .llm import LLMClient
 from .models import EntryMeta, KBEntry, Profile, Source, Tags
 from .normalize import normalize_items
+from .note import synthesize_note
 from .store import Store
 from .triage import is_low_value, run_triage
 
@@ -68,28 +70,31 @@ def run_pipeline(
     # Stage 4 — link to profile.
     links = generate_links(items, profile, client, novelty_ratio=config.novelty_ratio)
 
+    # Stage 5 — turn verified evidence into a reader-facing teaching note.
+    distilled_note = synthesize_note(source_title, triage, items, links, client)
+
     entry = KBEntry(
         entry_id=entry_id,
         source=source,
         triage=triage,
         knowledge_items=items,
         application_links=links,
-        tags=_derive_tags(items, links),
+        distilled_note=distilled_note,
+        tags=_derive_tags(items, links, distilled_note),
         meta=meta,
     )
 
-    # Stage 5 — graph link against existing KB (capped; deterministic candidate lookup first).
+    # Stage 6 — graph link against existing KB (capped; deterministic candidate lookup first).
     if config.enable_graph:
         entry.related_entries = link_graph(entry, store, client)
 
-    # Stage 6 — file (and embed items into the vector store for the read layer).
+    # Stage 7 — file (and embed items into the vector store for the read layer).
     store.file_entry(entry, embedder=embedder)
     return entry
 
 
-def _derive_tags(items, links) -> Tags:
+def _derive_tags(items, links, note) -> Tags:
     types = sorted({it.type for it in items})
     forms = sorted({link.application_form for link in links})
-    # Topics aren't a first-class field on items; derive a light tag set from item types for
-    # now (richer topic tagging can be added without schema change).
-    return Tags(topics=[], knowledge_types=list(types), application_forms=list(forms))
+    topics = note.topics if note is not None else []
+    return Tags(topics=list(topics), knowledge_types=list(types), application_forms=list(forms))

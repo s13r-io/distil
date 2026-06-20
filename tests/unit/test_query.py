@@ -17,7 +17,7 @@ from distil.query import ask, retrieve
 from distil.store import Store
 
 
-def _entry(entry_id, items, *, score=None, related=None) -> KBEntry:
+def _entry(entry_id, items, *, score=None, related=None, with_note=False) -> KBEntry:
     data = {
         "entry_id": entry_id,
         "source": {"title": entry_id, "captured_at": "2026-06-15T00:00:00"},
@@ -34,6 +34,19 @@ def _entry(entry_id, items, *, score=None, related=None) -> KBEntry:
         "tags": {"topics": [], "knowledge_types": ["heuristic"], "application_forms": []},
         "meta": {"created_at": "2026-06-15T00:00:00", "model_version": "t"},
     }
+    if with_note:
+        data["distilled_note"] = {
+            "title": "Testing note",
+            "core_takeaway": {
+                "text": "Write tests first to clarify behavior before implementation.",
+                "item_ids": [items[0][0]],
+            },
+            "key_points": [{
+                "text": "The synthesized context should travel with retrieved evidence.",
+                "item_ids": [items[0][0]],
+            }],
+            "topics": ["testing"],
+        }
     if score is not None:
         data["feedback"] = {"score": score}
     if related:
@@ -139,6 +152,24 @@ def test_q3_citations_outside_retrieved_set_are_flagged(store, embedder):
     retrieved_ids = {s.item_id for s in result.sources}
     assert "k_fake" not in retrieved_ids
     assert result.ungrounded_citations == ["k_fake"]
+
+
+@pytest.mark.unit
+def test_q3_retrieval_prompt_includes_distilled_note_context(tmp_path, embedder):
+    s = Store(db_path=tmp_path / "d.db", kb_dir=tmp_path / "kb")
+    s.file_entry(_entry("e_note", [
+        ("k_01", "Write unit tests before implementation code.", None),
+    ], with_note=True), embedder=embedder)
+    synth = json.dumps({
+        "answer": "Write tests first [k_01].",
+        "cited_item_ids": ["k_01"],
+        "conflict": None,
+    })
+    client = FakeClient(responses=[synth])
+    result = ask("testing", s, embedder, client, threshold=0.0, top_k=1)
+    assert not result.abstained
+    assert "synthesized note context" in client.calls[0].prompt
+    assert "clarify behavior" in client.calls[0].prompt
 
 
 # ---- T-Q4: every answer carries resolvable source links ----

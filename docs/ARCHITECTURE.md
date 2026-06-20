@@ -52,18 +52,22 @@ raw input (pasted text or .srt / .txt / .md file) + profile
 [4] Link to profile ───► application_links (goal-tied, some novelty-flagged)
         │
         ▼
-[5] Graph-link ────────► related_entries (match against existing KB index)
+[5] Note synthesis ────► distilled_note (teaching note grounded in verified item ids)
         │
         ▼
-[6] File ──────────────► write markdown entry to kb/, index row in SQLite (+ embed items, §9)
+[6] Graph-link ────────► related_entries (match against existing KB index)
         │
         ▼
-[7] Feedback (later) ──► score+reason → profile update (pure logic, SCHEMA §3)
+[7] File ──────────────► write markdown note+evidence to kb/, index row in SQLite (+ embed items, §9)
+        │
+        ▼
+[8] Feedback (later) ──► score+reason → profile update (pure logic, SCHEMA §3)
 ```
 
-LLM-backed stages: **1, 2, 4, 5** (5 only needs the LLM for relation classification; candidate
-matching is a deterministic index lookup first). Pure/deterministic stages: **0, 3, 6, 7**.
-Keep the LLM-call count per transcript bounded (target ≤ 4).
+LLM-backed stages: **1, 2, 4, 5, 6** (6 only needs the LLM for relation classification; candidate
+matching is a deterministic index lookup first). Pure/deterministic stages: **0, 3, 7, 8**.
+Keep the core LLM-call count per useful transcript bounded (target ≤ 4 before graph relation
+classification: triage, extract, link, note). Low-value transcripts still stop after triage.
 
 **Timestamps are optional.** Stage 0 captures a timestamp per segment when the source has one
 (`.srt`, or inline markers like `00:12:30`), and leaves it null otherwise, always keeping a
@@ -83,12 +87,13 @@ distil/
   extract.py         # stage 2 (routes by type)
   normalize.py       # stage 3 (pure: validation, provenance check, dedup)
   link.py            # stage 4 (profile-aware application links)
-  graph.py           # stage 5 (candidate lookup + relation classify)
-  profile_update.py  # stage 7 (PURE: implements SCHEMA §3 table)
+  note.py            # stage 5 (grounded teaching-note synthesis + deterministic fallback)
+  graph.py           # stage 6 (candidate lookup + relation classify)
+  profile_update.py  # stage 8 (PURE: implements SCHEMA §3 table)
   embed.py           # Embedder protocol + LocalEmbedder + ApiEmbedder + FakeEmbedder (tests)
   query.py           # read layer: retrieve → relevance gate → grounded synthesis → sources
   store.py           # SQLite (+ sqlite-vec vectors) + markdown filing
-  pipeline.py        # orchestrates 1→6 (now also embeds items at the File stage)
+  pipeline.py        # orchestrates 1→7 (now also embeds items at the File stage)
   cli.py             # Typer commands (run, score, list, show, ask, reindex)
 web/                 # FastAPI app (v0.2): view/score/browse + ask box; auth middleware
 tests/
@@ -102,7 +107,7 @@ data/                # distil.db incl. vectors (gitignored)
 ## 4. Data flow & storage
 
 - **Profile**: single row (or JSON blob) in SQLite, schema per `SCHEMA.md` §1. Read at link stage, written at feedback stage.
-- **KBEntry**: the markdown file in `kb/<entry_id>.md` is the source of truth for human reading; a row in SQLite (`entries` table: id, title, topics, knowledge_types, score, created_at, file_path) is the index used for graph candidate lookup and browsing.
+- **KBEntry**: the markdown file in `kb/<entry_id>.md` is the source of truth for human reading. New entries include a `distilled_note` (core takeaway, key points, applications, caveats, review questions) plus the atomic evidence items underneath. A row in SQLite (`entries` table: id, title, topics, knowledge_types, score, created_at, file_path) is the index used for graph candidate lookup and browsing.
 - **Provenance** is stored inside each item; the transcript itself is not retained after processing unless the user opts in (privacy).
 
 ## 5. LLM boundary (critical for testing)
@@ -171,8 +176,9 @@ are the retrieval unit, and the grounding rule is the read-side twin of extracti
 
 **Indexing.** At the **File** stage, each knowledge item is embedded via the `Embedder` and
 stored in a `sqlite-vec` `vec0` virtual table inside the same `distil.db`, alongside a
-foreign key to its item/entry. `reindex` backfills embeddings for entries filed before the
-read layer existed.
+foreign key to its item/entry. For new Note v1 entries, the vector text includes both the
+atomic item and any distilled-note context that cites that item. `reindex` backfills embeddings
+for entries filed before the read layer existed.
 
 **Query flow (`query.py`, exposed as `ask`):**
 

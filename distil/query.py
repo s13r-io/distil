@@ -48,6 +48,7 @@ class RetrievedItem:
     timestamp: str | None
     similarity: float
     score: float  # composite rank score (similarity × feedback × recency)
+    context: str = ""
 
 
 @dataclass
@@ -84,13 +85,14 @@ def retrieve(
         feedback_mult = _feedback_multiplier(meta.score if meta else None)
         recency_mult = _recency_multiplier(meta.created_at if meta else None, now)
         composite = sim * feedback_mult * recency_mult
-        item = _load_item(store, entry_id, item_id)
-        if item is None:
+        loaded = _load_item(store, entry_id, item_id)
+        if loaded is None:
             continue
+        item, context = loaded
         scored.append(RetrievedItem(
             item_id=item_id, entry_id=entry_id, statement=item.statement,
             quote=item.provenance.quote, timestamp=item.provenance.timestamp,
-            similarity=sim, score=composite,
+            similarity=sim, score=composite, context=context,
         ))
     scored.sort(key=lambda r: r.score, reverse=True)
     return scored[:top_k]
@@ -258,14 +260,17 @@ def _load_item(store: Store, entry_id: str, item_id: str):
         return None
     for item in entry.knowledge_items:
         if item.item_id == item_id:
-            return item
+            return item, Store.note_context_for_item(entry, item_id)
     return None
 
 
 def _render_notes(items: list[RetrievedItem]) -> str:
     lines = []
     for r in items:
-        lines.append(f"[{r.item_id}] {r.statement} (quote: \"{r.quote}\")")
+        line = f"[{r.item_id}] {r.statement} (quote: \"{r.quote}\")"
+        if r.context:
+            line += f"\n  synthesized note context: {r.context}"
+        lines.append(line)
     return "\n".join(lines)
 
 

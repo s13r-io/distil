@@ -25,6 +25,16 @@ _LINK = json.dumps([{
     "knowledge_item_ids": ["k_01"], "linked_goal_id": "g_01",
     "application_form": "checklist", "scenario": "x", "novelty_flag": False,
 }])
+_NOTE = json.dumps({
+    "title": "Testing first",
+    "core_takeaway": {"text": "Write tests before implementation code.", "item_ids": ["k_01"]},
+    "key_points": [{"text": "The note is about python unit tests.", "item_ids": ["k_01"]}],
+    "why_it_matters": [],
+    "how_to_apply": [],
+    "caveats": [],
+    "review_questions": [],
+    "topics": ["python testing"],
+})
 
 
 @pytest.fixture
@@ -45,7 +55,9 @@ def env(tmp_path, monkeypatch):
 
 
 def _seed_entry(monkeypatch):
-    monkeypatch.setattr(cli, "_make_client", lambda: FakeClient(responses=[_TRIAGE, _EXTRACT, _LINK]))
+    monkeypatch.setattr(
+        cli, "_make_client", lambda: FakeClient(responses=[_TRIAGE, _EXTRACT, _LINK, _NOTE])
+    )
     runner.invoke(cli.app, ["run", "--paste", "Write python unit tests before code.", "--no-graph"])
 
 
@@ -92,7 +104,9 @@ def test_c4_ask_lookup_only_lists_sources(env, monkeypatch):
 @pytest.mark.unit
 def test_c5_reindex_backfills(env, monkeypatch):
     # file an entry WITHOUT embedding (simulate pre-read-layer) by disabling the embedder
-    monkeypatch.setattr(cli, "_make_client", lambda: FakeClient(responses=[_TRIAGE, _EXTRACT, _LINK]))
+    monkeypatch.setattr(
+        cli, "_make_client", lambda: FakeClient(responses=[_TRIAGE, _EXTRACT, _LINK, _NOTE])
+    )
     monkeypatch.setattr(cli, "_safe_embedder", lambda: None)
     runner.invoke(cli.app, ["run", "--paste", "Write python unit tests before code.", "--no-graph"])
     assert cli._make_store().vector_count() == 0

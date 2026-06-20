@@ -166,6 +166,34 @@ class Tags(_Model):
     application_forms: list[str] = Field(default_factory=list)
 
 
+class GroundedText(_Model):
+    text: str
+    item_ids: list[str] = Field(default_factory=list)
+
+
+class ActionStep(_Model):
+    text: str
+    item_ids: list[str] = Field(default_factory=list)
+    application_link_ids: list[str] = Field(default_factory=list)
+
+
+class ReviewQuestion(_Model):
+    question: str
+    item_ids: list[str] = Field(default_factory=list)
+
+
+class DistilledNote(_Model):
+    title: str = ""
+    core_takeaway: GroundedText
+    key_points: list[GroundedText] = Field(default_factory=list)
+    why_it_matters: list[GroundedText] = Field(default_factory=list)
+    how_to_apply: list[ActionStep] = Field(default_factory=list)
+    caveats: list[GroundedText] = Field(default_factory=list)
+    review_questions: list[ReviewQuestion] = Field(default_factory=list)
+    topics: list[str] = Field(default_factory=list)
+    generated_from: Literal["llm", "fallback"] = "llm"
+
+
 class PerLinkScore(_Model):
     link_id: str
     score: int = Field(ge=1, le=5)
@@ -189,6 +217,7 @@ class KBEntry(_Model):
     triage: Triage
     knowledge_items: list[KnowledgeItem] = Field(default_factory=list)
     application_links: list[ApplicationLink] = Field(default_factory=list)
+    distilled_note: DistilledNote | None = None
     related_entries: list[RelatedEntry] = Field(default_factory=list)
     tags: Tags = Field(default_factory=Tags)
     feedback: Feedback = Field(default_factory=Feedback)

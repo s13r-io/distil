@@ -171,18 +171,48 @@ class Store:
 
     def _embed_entry_items(self, entry: KBEntry, embedder: Embedder) -> None:
         for item in entry.knowledge_items:
-            text = self._item_embed_text(item)
+            text = self._item_embed_text(item, entry)
             self._store_vector(entry.entry_id, item.item_id, embedder.embed(text),
                                embedder.model_name)
         self._conn.commit()
 
     @staticmethod
-    def _item_embed_text(item) -> str:
+    def _item_embed_text(item, entry: KBEntry | None = None) -> str:
         parts = [item.statement]
         if item.rationale:
             parts.append(item.rationale)
         if item.scope:
             parts.append(item.scope)
+        if entry is not None:
+            context = Store.note_context_for_item(entry, item.item_id)
+            if context:
+                parts.append(context)
+        return " ".join(parts)
+
+    @staticmethod
+    def note_context_for_item(entry: KBEntry, item_id: str) -> str:
+        """Return synthesized-note context that cites this item, for retrieval prompts/vectors."""
+        note = entry.distilled_note
+        if note is None:
+            return ""
+        parts: list[str] = []
+
+        def add(text: str, ids: list[str]) -> None:
+            text = text.strip()
+            if item_id in ids and text and text not in parts:
+                parts.append(text)
+
+        add(note.core_takeaway.text, note.core_takeaway.item_ids)
+        for section in note.key_points:
+            add(section.text, section.item_ids)
+        for section in note.why_it_matters:
+            add(section.text, section.item_ids)
+        for section in note.how_to_apply:
+            add(section.text, section.item_ids)
+        for section in note.caveats:
+            add(section.text, section.item_ids)
+        for section in note.review_questions:
+            add(section.question, section.item_ids)
         return " ".join(parts)
 
     def _store_vector(self, entry_id: str, item_id: str, vec: list[float], model: str) -> None:
@@ -231,7 +261,7 @@ class Store:
                     continue  # already current
                 self._store_vector(
                     entry.entry_id, item.item_id,
-                    embedder.embed(self._item_embed_text(item)), embedder.model_name
+                    embedder.embed(self._item_embed_text(item, entry)), embedder.model_name
                 )
                 embedded += 1
         self._conn.commit()
@@ -267,6 +297,9 @@ class Store:
         """Front matter = full entry JSON (lossless); body = readable rendering."""
         front = entry.model_dump_json(indent=2)
         lines = [_FRONT_MATTER_DELIM, front, _FRONT_MATTER_DELIM, ""]
+        if entry.distilled_note is not None:
+            return "\n".join(lines + Store._render_note_body(entry))
+
         lines.append(f"# {entry.source.title}")
         lines.append("")
         lines.append(
@@ -299,6 +332,77 @@ class Store:
                 lines.append(f"- {rel.relation} → `{rel.target}`")
             lines.append("")
         return "\n".join(lines)
+
+    @staticmethod
+    def _render_note_body(entry: KBEntry) -> list[str]:
+        note = entry.distilled_note
+        assert note is not None
+        lines: list[str] = []
+        lines.append(f"# {note.title or entry.source.title}")
+        lines.append("")
+        lines.append(
+            f"*Verdict:* {entry.triage.verdict} · *Density:* {entry.triage.density} · "
+            f"*Captured:* {entry.source.captured_at}"
+        )
+        if note.topics:
+            lines.append("")
+            lines.append("*Topics:* " + ", ".join(note.topics))
+        lines.append("")
+
+        lines.append("## Core takeaway")
+        lines.append("")
+        lines.append(Store._with_refs(note.core_takeaway.text, note.core_takeaway.item_ids))
+        lines.append("")
+
+        Store._append_grounded_section(lines, "Key points", note.key_points)
+        Store._append_grounded_section(lines, "Why it matters", note.why_it_matters)
+        if note.how_to_apply:
+            lines.append("## How to apply this")
+            lines.append("")
+            for step in note.how_to_apply:
+                lines.append(f"- {Store._with_refs(step.text, step.item_ids)}")
+            lines.append("")
+        Store._append_grounded_section(lines, "Caveats", note.caveats)
+        if note.review_questions:
+            lines.append("## Review questions")
+            lines.append("")
+            for question in note.review_questions:
+                lines.append(f"- {Store._with_refs(question.question, question.item_ids)}")
+            lines.append("")
+
+        if entry.knowledge_items:
+            lines.append("## Evidence")
+            lines.append("")
+            for item in entry.knowledge_items:
+                ts = f" ({item.provenance.timestamp})" if item.provenance.timestamp else ""
+                lines.append(f"- **{item.item_id} [{item.type}]** {item.statement}")
+                lines.append(f"  > \"{item.provenance.quote}\"{ts}")
+            lines.append("")
+
+        if entry.related_entries:
+            lines.append("## Related")
+            lines.append("")
+            for rel in entry.related_entries:
+                lines.append(f"- {rel.relation} -> `{rel.target}`")
+            lines.append("")
+        return lines
+
+    @staticmethod
+    def _append_grounded_section(lines: list[str], title: str, sections) -> None:
+        if not sections:
+            return
+        lines.append(f"## {title}")
+        lines.append("")
+        for section in sections:
+            lines.append(f"- {Store._with_refs(section.text, section.item_ids)}")
+        lines.append("")
+
+    @staticmethod
+    def _with_refs(text: str, item_ids: list[str]) -> str:
+        if not item_ids:
+            return text
+        refs = ", ".join(f"`{item_id}`" for item_id in item_ids)
+        return f"{text} ({refs})"
 
     @staticmethod
     def _parse_front_matter(text: str) -> str:

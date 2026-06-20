@@ -83,6 +83,14 @@ that must abstain.
 - T-L2: with `DISTIL_NOVELTY_RATIO=0.2`, ~1 in 5 links carries `novelty_flag=true`.
 - T-L3: cold-start profile (confidence 0) → links reference `stable.long_term_goals`, not learned affinities.
 
+### note.py (unit, FakeClient)
+- T-DN1: parses a valid note JSON object into `DistilledNote`.
+- T-DN2: sections citing unknown `item_ids` are dropped; partially valid sections keep only valid refs.
+- T-DN3: unknown `application_link_ids` are dropped from action steps.
+- T-DN4: topics are normalized, deduped, and bounded.
+- T-DN5: malformed model output or a failed note call falls back to a deterministic note built from verified items.
+- T-DN6: empty verified item list returns no note and makes no model call.
+
 ### graph.py
 - T-G1: candidate lookup returns existing entries sharing topics/items (deterministic, no LLM).
 - T-G2: relation classification maps to the allowed enum only.
@@ -101,10 +109,12 @@ that must abstain.
 - T-S1: filing writes `kb/<id>.md` with valid front-matter and a human-readable body.
 - T-S2: filing inserts an index row; re-filing same id updates, not duplicates.
 - T-S3: KB and DB survive process restart (persistence).
+- T-S4: new entries with `distilled_note` render a teaching note first and preserve raw evidence below it; legacy entries still render.
 
 ### pipeline.py
-- T-PL1: end-to-end with FakeClient produces a complete, schema-valid KBEntry.
+- T-PL1: end-to-end with FakeClient produces a complete, schema-valid KBEntry with `distilled_note`.
 - T-PL2: `little_to_extract` path files a minimal entry and makes no extract/link calls.
+- T-PL3: useful transcript with graph disabled stays within four LLM calls: triage, extract, link, note.
 
 ### cli.py
 - T-C1: `distil run <file>` accepts `.srt`/`.txt`/`.md` and `distil run --paste` (or stdin) accepts pasted text; exits 0 and prints the entry path.
@@ -126,6 +136,7 @@ that must abstain.
 - T-Q5: a bare lookup ("do I have notes on X") returns the ranked source list with no synthesis call.
 - T-Q6: when retrieved items are linked by a `contradicts` edge, the answer surfaces the conflict instead of picking one silently.
 - T-Q7 (eval): on the query KB fixture, answerable questions return correct source IDs and no-note questions abstain 100% of the time.
+- T-Q8: retrieved items include any distilled-note context that cites them, while source links remain item-level.
 
 ### auth (web, hosted) — `web/`
 - T-A1: with `DISTIL_PUBLIC=true` and no `DISTIL_AUTH_SECRET` set, the app refuses to start/serve (fails closed).

@@ -40,6 +40,20 @@ _LINK = json.dumps([{
     "knowledge_item_ids": ["k_01"], "linked_goal_id": "g_01",
     "application_form": "checklist", "scenario": "refactor auth", "novelty_flag": False,
 }])
+_NOTE = json.dumps({
+    "title": "Small functions",
+    "core_takeaway": {"text": "Small functions are easier to change safely.", "item_ids": ["k_01"]},
+    "key_points": [{"text": "Keep the unit of behavior focused.", "item_ids": ["k_01"]}],
+    "why_it_matters": [{"text": "Focused functions are easier to test.", "item_ids": ["k_01"]}],
+    "how_to_apply": [{
+        "text": "Use this as a refactoring checklist for auth.",
+        "item_ids": ["k_01"],
+        "application_link_ids": ["a_01"],
+    }],
+    "caveats": [{"text": "The advice is scoped to library code.", "item_ids": ["k_01"]}],
+    "review_questions": [{"question": "Which function should you split first?", "item_ids": ["k_01"]}],
+    "topics": ["Function Design", "Testing"],
+})
 _TRIAGE_LOW = json.dumps({
     "knowledge_types_present": [], "density": "low",
     "transcript_loss": {"level": "low", "evidence": []}, "verdict": "little_to_extract",
@@ -52,8 +66,8 @@ _TRIAGE_LOW = json.dumps({
 @pytest.mark.unit
 def test_pl1_end_to_end_produces_valid_entry(profile, store):
     transcript = ingest_text("Keep functions small and focused on one thing.")
-    # graph disabled (no prior entries anyway) → triage, extract, link = 3 calls
-    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK])
+    # graph disabled (no prior entries anyway) -> triage, extract, link, note = 4 calls
+    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     entry = run_pipeline(transcript, profile, store, client,
                          source_title="A talk", config=PipelineConfig(enable_graph=False))
     assert isinstance(entry, KBEntry)
@@ -62,6 +76,9 @@ def test_pl1_end_to_end_produces_valid_entry(profile, store):
     assert entry.knowledge_items[0].provenance.quote == "keep functions small"
     assert len(entry.application_links) == 1
     assert entry.application_links[0].linked_goal_id == "g_01"
+    assert entry.distilled_note is not None
+    assert entry.distilled_note.core_takeaway.text == "Small functions are easier to change safely."
+    assert entry.tags.topics == ["function_design", "testing"]
     # filed to disk + indexed
     assert store.entry_path(entry.entry_id).exists()
     assert any(r.entry_id == entry.entry_id for r in store.list_entries())
@@ -70,10 +87,10 @@ def test_pl1_end_to_end_produces_valid_entry(profile, store):
 @pytest.mark.unit
 def test_pl1_respects_llm_budget(profile, store):
     transcript = ingest_text("Keep functions small.")
-    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK])
+    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     run_pipeline(transcript, profile, store, client, source_title="t",
                  config=PipelineConfig(enable_graph=False))
-    assert client.call_count <= 4  # triage + extract + link
+    assert client.call_count <= 4  # triage + extract + link + note
 
 
 # ---- T-PL2: little_to_extract path files a minimal entry, makes no extract/link calls ----
@@ -96,9 +113,11 @@ def test_pl2_low_value_files_minimal_no_extract_calls(profile, store):
 @pytest.mark.unit
 def test_pl_entry_id_is_unique_and_indexed(profile, store):
     t = ingest_text("Keep functions small.")
-    e1 = run_pipeline(t, profile, store, FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK]),
+    e1 = run_pipeline(t, profile, store,
+                      FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE]),
                       source_title="t1", config=PipelineConfig(enable_graph=False))
-    e2 = run_pipeline(t, profile, store, FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK]),
+    e2 = run_pipeline(t, profile, store,
+                      FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE]),
                       source_title="t2", config=PipelineConfig(enable_graph=False))
     assert e1.entry_id != e2.entry_id
     assert len(store.list_entries()) == 2

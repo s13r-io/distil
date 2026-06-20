@@ -17,7 +17,59 @@
 </section>
 
 <section class="card">
+  {% if e.distilled_note %}
+  {% set n = e.distilled_note %}
+  <p class="label" style="margin:0 0 12px;">Teaching note</p>
+  <div class="item">
+    <p class="label" style="margin:0 0 6px;">Core takeaway</p>
+    <p class="stmt" style="margin:0;">{{ n.core_takeaway.text }}</p>
+  </div>
+
+  {% if n.key_points %}
+  <p class="label" style="margin:16px 0 10px;">Key points</p>
+  {% for point in n.key_points %}
+  <div class="item"><p class="stmt" style="margin:0;">{{ point.text }}</p></div>
+  {% endfor %}
+  {% endif %}
+
+  {% if n.why_it_matters %}
+  <p class="label" style="margin:16px 0 10px;">Why it matters</p>
+  {% for point in n.why_it_matters %}
+  <div class="item"><p class="stmt" style="margin:0;">{{ point.text }}</p></div>
+  {% endfor %}
+  {% endif %}
+
+  {% if n.how_to_apply %}
+  <p class="label" style="margin:16px 0 10px;">How to apply this</p>
+  {% for step in n.how_to_apply %}
+  <div class="item"><p class="stmt" style="margin:0;">{{ step.text }}</p></div>
+  {% endfor %}
+  {% endif %}
+
+  {% if n.caveats %}
+  <p class="label" style="margin:16px 0 10px;">Caveats</p>
+  {% for caveat in n.caveats %}
+  <div class="item"><p class="stmt" style="margin:0;">{{ caveat.text }}</p></div>
+  {% endfor %}
+  {% endif %}
+
+  {% if n.review_questions %}
+  <p class="label" style="margin:16px 0 10px;">Review questions</p>
+  {% for q in n.review_questions %}
+  <div class="item"><p class="stmt" style="margin:0;">{{ q.question }}</p></div>
+  {% endfor %}
+  {% endif %}
+
+  {% if n.topics %}
+  <div class="row wrap" style="margin:16px 0 4px;">
+    {% for topic in n.topics %}<span class="badge">{{ topic }}</span>{% endfor %}
+  </div>
+  {% endif %}
+
+  <p class="label" style="margin:18px 0 12px;">Evidence · {{ e.knowledge_items|length }} item{{ 's' if e.knowledge_items|length != 1 else '' }}</p>
+  {% else %}
   <p class="label" style="margin:0 0 12px;">Knowledge · {{ e.knowledge_items|length }} item{{ 's' if e.knowledge_items|length != 1 else '' }}</p>
+  {% endif %}
 
   {% for it in e.knowledge_items %}
   <div class="item" id="{{ it.item_id }}">

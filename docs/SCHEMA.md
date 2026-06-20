@@ -105,6 +105,22 @@ the structured fields; body is the human-readable rendering) and indexed in SQLi
       "novelty_flag": false }              // true = orthogonal serendipity link (anti-bubble)
   ],
 
+  // DISTILLED NOTE — reader-facing synthesis grounded in verified knowledge item ids.
+  // Optional for backward compatibility with entries filed before Note v1.
+  "distilled_note": {
+    "title": "string",
+    "core_takeaway": { "text": "string", "item_ids": ["k_01"] },
+    "key_points": [ { "text": "string", "item_ids": ["k_01"] } ],
+    "why_it_matters": [ { "text": "string", "item_ids": ["k_01"] } ],
+    "how_to_apply": [
+      { "text": "string", "item_ids": ["k_01"], "application_link_ids": ["a_01"] }
+    ],
+    "caveats": [ { "text": "string", "item_ids": ["k_01"] } ],
+    "review_questions": [ { "question": "string", "item_ids": ["k_01"] } ],
+    "topics": ["function_design"],
+    "generated_from": "llm | fallback"
+  },
+
   // GRAPH EDGES — turns a folder into a knowledge base.
   "related_entries": [
     { "target": "entry_id|item_id",
