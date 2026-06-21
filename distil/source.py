@@ -7,14 +7,14 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import ParseResult, parse_qs, quote, urlparse
 from urllib.request import urlopen
 
 _BRACKETED = re.compile(r"\[[^\]]*\]|\([^)]*\)|\{[^}]*\}")
 _SEPARATORS = re.compile(r"[_\-.]+")
 _SPACES = re.compile(r"\s+")
 _KNOWN_SUFFIXES = {".srt", ".txt", ".md", ".markdown", ".text", ".vtt"}
-_YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+_YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
 
 
 class SourceUrlError(ValueError):
@@ -51,17 +51,25 @@ def clean_source_title(raw: str | None, *, fallback: str = "Pasted transcript") 
 
 
 def normalize_youtube_url(raw: str | None) -> str | None:
-    """Validate and normalize an optional YouTube URL for attribution/navigation."""
+    """Validate and normalize an optional YouTube URL for attribution/navigation.
+
+    The stored URL intentionally keeps only the video id. Shared YouTube links often carry
+    referral/tracking parameters (``si``, ``feature``, ``utm_*``) or playback offsets
+    (``t``, ``start``); those are useful for sharing but noisy as source attribution.
+    """
     url = (raw or "").strip()
     if not url:
         return None
     if "://" not in url:
         url = f"https://{url}"
     parsed = urlparse(url)
-    host = parsed.netloc.lower()
+    host = (parsed.hostname or "").lower()
     if parsed.scheme not in {"http", "https"} or host not in _YOUTUBE_HOSTS:
         raise SourceUrlError("Source URL must be a YouTube URL.")
-    return url
+    video_id = _youtube_video_id(parsed)
+    if not video_id:
+        raise SourceUrlError("Source URL must include a YouTube video id.")
+    return f"https://www.youtube.com/watch?v={video_id}"
 
 
 def fetch_youtube_oembed_metadata(url: str, *, timeout: float = 5.0) -> SourceMetadata:
@@ -106,3 +114,26 @@ def _clean_optional(value) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _youtube_video_id(parsed: ParseResult) -> str | None:
+    if (parsed.hostname or "").lower() == "youtu.be":
+        return _first_path_segment(parsed.path)
+
+    query = parse_qs(parsed.query)
+    for value in query.get("v", []):
+        if value.strip():
+            return value.strip()
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) >= 2 and parts[0] in {"embed", "shorts", "live", "v"}:
+        return parts[1].strip() or None
+    return None
+
+
+def _first_path_segment(path: str) -> str | None:
+    for part in path.split("/"):
+        part = part.strip()
+        if part:
+            return part
+    return None

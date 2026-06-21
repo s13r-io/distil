@@ -131,7 +131,10 @@ def client(tmp_path, monkeypatch):
 def test_ingest_paste_returns_immediately_and_queues(client):
     r = client.post(
         "/ingest",
-        data={"paste": "some transcript text", "source_url": "youtube.com/watch?v=abc"},
+        data={
+            "paste": "some transcript text",
+            "source_url": "youtube.com/watch?v=abc&feature=share&t=30s",
+        },
     )
     assert r.status_code == 200
     body = r.json()
@@ -139,7 +142,7 @@ def test_ingest_paste_returns_immediately_and_queues(client):
     # And it shows up in the jobs list.
     jobs = client.get("/jobs", headers={"accept": "application/json"}).json()
     queued = next(j for j in jobs if j["job_id"] == body["job_id"])
-    assert queued["source_url"] == "https://youtube.com/watch?v=abc"
+    assert queued["source_url"] == "https://www.youtube.com/watch?v=abc"
 
 
 @pytest.mark.unit

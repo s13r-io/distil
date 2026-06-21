@@ -9,8 +9,12 @@
 <body>
   <div class="wrap">
     <div class="topbar">
-      <a href="/" class="brand" style="color:inherit;">Distil</a>
-      <a href="/logout">Sign out</a>
+      <a href="/" class="brand"><span class="brand-mark">D</span><span>Distil</span></a>
+      <div class="topbar-actions">
+        <a href="/" class="{% if active_page == 'ask' %}active{% endif %}">Ask</a>
+        <a href="/library" class="{% if active_page == 'library' %}active{% endif %}">Library</a>
+        <a href="/logout">Sign out</a>
+      </div>
     </div>
     {% block content %}{% endblock %}
   </div>

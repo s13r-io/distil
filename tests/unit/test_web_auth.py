@@ -122,6 +122,19 @@ def test_index_page_renders(seeded, monkeypatch):
     r = client.get("/")
     assert r.status_code == 200
     assert "Distil" in r.text
+    assert "Ask your notes" in r.text
+    assert "Add knowledge" in r.text
+    assert 'href="/library"' in r.text
+
+
+@pytest.mark.unit
+def test_library_page_renders(seeded, monkeypatch):
+    monkeypatch.setenv("DISTIL_PUBLIC", "false")
+    client = TestClient(create_app())
+    r = client.get("/library")
+    assert r.status_code == 200
+    assert "Saved notes" in r.text
+    assert "Search titles or tags" in r.text
 
 
 @pytest.mark.unit

@@ -23,14 +23,38 @@ def test_clean_source_title_falls_back_when_empty():
 
 @pytest.mark.unit
 def test_normalize_youtube_url_accepts_youtube_hosts():
-    assert normalize_youtube_url("youtube.com/watch?v=abc") == "https://youtube.com/watch?v=abc"
-    assert normalize_youtube_url("https://youtu.be/abc") == "https://youtu.be/abc"
+    assert normalize_youtube_url("youtube.com/watch?v=abc") == "https://www.youtube.com/watch?v=abc"
+    assert normalize_youtube_url("https://youtu.be/abc") == "https://www.youtube.com/watch?v=abc"
+
+
+@pytest.mark.unit
+def test_normalize_youtube_url_strips_tracking_and_timestamps():
+    messy = "https://youtu.be/abc?t=42&si=sharecode&utm_source=copy"
+    assert normalize_youtube_url(messy) == "https://www.youtube.com/watch?v=abc"
+    messy_watch = "https://www.youtube.com/watch?v=abc&feature=share&t=30s&list=xyz"
+    assert normalize_youtube_url(messy_watch) == "https://www.youtube.com/watch?v=abc"
+
+
+@pytest.mark.unit
+def test_normalize_youtube_url_accepts_common_video_paths():
+    assert normalize_youtube_url("https://youtube.com/shorts/abc?feature=share") == (
+        "https://www.youtube.com/watch?v=abc"
+    )
+    assert normalize_youtube_url("https://www.youtube.com/embed/abc?start=20") == (
+        "https://www.youtube.com/watch?v=abc"
+    )
 
 
 @pytest.mark.unit
 def test_normalize_youtube_url_rejects_other_hosts():
     with pytest.raises(SourceUrlError):
         normalize_youtube_url("https://example.com/watch?v=abc")
+
+
+@pytest.mark.unit
+def test_normalize_youtube_url_rejects_missing_video_id():
+    with pytest.raises(SourceUrlError):
+        normalize_youtube_url("https://www.youtube.com/feed/subscriptions")
 
 
 @pytest.mark.unit

@@ -83,14 +83,19 @@ def test_c1_run_file_exits_zero_and_prints_path(env, monkeypatch, tmp_path):
     src = tmp_path / "[English] my-video_title (Transcript).txt"
     src.write_text("Keep functions small and focused.")
     result = runner.invoke(
-        cli.app, ["run", str(src), "--url", "youtube.com/watch?v=abc", "--no-graph"]
+        cli.app,
+        [
+            "run", str(src), "--url",
+            "youtube.com/watch?v=abc&feature=share&t=30s&utm_source=copy",
+            "--no-graph",
+        ],
     )
     assert result.exit_code == 0, result.output
     assert ".md" in result.output
     entry_id = result.output.strip().split("/")[-1].replace(".md", "").strip()
     entry = cli._make_store().load_entry(entry_id)
     assert entry.source.title == "Fetched Video Title"
-    assert entry.source.url == "https://youtube.com/watch?v=abc"
+    assert entry.source.url == "https://www.youtube.com/watch?v=abc"
     assert entry.source.channel == "Fetched Channel"
     assert entry.source.thumbnail_url == "https://i.ytimg.com/vi/abc/hqdefault.jpg"
 

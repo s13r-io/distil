@@ -1,154 +1,227 @@
 {% extends "base.html" %}
-{% block title %}{{ e.source.title }} — Distil{% endblock %}
+{% block title %}{{ e.source.title }} - Distil{% endblock %}
 {% block content %}
 
-<p style="margin:0 0 12px;"><a href="/">← Back</a></p>
+<a class="entry-back" href="/library">Back to library</a>
 
-<section class="card">
-  <h2 style="margin:0 0 4px; font-size:18px; font-weight:500;">{% if e.distilled_note and e.distilled_note.title %}{{ e.distilled_note.title }}{% else %}{{ e.source.title }}{% endif %}</h2>
-  <p class="muted" style="margin:0 0 14px;">Captured {{ e.source.captured_at[:16].replace("T"," ") }}</p>
+<header class="entry-hero">
+  <div>
+    <h1>{% if e.distilled_note and e.distilled_note.title %}{{ e.distilled_note.title }}{% else %}{{ e.source.title }}{% endif %}</h1>
+    <p class="muted" style="margin:10px 0 16px;">Captured {{ e.source.captured_at[:16].replace("T"," ") }}</p>
+    <div class="row wrap" style="margin-bottom:10px;">
+      <span class="badge {% if e.triage.verdict == 'rich' %}ok{% elif e.triage.verdict == 'little_to_extract' %}warn{% endif %}">verdict: {{ e.triage.verdict }}</span>
+      <span class="badge">density: {{ e.triage.density }}</span>
+      <span class="badge">loss: {{ e.triage.transcript_loss.level }}</span>
+    </div>
+    {% if mix %}
+    <p class="muted" style="margin:0;">Mix: {% for t, pct in mix %}{{ t }} {{ pct }}%{% if not loop.last %} / {% endif %}{% endfor %}</p>
+    {% endif %}
+  </div>
   {% if e.source.thumbnail_url %}
-  <img src="{{ e.source.thumbnail_url }}" alt="" style="width:160px; max-width:100%; border-radius:6px; margin:0 0 12px;">
-  {% endif %}
-  {% if e.source.url %}
-  <p style="margin:0 0 14px;"><a href="{{ e.source.url }}" target="_blank" rel="noopener">Watch on YouTube</a></p>
-  {% endif %}
-  {% if e.source.title %}<p class="muted" style="margin:0 0 4px;">Video: {{ e.source.title }}</p>{% endif %}
-  {% if e.source.channel %}<p class="muted" style="margin:0 0 14px;">Channel: {% if e.source.channel_url %}<a href="{{ e.source.channel_url }}" target="_blank" rel="noopener">{{ e.source.channel }}</a>{% else %}{{ e.source.channel }}{% endif %}</p>{% endif %}
-
-  <div class="row wrap" style="margin-bottom:6px;">
-    <span class="badge {% if e.triage.verdict == 'rich' %}ok{% elif e.triage.verdict == 'little_to_extract' %}warn{% endif %}">verdict: {{ e.triage.verdict }}</span>
-    <span class="badge">density: {{ e.triage.density }}</span>
-    <span class="badge">loss: {{ e.triage.transcript_loss.level }}</span>
-  </div>
-  {% if mix %}<p class="muted" style="margin:0 0 4px;">Mix: {% for t, pct in mix %}{{ t }} {{ pct }}%{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
-</section>
-
-<section class="card">
-  {% if e.distilled_note %}
-  {% set n = e.distilled_note %}
-  <p class="label" style="margin:0 0 12px;">Teaching note</p>
-  <div class="item">
-    <p class="label" style="margin:0 0 6px;">Core takeaway</p>
-    <p class="stmt" style="margin:0;">{{ n.core_takeaway.text }}</p>
-  </div>
-
-  {% if n.key_points %}
-  <p class="label" style="margin:16px 0 10px;">Key points</p>
-  {% for point in n.key_points %}
-  <div class="item"><p class="stmt" style="margin:0;">{{ point.text }}</p></div>
-  {% endfor %}
-  {% endif %}
-
-  {% if n.why_it_matters %}
-  <p class="label" style="margin:16px 0 10px;">Why it matters</p>
-  {% for point in n.why_it_matters %}
-  <div class="item"><p class="stmt" style="margin:0;">{{ point.text }}</p></div>
-  {% endfor %}
-  {% endif %}
-
-  {% if n.how_to_apply %}
-  <p class="label" style="margin:16px 0 10px;">How to apply this</p>
-  {% for step in n.how_to_apply %}
-  <div class="item"><p class="stmt" style="margin:0;">{{ step.text }}</p></div>
-  {% endfor %}
-  {% endif %}
-
-  {% if n.caveats %}
-  <p class="label" style="margin:16px 0 10px;">Caveats</p>
-  {% for caveat in n.caveats %}
-  <div class="item"><p class="stmt" style="margin:0;">{{ caveat.text }}</p></div>
-  {% endfor %}
-  {% endif %}
-
-  {% if n.review_questions %}
-  <p class="label" style="margin:16px 0 10px;">Review questions</p>
-  {% for q in n.review_questions %}
-  <div class="item"><p class="stmt" style="margin:0;">{{ q.question }}</p></div>
-  {% endfor %}
-  {% endif %}
-
-  {% if n.topics %}
-  <div class="row wrap" style="margin:16px 0 4px;">
-    {% for topic in n.topics %}<span class="badge">{{ topic }}</span>{% endfor %}
+  <div class="entry-hero-media">
+    <img src="{{ e.source.thumbnail_url }}" alt="">
   </div>
   {% endif %}
+</header>
 
-  <details style="margin-top:18px;">
-    <summary class="label">Source evidence · {{ e.knowledge_items|length }} item{{ 's' if e.knowledge_items|length != 1 else '' }}</summary>
-  {% else %}
-  <p class="label" style="margin:0 0 12px;">Knowledge · {{ e.knowledge_items|length }} item{{ 's' if e.knowledge_items|length != 1 else '' }}</p>
-  {% endif %}
+<div class="reader-grid">
+  <main class="reader-main">
+    {% if e.distilled_note %}
+    {% set n = e.distilled_note %}
+    <article class="panel note-shell">
+      <div class="note-intro">
+        <p class="muted" style="margin:0 0 8px;">Teaching note</p>
+        <h2 style="margin:0 0 10px; font-size:18px;">Core takeaway</h2>
+        <div class="callout">
+          <p>{{ n.core_takeaway.text }}</p>
+        </div>
+      </div>
 
-  {% for it in e.knowledge_items %}
-  <div class="item" id="{{ it.item_id }}">
-    <div class="row wrap" style="margin-bottom:8px;">
-      <span class="badge info">{{ it.type }}</span>
-      <span class="badge {% if it.stance == 'opinion' %}warn{% endif %}">{{ it.stance.replace('_',' ') }}</span>
-    </div>
-    <p class="stmt">{{ it.statement }}</p>
-    {% if it.rationale %}<p class="sub"><b>Why:</b> {{ it.rationale }}</p>{% endif %}
-    {% if it.scope %}<p class="sub"><b>Scope:</b> {{ it.scope }}</p>{% endif %}
-    {% if it.preconditions %}<p class="sub"><b>Preconditions:</b> {{ it.preconditions|join('; ') }}</p>{% endif %}
-    {% if it.gotchas %}<p class="sub"><b>Gotchas:</b> {{ it.gotchas|join('; ') }}</p>{% endif %}
-    <blockquote>"{{ it.provenance.quote }}"{% if it.provenance.timestamp %} <span class="muted">@ {{ it.provenance.timestamp }}</span>{% endif %}</blockquote>
-  </div>
-  {% endfor %}
-  {% if e.distilled_note %}
-  </details>
-  {% endif %}
+      {% if n.key_points %}
+      <section class="note-section">
+        <h2>Key points</h2>
+        <ul class="note-list">
+          {% for point in n.key_points %}<li>{{ point.text }}</li>{% endfor %}
+        </ul>
+      </section>
+      {% endif %}
 
-  {% if e.application_links %}
-  <p class="label" style="margin:16px 0 10px;">Application links</p>
-  {% for link in e.application_links %}
-  <div class="item">
-    <div class="row wrap" style="margin-bottom:6px;">
-      <span class="badge">{{ link.application_form }}</span>
-      {% if link.novelty_flag %}<span class="badge info">novelty</span>{% endif %}
-    </div>
-    <p class="stmt" style="margin:0;">{{ link.scenario }}</p>
-  </div>
-  {% endfor %}
-  {% endif %}
+      {% if n.why_it_matters %}
+      <section class="note-section">
+        <h2>Why it matters</h2>
+        <ul class="note-list">
+          {% for point in n.why_it_matters %}<li>{{ point.text }}</li>{% endfor %}
+        </ul>
+      </section>
+      {% endif %}
 
-  {% if e.related_entries %}
-  <p class="label" style="margin:16px 0 10px;">Related entries</p>
-  {% for rel in e.related_entries %}
-  <p class="sub" style="margin:0 0 6px;">
-    <span class="badge">{{ rel.relation.replace('_',' ') }}</span>
-    <a href="/entries/{{ rel.target }}">{{ rel.target }}</a>
-  </p>
-  {% endfor %}
-  {% endif %}
+      {% if n.how_to_apply %}
+      <section class="note-section">
+        <h2>How to apply this</h2>
+        <ol class="note-list">
+          {% for step in n.how_to_apply %}<li>{{ step.text }}</li>{% endfor %}
+        </ol>
+      </section>
+      {% endif %}
 
-  {% if not e.application_links and not e.related_entries %}
-  <p class="muted" style="margin:14px 0 0;">No application or related links yet.</p>
-  {% endif %}
-</section>
+      {% if n.caveats %}
+      <section class="note-section">
+        <h2>Caveats</h2>
+        <ul class="note-list">
+          {% for caveat in n.caveats %}<li>{{ caveat.text }}</li>{% endfor %}
+        </ul>
+      </section>
+      {% endif %}
 
-<section class="card">
-  <div class="score-panel">
-    <p class="label" style="margin:0 0 2px; font-size:13px;">How useful was this?</p>
-    <p class="muted" id="score-state" style="margin:0;">
-      {% if e.feedback.score %}Scored {{ e.feedback.score }}{% if e.feedback.reason %} · {{ e.feedback.reason }}{% endif %} ✓{% else %}Not scored yet{% endif %}
-    </p>
-    <div class="score-btns">
-      {% for n in [1,2,3,4,5] %}
-      <button data-score="{{ n }}" {% if e.feedback.score == n %}class="on"{% endif %}>{{ n }}</button>
-      {% endfor %}
-    </div>
-    <select id="reason">
-      <option value="">Why? (reason)</option>
-      {% for r in reasons %}<option value="{{ r }}" {% if e.feedback.reason == r %}selected{% endif %}>{{ r }}</option>{% endfor %}
-    </select>
-  </div>
-</section>
+      {% if n.review_questions %}
+      <section class="note-section">
+        <h2>Review questions</h2>
+        <ol class="note-list">
+          {% for q in n.review_questions %}<li>{{ q.question }}</li>{% endfor %}
+        </ol>
+      </section>
+      {% endif %}
 
-<section class="card">
-  <form method="post" action="/entries/{{ e.entry_id }}/delete" onsubmit="return confirm('Delete this entry? This cannot be undone.');">
-    <button type="submit" class="danger">Delete entry</button>
-  </form>
-</section>
+      {% if n.topics %}
+      <section class="note-section">
+        <h2>Topics</h2>
+        <div class="row wrap">
+          {% for topic in n.topics %}<span class="badge">{{ topic }}</span>{% endfor %}
+        </div>
+      </section>
+      {% endif %}
+    </article>
+
+    <details class="details-panel">
+      <summary>Source evidence / {{ e.knowledge_items|length }} item{{ 's' if e.knowledge_items|length != 1 else '' }}</summary>
+      <div class="details-body">
+        {% for it in e.knowledge_items %}
+        <div class="item" id="{{ it.item_id }}">
+          <div class="row wrap" style="margin-bottom:8px;">
+            <span class="badge info">{{ it.type }}</span>
+            <span class="badge {% if it.stance == 'opinion' %}warn{% endif %}">{{ it.stance.replace('_',' ') }}</span>
+          </div>
+          <p class="stmt">{{ it.statement }}</p>
+          {% if it.rationale %}<p class="sub"><b>Why:</b> {{ it.rationale }}</p>{% endif %}
+          {% if it.scope %}<p class="sub"><b>Scope:</b> {{ it.scope }}</p>{% endif %}
+          {% if it.preconditions %}<p class="sub"><b>Preconditions:</b> {{ it.preconditions|join('; ') }}</p>{% endif %}
+          {% if it.gotchas %}<p class="sub"><b>Gotchas:</b> {{ it.gotchas|join('; ') }}</p>{% endif %}
+          <blockquote>"{{ it.provenance.quote }}"{% if it.provenance.timestamp %} <span class="muted">@ {{ it.provenance.timestamp }}</span>{% endif %}</blockquote>
+        </div>
+        {% endfor %}
+      </div>
+    </details>
+    {% else %}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Knowledge / {{ e.knowledge_items|length }} item{{ 's' if e.knowledge_items|length != 1 else '' }}</h2>
+      </div>
+      <div class="panel-body">
+        {% for it in e.knowledge_items %}
+        <div class="item" id="{{ it.item_id }}">
+          <div class="row wrap" style="margin-bottom:8px;">
+            <span class="badge info">{{ it.type }}</span>
+            <span class="badge {% if it.stance == 'opinion' %}warn{% endif %}">{{ it.stance.replace('_',' ') }}</span>
+          </div>
+          <p class="stmt">{{ it.statement }}</p>
+          {% if it.rationale %}<p class="sub"><b>Why:</b> {{ it.rationale }}</p>{% endif %}
+          {% if it.scope %}<p class="sub"><b>Scope:</b> {{ it.scope }}</p>{% endif %}
+          {% if it.preconditions %}<p class="sub"><b>Preconditions:</b> {{ it.preconditions|join('; ') }}</p>{% endif %}
+          {% if it.gotchas %}<p class="sub"><b>Gotchas:</b> {{ it.gotchas|join('; ') }}</p>{% endif %}
+          <blockquote>"{{ it.provenance.quote }}"{% if it.provenance.timestamp %} <span class="muted">@ {{ it.provenance.timestamp }}</span>{% endif %}</blockquote>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    {% if e.application_links %}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Application links</h2>
+      </div>
+      <div class="panel-body">
+        {% for link in e.application_links %}
+        <div class="item">
+          <div class="row wrap" style="margin-bottom:6px;">
+            <span class="badge">{{ link.application_form }}</span>
+            {% if link.novelty_flag %}<span class="badge info">novelty</span>{% endif %}
+          </div>
+          <p class="stmt" style="margin:0;">{{ link.scenario }}</p>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    {% if e.related_entries %}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Related entries</h2>
+      </div>
+      <div class="panel-body">
+        {% for rel in e.related_entries %}
+        <p class="sub" style="margin:0 0 8px;">
+          <span class="badge">{{ rel.relation.replace('_',' ') }}</span>
+          <a href="/entries/{{ rel.target }}">{{ rel.target }}</a>
+        </p>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    {% if not e.application_links and not e.related_entries %}
+    <section class="panel">
+      <div class="panel-body">
+        <p class="muted" style="margin:0;">No application or related links yet.</p>
+      </div>
+    </section>
+    {% endif %}
+  </main>
+
+  <aside class="reader-side">
+    <section class="action-card">
+      <p class="small-title">Source</p>
+      {% if e.source.url %}
+      <p style="margin:0 0 10px;"><a class="btn primary" href="{{ e.source.url }}" target="_blank" rel="noopener">Watch on YouTube</a></p>
+      {% endif %}
+      {% if e.source.title %}<p class="muted" style="margin:0 0 6px;">Video: {{ e.source.title }}</p>{% endif %}
+      {% if e.source.channel %}
+      <p class="muted" style="margin:0;">
+        Channel:
+        {% if e.source.channel_url %}<a href="{{ e.source.channel_url }}" target="_blank" rel="noopener">{{ e.source.channel }}</a>{% else %}{{ e.source.channel }}{% endif %}
+      </p>
+      {% endif %}
+      {% if not e.source.url and not e.source.channel %}
+      <p class="muted" style="margin:0;">{{ e.source.title }}</p>
+      {% endif %}
+    </section>
+
+    <section class="score-panel">
+      <p class="label" style="margin:0 0 2px; font-size:13px;">How useful was this?</p>
+      <p class="muted" id="score-state" style="margin:0;">
+        {% if e.feedback.score %}Scored {{ e.feedback.score }}{% if e.feedback.reason %} / {{ e.feedback.reason }}{% endif %} saved{% else %}Not scored yet{% endif %}
+      </p>
+      <div class="score-btns">
+        {% for n in [1,2,3,4,5] %}
+        <button data-score="{{ n }}" {% if e.feedback.score == n %}class="on"{% endif %}>{{ n }}</button>
+        {% endfor %}
+      </div>
+      <select id="reason">
+        <option value="">Why? (reason)</option>
+        {% for r in reasons %}<option value="{{ r }}" {% if e.feedback.reason == r %}selected{% endif %}>{{ r }}</option>{% endfor %}
+      </select>
+    </section>
+
+    <section class="action-card danger-zone">
+      <p class="small-title">Delete entry</p>
+      <p class="muted" style="margin:0 0 12px;">This removes the note, index row, and item vectors.</p>
+      <form method="post" action="/entries/{{ e.entry_id }}/delete" onsubmit="return confirm('Delete this entry? This cannot be undone.');">
+        <button type="submit" class="danger">Delete entry</button>
+      </form>
+    </section>
+  </aside>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -163,7 +236,7 @@ async function submitScore(){
   const fd=new FormData(); fd.append('score',chosen); fd.append('reason',reason);
   const r=await fetch('/entries/{{ e.entry_id }}/score',{method:'POST',body:fd});
   const state=document.getElementById('score-state');
-  state.textContent = r.ok ? ('Scored '+chosen+' · '+reason+' ✓') : 'Could not save score.';
+  state.textContent = r.ok ? ('Scored '+chosen+' / '+reason+' saved') : 'Could not save score.';
 }
 </script>
 {% endblock %}

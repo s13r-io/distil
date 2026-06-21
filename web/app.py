@@ -157,9 +157,7 @@ def create_app() -> FastAPI:
     def logout():
         return auth.logout_response()
 
-    # ---- home ----
-    @app.get("/", response_class=HTMLResponse)
-    def index(request: Request):
+    def _library_template_context() -> dict:
         rows = _store().list_entries()
         entries = [
             {"entry_id": r.entry_id, "title": r.title, "score": r.score,
@@ -168,8 +166,22 @@ def create_app() -> FastAPI:
             for r in rows
         ]
         all_tags = sorted({t for r in rows for t in (list(r.topics) + list(r.knowledge_types))})
+        return {"entries": entries, "all_tags": all_tags, "entry_count": len(entries)}
+
+    # ---- home / ask ----
+    @app.get("/", response_class=HTMLResponse)
+    def index(request: Request):
+        rows = _store().list_entries()
         return _TEMPLATES.TemplateResponse(
-            request, "index.html", {"entries": entries, "all_tags": all_tags},
+            request, "index.html",
+            {"entry_count": len(rows), "has_entries": bool(rows), "active_page": "ask"},
+        )
+
+    @app.get("/library", response_class=HTMLResponse)
+    def library(request: Request):
+        return _TEMPLATES.TemplateResponse(
+            request, "library.html",
+            {**_library_template_context(), "active_page": "library"},
         )
 
     # ---- ingest (non-blocking) ----
@@ -247,7 +259,8 @@ def create_app() -> FastAPI:
             request, "entry.html",
             {"e": e, "mix": mix,
              "reasons": ["relevant", "already_knew", "bad_source", "wrong_for_me",
-                         "irrelevant_now"]},
+                         "irrelevant_now"],
+             "active_page": "library"},
         )
 
     @app.post("/entries/{entry_id}/score")

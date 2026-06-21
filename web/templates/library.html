@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}Library - Distil{% endblock %}
+{% block content %}
+
+<header class="hero-strip">
+  <div>
+    <h1>Library</h1>
+    <p>Browse, search, and filter the teaching notes you have already saved.</p>
+  </div>
+  <span class="badge info" id="lib-count">{{ entry_count }} entries</span>
+</header>
+
+<main class="library-page">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Saved notes</h2>
+      <span class="muted" id="lib-showing"></span>
+    </div>
+
+    <div class="library-tools">
+      <div class="search">
+        <input type="search" id="search" placeholder="Search titles or tags">
+      </div>
+      <select id="sort" aria-label="Sort entries">
+        <option value="newest">Newest first</option>
+        <option value="oldest">Oldest first</option>
+      </select>
+      <a href="#" id="clear-filters" class="btn hide">Clear</a>
+    </div>
+
+    <div class="library-filter-bar">
+      <div class="toolbar" id="filter-chips">
+        <button type="button" class="chip" data-filter="scored" aria-pressed="false">Scored</button>
+        <button type="button" class="chip" data-filter="unscored" aria-pressed="false">Unscored</button>
+        <button type="button" class="chip" data-filter="star5" aria-pressed="false">5 star</button>
+        <button type="button" class="chip" data-filter="star4" aria-pressed="false">4 star</button>
+        <button type="button" class="chip" data-filter="star3" aria-pressed="false">3 star</button>
+        {% for t in all_tags %}<button type="button" class="chip" data-tag="{{ t }}" aria-pressed="false">{{ t }}</button>{% endfor %}
+      </div>
+    </div>
+
+    <div id="lib-list" class="library-list"></div>
+    <div class="empty" id="lib-empty">
+      <p id="lib-empty-title" style="margin:0 0 4px;">No entries yet</p>
+      <p class="muted" id="lib-empty-copy" style="margin:0;">Add a transcript from Ask to build your knowledge base.</p>
+    </div>
+    <div style="text-align:center; padding:14px 18px; border-top:1px solid var(--line);">
+      <button id="show-more" class="hide">Show more</button>
+    </div>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script id="entry-data" type="application/json">{{ entries|tojson }}</script>
+<script>
+const ENTRIES = JSON.parse(document.getElementById('entry-data').textContent);
+const PAGE=30; let shown=PAGE;
+const activeTags=new Set(); const activeFilters=new Set();
+function esc(s){const d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML;}
+function entryHaystack(en){
+  return [en.title, en.entry_id, ...(en.topics||[]), ...(en.knowledge_types||[])].join(' ').toLowerCase();
+}
+function matches(en){
+  const term=document.getElementById('search').value.trim().toLowerCase();
+  if(term && !entryHaystack(en).includes(term)) return false;
+  for(const f of activeFilters){
+    if(f==='scored' && en.score==null) return false;
+    if(f==='unscored' && en.score!=null) return false;
+    if(f.startsWith('star') && en.score!=Number(f.slice(4))) return false;
+  }
+  if(activeTags.size){
+    const tags=new Set([...(en.topics||[]),...(en.knowledge_types||[])]);
+    for(const t of activeTags) if(!tags.has(t)) return false;
+  }
+  return true;
+}
+function formatDate(s){
+  if(!s) return '';
+  return s.slice(0,16).replace('T',' ');
+}
+function renderLib(){
+  const sort=document.getElementById('sort').value;
+  let list=ENTRIES.filter(matches);
+  list.sort((a,b)=> sort==='oldest' ? (a.created_at>b.created_at?1:-1) : (a.created_at<b.created_at?1:-1));
+  const total=list.length; const view=list.slice(0,shown);
+  document.getElementById('lib-list').innerHTML=view.map(en=>{
+    const badge = en.score!=null
+      ? '<span class="badge ok">score '+en.score+'</span>'
+      : '<span class="badge">unscored</span>';
+    const tags=[...(en.topics||[]),...(en.knowledge_types||[])].slice(0,6)
+      .map(t=>'<span class="badge">'+esc(t)+'</span>').join(' ');
+    return '<a class="entryrow" href="/entries/'+encodeURIComponent(en.entry_id)+'">'
+      +'<div class="top"><span class="entry-title">'+esc(en.title)+'</span>'+badge+'</div>'
+      +'<div class="meta-line"><span class="muted">'+esc(formatDate(en.created_at))+'</span>'+tags+'</div></a>';
+  }).join('');
+  const hasSearch=document.getElementById('search').value.trim().length>0;
+  const filtered = activeTags.size||activeFilters.size||hasSearch;
+  document.getElementById('lib-showing').textContent = filtered ? ('showing '+total+' of '+ENTRIES.length) : '';
+  document.getElementById('clear-filters').classList.toggle('hide',!filtered);
+  document.getElementById('show-more').classList.toggle('hide', shown>=total);
+  const empty=document.getElementById('lib-empty');
+  empty.classList.toggle('hide', total>0);
+  if(total===0 && ENTRIES.length>0){
+    document.getElementById('lib-empty-title').textContent='No matching entries';
+    document.getElementById('lib-empty-copy').textContent='Clear search or filters to see the full library.';
+  }else{
+    document.getElementById('lib-empty-title').textContent='No entries yet';
+    document.getElementById('lib-empty-copy').textContent='Add a transcript from Ask to build your knowledge base.';
+  }
+}
+document.getElementById('sort').onchange=renderLib;
+document.getElementById('search').oninput=()=>{shown=PAGE;renderLib();};
+document.getElementById('show-more').onclick=()=>{shown+=PAGE;renderLib();};
+document.querySelectorAll('#filter-chips .chip').forEach(chip=>{
+  chip.onclick=()=>{
+    const isOn=chip.classList.toggle('on');
+    chip.setAttribute('aria-pressed', String(isOn));
+    if(chip.dataset.tag){isOn?activeTags.add(chip.dataset.tag):activeTags.delete(chip.dataset.tag);}
+    else{isOn?activeFilters.add(chip.dataset.filter):activeFilters.delete(chip.dataset.filter);}
+    shown=PAGE; renderLib();
+  };
+});
+document.getElementById('clear-filters').onclick=e=>{
+  e.preventDefault(); activeTags.clear(); activeFilters.clear();
+  document.getElementById('search').value='';
+  document.querySelectorAll('#filter-chips .chip.on').forEach(c=>{c.classList.remove('on');c.setAttribute('aria-pressed','false');});
+  shown=PAGE; renderLib();
+};
+renderLib();
+</script>
+{% endblock %}
