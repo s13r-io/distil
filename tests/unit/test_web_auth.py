@@ -130,7 +130,14 @@ def test_entry_page_renders_distilled_note(seeded, monkeypatch):
     store = Store(db_path=seeded / "distil.db", kb_dir=seeded / "kb")
     store.file_entry(KBEntry.model_validate({
         "entry_id": "e_note",
-        "source": {"title": "A talk", "captured_at": "2026-06-15T00:00:00"},
+        "source": {
+            "title": "A talk",
+            "url": "https://youtu.be/abc123",
+            "channel": "Talk Channel",
+            "channel_url": "https://www.youtube.com/@talk",
+            "thumbnail_url": "https://i.ytimg.com/vi/abc123/hqdefault.jpg",
+            "captured_at": "2026-06-15T00:00:00",
+        },
         "triage": {
             "knowledge_types_present": [{"type": "heuristic", "share": 1.0}],
             "density": "high",
@@ -160,7 +167,33 @@ def test_entry_page_renders_distilled_note(seeded, monkeypatch):
     assert r.status_code == 200
     assert "Teaching note" in r.text
     assert "Core takeaway" in r.text
-    assert "Evidence" in r.text
+    assert "Source evidence" in r.text
+    assert "Watch on YouTube" in r.text
+    assert "Talk Channel" in r.text
+    assert "hqdefault.jpg" in r.text
+
+
+@pytest.mark.unit
+def test_entry_delete_route_removes_entry(seeded, monkeypatch):
+    monkeypatch.setenv("DISTIL_PUBLIC", "false")
+    store = Store(db_path=seeded / "distil.db", kb_dir=seeded / "kb")
+    store.file_entry(KBEntry.model_validate({
+        "entry_id": "e_delete",
+        "source": {"title": "Delete me", "captured_at": "2026-06-15T00:00:00"},
+        "triage": {
+            "knowledge_types_present": [{"type": "heuristic", "share": 1.0}],
+            "density": "high",
+            "transcript_loss": {"level": "low", "evidence": []},
+            "verdict": "rich",
+        },
+        "knowledge_items": [],
+        "meta": {"created_at": "2026-06-15T00:00:00", "model_version": "test"},
+    }))
+    client = TestClient(create_app(), follow_redirects=False)
+    r = client.post("/entries/e_delete/delete")
+    assert r.status_code == 303
+    assert r.headers["location"] == "/"
+    assert not store.entry_path("e_delete").exists()
 
 
 # ---- login / logout flow ----

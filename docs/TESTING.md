@@ -110,6 +110,7 @@ that must abstain.
 - T-S2: filing inserts an index row; re-filing same id updates, not duplicates.
 - T-S3: KB and DB survive process restart (persistence).
 - T-S4: new entries with `distilled_note` render a teaching note first and preserve raw evidence below it; legacy entries still render.
+- T-S5: noisy source filenames are cleaned for display, optional YouTube URLs render near the top of notes, and Note v1 evidence is collapsed/de-emphasized.
 
 ### pipeline.py
 - T-PL1: end-to-end with FakeClient produces a complete, schema-valid KBEntry with `distilled_note`.
@@ -122,6 +123,8 @@ that must abstain.
 - T-C3: missing API key → friendly error, not a stack trace.
 - T-C4: `distil ask "..."` prints an answer + source links, or the no-notes message.
 - T-C5: `distil reindex` embeds entries that have no stored vector yet.
+- T-C6: `distil run --url <youtube-url>` stores source attribution; non-YouTube source URLs are rejected cleanly.
+- T-C7: `distil delete <entry_id> --yes` removes the markdown file, SQLite index row, and item vectors.
 
 ### embed.py / store vectors (unit, FakeEmbedder)
 - T-X1: filing an entry stores one vector per knowledge item in the `vec0` table.

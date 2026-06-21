@@ -26,6 +26,7 @@ from pathlib import Path
 
 from .embed import Embedder
 from .models import KBEntry, Profile
+from .source import display_title
 
 _FRONT_MATTER_DELIM = "---"
 
@@ -127,7 +128,10 @@ class Store:
             """,
             (
                 entry.entry_id,
-                entry.source.title,
+                display_title(
+                    entry.source.title,
+                    entry.distilled_note.title if entry.distilled_note is not None else None,
+                ),
                 json.dumps(entry.tags.topics),
                 json.dumps(entry.tags.knowledge_types),
                 entry.feedback.score,
@@ -144,6 +148,16 @@ class Store:
         text = self.entry_path(entry_id).read_text(encoding="utf-8")
         payload = self._parse_front_matter(text)
         return KBEntry.model_validate_json(payload)
+
+    def delete_entry(self, entry_id: str) -> bool:
+        """Delete a KB entry, its SQLite index row, and its item vectors."""
+        path = self.entry_path(entry_id)
+        file_existed = path.exists()
+        path.unlink(missing_ok=True)
+        with self._conn:
+            self._conn.execute("DELETE FROM item_vectors_meta WHERE entry_id = ?", (entry_id,))
+            cur = self._conn.execute("DELETE FROM entries WHERE entry_id = ?", (entry_id,))
+        return file_existed or cur.rowcount > 0
 
     def list_entries(self) -> list[EntryIndexRow]:
         cur = self._conn.execute("SELECT * FROM entries ORDER BY created_at DESC, entry_id")
@@ -306,6 +320,10 @@ class Store:
             f"*Verdict:* {entry.triage.verdict} · *Density:* {entry.triage.density} · "
             f"*Captured:* {entry.source.captured_at}"
         )
+        if entry.source.url:
+            lines.append("")
+            lines.append(f"*Source:* [Watch on YouTube]({entry.source.url})")
+        Store._append_source_metadata(lines, entry)
         lines.append("")
         if entry.knowledge_items:
             lines.append("## Knowledge")
@@ -338,12 +356,16 @@ class Store:
         note = entry.distilled_note
         assert note is not None
         lines: list[str] = []
-        lines.append(f"# {note.title or entry.source.title}")
+        lines.append(f"# {display_title(entry.source.title, note.title)}")
         lines.append("")
         lines.append(
             f"*Verdict:* {entry.triage.verdict} · *Density:* {entry.triage.density} · "
             f"*Captured:* {entry.source.captured_at}"
         )
+        if entry.source.url:
+            lines.append("")
+            lines.append(f"*Source:* [Watch on YouTube]({entry.source.url})")
+        Store._append_source_metadata(lines, entry)
         if note.topics:
             lines.append("")
             lines.append("*Topics:* " + ", ".join(note.topics))
@@ -371,12 +393,15 @@ class Store:
             lines.append("")
 
         if entry.knowledge_items:
-            lines.append("## Evidence")
+            lines.append("<details>")
+            lines.append("<summary>Source evidence</summary>")
             lines.append("")
             for item in entry.knowledge_items:
                 ts = f" ({item.provenance.timestamp})" if item.provenance.timestamp else ""
                 lines.append(f"- **{item.item_id} [{item.type}]** {item.statement}")
                 lines.append(f"  > \"{item.provenance.quote}\"{ts}")
+            lines.append("")
+            lines.append("</details>")
             lines.append("")
 
         if entry.related_entries:
@@ -403,6 +428,16 @@ class Store:
             return text
         refs = ", ".join(f"`{item_id}`" for item_id in item_ids)
         return f"{text} ({refs})"
+
+    @staticmethod
+    def _append_source_metadata(lines: list[str], entry: KBEntry) -> None:
+        if entry.source.title:
+            lines.append(f"*Video:* {entry.source.title}")
+        if entry.source.channel:
+            channel = entry.source.channel
+            if entry.source.channel_url:
+                channel = f"[{channel}]({entry.source.channel_url})"
+            lines.append(f"*Channel:* {channel}")
 
     @staticmethod
     def _parse_front_matter(text: str) -> str:

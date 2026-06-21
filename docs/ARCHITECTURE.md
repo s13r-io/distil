@@ -107,7 +107,8 @@ data/                # distil.db incl. vectors (gitignored)
 ## 4. Data flow & storage
 
 - **Profile**: single row (or JSON blob) in SQLite, schema per `SCHEMA.md` §1. Read at link stage, written at feedback stage.
-- **KBEntry**: the markdown file in `kb/<entry_id>.md` is the source of truth for human reading. New entries include a `distilled_note` (core takeaway, key points, applications, caveats, review questions) plus the atomic evidence items underneath. A row in SQLite (`entries` table: id, title, topics, knowledge_types, score, created_at, file_path) is the index used for graph candidate lookup and browsing.
+- **Source metadata**: uploaded filenames are cleaned before becoming fallback display titles, and an optional YouTube URL is stored in `source.url` for navigation back to the original video. When a YouTube URL is present, Distil fetches public oEmbed metadata without an API key and stores the video title, channel, channel URL, thumbnail URL, provider, and fetch timestamp. It still does not fetch transcripts or scrape video content in v0.
+- **KBEntry**: the markdown file in `kb/<entry_id>.md` is the source of truth for human reading. New entries include a `distilled_note` (core takeaway, key points, applications, caveats, review questions) plus the atomic evidence items in a collapsed source-evidence block. A row in SQLite (`entries` table: id, title, topics, knowledge_types, score, created_at, file_path) is the index used for graph candidate lookup and browsing.
 - **Provenance** is stored inside each item; the transcript itself is not retained after processing unless the user opts in (privacy).
 
 ## 5. LLM boundary (critical for testing)

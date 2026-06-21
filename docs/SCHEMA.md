@@ -66,6 +66,9 @@ the structured fields; body is the human-readable rendering) and indexed in SQLi
   "entry_id": "string",
 
   "source": { "url": "string|null", "title": "string", "channel": "string|null",
+              "channel_url": "string|null", "thumbnail_url": "string|null",
+              "metadata_provider": "youtube_oembed|null",
+              "metadata_fetched_at": "ts|null",
               "duration_sec": 0, "captured_at": "ts" },
 
   // TRIAGE — runs first. Routes everything; sets expectations.

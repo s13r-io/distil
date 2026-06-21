@@ -22,6 +22,14 @@ from .models import Profile
 from .pipeline import PipelineConfig, run_pipeline
 from .profile_update import apply_feedback
 from .query import ask as run_ask
+from .source import (
+    SourceMetadata,
+    SourceMetadataError,
+    SourceUrlError,
+    clean_source_title,
+    fetch_youtube_oembed_metadata,
+    normalize_youtube_url,
+)
 from .store import Store
 
 app = typer.Typer(add_completion=False, help="Distil — personal knowledge distiller.")
@@ -83,6 +91,7 @@ def _fail(message: str, code: int = 1) -> None:
 def run(
     source: str = typer.Argument(None, help="Path to a .srt/.txt/.md transcript."),
     paste: str = typer.Option(None, "--paste", help="Pasted transcript text (instead of a file)."),
+    url: str = typer.Option(None, "--url", help="Optional YouTube URL for source attribution."),
     no_graph: bool = typer.Option(False, "--no-graph", help="Skip cross-linking to existing KB."),
 ):
     """Ingest a transcript and run the distillation pipeline, filing a KB entry."""
@@ -93,15 +102,25 @@ def run(
             transcript = ingest_text(paste)
         elif source is not None:
             transcript = ingest_file(source)
-            title = os.path.basename(source)
+            title = clean_source_title(os.path.basename(source))
         elif not sys.stdin.isatty():
             transcript = ingest_text(sys.stdin.read())
+            title = "Pasted transcript"
         else:
             _fail("Provide a transcript: `distil run <file>` or `distil run --paste \"...\"`.")
             return
     except IngestError as exc:
         _fail(f"Could not read the transcript: {exc}")
         return
+
+    try:
+        source_url = normalize_youtube_url(url)
+    except SourceUrlError as exc:
+        _fail(str(exc))
+        return
+    source_meta = _fetch_source_metadata(source_url)
+    if source_meta.title:
+        title = source_meta.title
 
     store = _make_store()
     profile = _load_or_default_profile(store)
@@ -111,6 +130,12 @@ def run(
         entry = run_pipeline(
             transcript, profile, store, client,
             source_title=title,
+            source_url=source_url,
+            source_channel=source_meta.channel,
+            source_channel_url=source_meta.channel_url,
+            source_thumbnail_url=source_meta.thumbnail_url,
+            source_metadata_provider=source_meta.metadata_provider,
+            source_metadata_fetched_at=source_meta.metadata_fetched_at,
             config=PipelineConfig(
                 novelty_ratio=_novelty_ratio(),
                 enable_graph=not no_graph,
@@ -124,6 +149,15 @@ def run(
         return
 
     typer.echo(str(store.entry_path(entry.entry_id)))
+
+
+def _fetch_source_metadata(source_url: str | None) -> SourceMetadata:
+    if not source_url:
+        return SourceMetadata()
+    try:
+        return fetch_youtube_oembed_metadata(source_url)
+    except SourceMetadataError:
+        return SourceMetadata()
 
 
 @app.command()
@@ -183,6 +217,23 @@ def show(entry_id: str = typer.Argument(..., help="The entry id to display.")):
         _fail(f"Entry '{entry_id}' not found.")
         return
     typer.echo(path.read_text(encoding="utf-8"))
+
+
+@app.command(name="delete")
+def delete_entry(
+    entry_id: str = typer.Argument(..., help="The entry id to delete."),
+    yes: bool = typer.Option(False, "--yes", help="Confirm deletion without prompting."),
+):
+    """Delete a filed KB entry, its index row, and its vectors."""
+    store = _make_store()
+    if not store.entry_path(entry_id).exists():
+        _fail(f"Entry '{entry_id}' not found.")
+        return
+    if not yes and not typer.confirm(f"Delete {entry_id}?"):
+        typer.echo("Cancelled.")
+        raise typer.Exit(0)
+    store.delete_entry(entry_id)
+    typer.echo(f"Deleted {entry_id}.")
 
 
 @app.command()

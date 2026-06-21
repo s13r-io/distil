@@ -103,6 +103,10 @@ class Source(_Model):
     url: str | None = None
     title: str
     channel: str | None = None
+    channel_url: str | None = None
+    thumbnail_url: str | None = None
+    metadata_provider: str | None = None
+    metadata_fetched_at: str | None = None
     duration_sec: int = 0
     captured_at: str
 

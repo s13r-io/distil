@@ -29,6 +29,14 @@ from distil.pipeline import PipelineConfig, run_pipeline
 from distil.profile_update import apply_feedback
 from distil.query import ask as run_ask
 from distil.query import stream_ask
+from distil.source import (
+    SourceMetadata,
+    SourceMetadataError,
+    SourceUrlError,
+    clean_source_title,
+    fetch_youtube_oembed_metadata,
+    normalize_youtube_url,
+)
 from distil.store import Store
 
 from . import auth
@@ -75,9 +83,16 @@ def _distill_job(job: jobsmod.Job) -> dict:
         transcript = ingest_text(job.payload)
     client = _make_client()
     embedder = _safe_embedder()
+    source_meta = _fetch_source_metadata(job.source_url)
     entry = run_pipeline(
         transcript, profile, store, client,
-        source_title=job.title,
+        source_title=source_meta.title or job.title,
+        source_url=job.source_url,
+        source_channel=source_meta.channel,
+        source_channel_url=source_meta.channel_url,
+        source_thumbnail_url=source_meta.thumbnail_url,
+        source_metadata_provider=source_meta.metadata_provider,
+        source_metadata_fetched_at=source_meta.metadata_fetched_at,
         config=PipelineConfig(model_version=os.environ.get("DISTIL_MODEL", "")),
         embedder=embedder,
     )
@@ -87,6 +102,15 @@ def _distill_job(job: jobsmod.Job) -> dict:
                 "summary": "Not much to extract — verdict little_to_extract. Nothing filed."}
     return {"status": jobsmod.STATUS_DONE, "entry_id": entry.entry_id,
             "summary": f"kept {n} item{'s' if n != 1 else ''} · verdict {entry.triage.verdict}"}
+
+
+def _fetch_source_metadata(source_url: str | None) -> SourceMetadata:
+    if not source_url:
+        return SourceMetadata()
+    try:
+        return fetch_youtube_oembed_metadata(source_url)
+    except SourceMetadataError:
+        return SourceMetadata()
 
 
 def create_app() -> FastAPI:
@@ -152,9 +176,14 @@ def create_app() -> FastAPI:
     @app.post("/ingest")
     async def ingest(
         paste: str = Form(default=""),
+        source_url: str = Form(default=""),
         file: UploadFile | None = None,
     ):
         store_jobs = jobsmod.JobStore(_db_path())
+        try:
+            normalized_url = normalize_youtube_url(source_url)
+        except SourceUrlError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
         if file is not None and file.filename:
             suffix = Path(file.filename).suffix.lower()
             if suffix not in {".srt", ".txt", ".md"}:
@@ -162,12 +191,19 @@ def create_app() -> FastAPI:
             dest = _UPLOAD_DIR / f"{os.urandom(6).hex()}{suffix}"
             with dest.open("wb") as out:
                 shutil.copyfileobj(file.file, out)
-            job = store_jobs.enqueue(kind="file", title=file.filename, payload=str(dest))
+            job = store_jobs.enqueue(
+                kind="file",
+                title=clean_source_title(file.filename),
+                payload=str(dest),
+                source_url=normalized_url,
+            )
         elif paste.strip():
-            from datetime import datetime
-
-            title = f"Pasted transcript · {datetime.now().strftime('%H:%M')}"
-            job = store_jobs.enqueue(kind="paste", title=title, payload=paste)
+            job = store_jobs.enqueue(
+                kind="paste",
+                title="Pasted transcript",
+                payload=paste,
+                source_url=normalized_url,
+            )
         else:
             return JSONResponse({"detail": "Nothing to distil"}, status_code=400)
         return {"job_id": job.job_id, "status": job.status}
@@ -230,6 +266,13 @@ def create_app() -> FastAPI:
         profile = store.load_profile(_USER_ID) or _default_profile()
         store.save_profile(apply_feedback(profile, e))
         return {"ok": True, "score": score, "reason": reason}
+
+    @app.post("/entries/{entry_id}/delete")
+    def delete_entry(entry_id: str):
+        store = _store()
+        if not store.delete_entry(entry_id):
+            return JSONResponse({"detail": "not found"}, status_code=404)
+        return RedirectResponse(url="/", status_code=303)
 
     # ---- ask (JSON, all-at-once fallback) ----
     @app.get("/ask")

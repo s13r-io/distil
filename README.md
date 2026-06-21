@@ -45,15 +45,20 @@ pip install -e .
 cp .env.example .env        # then edit: set your LLM API key and model
 
 distil run path/to/transcript.txt        # produces a KB entry in kb/
+distil run path/to/transcript.txt --url "https://youtube.com/watch?v=..."  # optional source link
 distil show <entry_id>                    # read it
 distil score <entry_id> --score 5 --reason relevant   # teach your profile
 distil list                               # browse your knowledge base
 distil ask "what do my notes say about X" # grounded answer + source links (or "no notes")
 distil reindex                            # embed older entries for the read layer
+distil delete <entry_id> --yes            # remove an entry, index row, and vectors
 ```
 
-`ask` answers **only** from your stored notes and links to the source entries; if nothing in
-your KB is relevant, it tells you so rather than guessing.
+`run` cleans noisy uploaded filenames before using them as fallback titles, and `--url` stores
+a YouTube source link at the top of the note. When possible, Distil also fetches public YouTube
+oEmbed metadata (video title, channel, thumbnail) without an API key. `ask` answers **only**
+from your stored notes and links to the source entries; if nothing in your KB is relevant, it
+tells you so rather than guessing.
 
 ## Quickstart (Docker)
 

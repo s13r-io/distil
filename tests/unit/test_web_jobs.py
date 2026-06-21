@@ -22,9 +22,18 @@ def jobstore(tmp_path):
 def test_enqueue_then_claim_marks_running(jobstore):
     job = jobstore.enqueue(kind="paste", title="t", payload="hello")
     assert job.status == jobsmod.STATUS_QUEUED
+    assert job.source_url is None
     claimed = jobstore.claim_next_queued()
     assert claimed.job_id == job.job_id
     assert jobstore.get(job.job_id).status == jobsmod.STATUS_RUNNING
+
+
+@pytest.mark.unit
+def test_enqueue_persists_source_url(jobstore):
+    job = jobstore.enqueue(
+        kind="paste", title="t", payload="hello", source_url="https://youtu.be/abc"
+    )
+    assert jobstore.get(job.job_id).source_url == "https://youtu.be/abc"
 
 
 @pytest.mark.unit
@@ -104,12 +113,14 @@ def client(tmp_path, monkeypatch):
 
     from distil.models import Profile
     from distil.store import Store
+    from web import app as webapp
     from web.app import create_app
 
     monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
     monkeypatch.setenv("DISTIL_KB_DIR", str(tmp_path / "kb"))
     monkeypatch.setenv("DISTIL_MODEL", "test")
     monkeypatch.setenv("DISTIL_PUBLIC", "false")
+    monkeypatch.setattr(webapp, "fetch_youtube_oembed_metadata", lambda _url: webapp.SourceMetadata())
     Store(db_path=tmp_path / "distil.db", kb_dir=tmp_path / "kb").save_profile(
         Profile(user_id="owner")
     )
@@ -118,13 +129,17 @@ def client(tmp_path, monkeypatch):
 
 @pytest.mark.unit
 def test_ingest_paste_returns_immediately_and_queues(client):
-    r = client.post("/ingest", data={"paste": "some transcript text"})
+    r = client.post(
+        "/ingest",
+        data={"paste": "some transcript text", "source_url": "youtube.com/watch?v=abc"},
+    )
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "queued"
     # And it shows up in the jobs list.
     jobs = client.get("/jobs", headers={"accept": "application/json"}).json()
-    assert any(j["job_id"] == body["job_id"] for j in jobs)
+    queued = next(j for j in jobs if j["job_id"] == body["job_id"])
+    assert queued["source_url"] == "https://youtube.com/watch?v=abc"
 
 
 @pytest.mark.unit
@@ -146,6 +161,12 @@ def test_ingest_file_upload_queues(client):
 @pytest.mark.unit
 def test_ingest_rejects_unsupported_file(client):
     r = client.post("/ingest", files={"file": ("x.pdf", b"%PDF", "application/pdf")})
+    assert r.status_code == 400
+
+
+@pytest.mark.unit
+def test_ingest_rejects_non_youtube_source_url(client):
+    r = client.post("/ingest", data={"paste": "text", "source_url": "https://example.com"})
     assert r.status_code == 400
 
 

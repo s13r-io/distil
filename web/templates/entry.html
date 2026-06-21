@@ -5,8 +5,16 @@
 <p style="margin:0 0 12px;"><a href="/">← Back</a></p>
 
 <section class="card">
-  <h2 style="margin:0 0 4px; font-size:18px; font-weight:500;">{{ e.source.title }}</h2>
+  <h2 style="margin:0 0 4px; font-size:18px; font-weight:500;">{% if e.distilled_note and e.distilled_note.title %}{{ e.distilled_note.title }}{% else %}{{ e.source.title }}{% endif %}</h2>
   <p class="muted" style="margin:0 0 14px;">Captured {{ e.source.captured_at[:16].replace("T"," ") }}</p>
+  {% if e.source.thumbnail_url %}
+  <img src="{{ e.source.thumbnail_url }}" alt="" style="width:160px; max-width:100%; border-radius:6px; margin:0 0 12px;">
+  {% endif %}
+  {% if e.source.url %}
+  <p style="margin:0 0 14px;"><a href="{{ e.source.url }}" target="_blank" rel="noopener">Watch on YouTube</a></p>
+  {% endif %}
+  {% if e.source.title %}<p class="muted" style="margin:0 0 4px;">Video: {{ e.source.title }}</p>{% endif %}
+  {% if e.source.channel %}<p class="muted" style="margin:0 0 14px;">Channel: {% if e.source.channel_url %}<a href="{{ e.source.channel_url }}" target="_blank" rel="noopener">{{ e.source.channel }}</a>{% else %}{{ e.source.channel }}{% endif %}</p>{% endif %}
 
   <div class="row wrap" style="margin-bottom:6px;">
     <span class="badge {% if e.triage.verdict == 'rich' %}ok{% elif e.triage.verdict == 'little_to_extract' %}warn{% endif %}">verdict: {{ e.triage.verdict }}</span>
@@ -66,7 +74,8 @@
   </div>
   {% endif %}
 
-  <p class="label" style="margin:18px 0 12px;">Evidence · {{ e.knowledge_items|length }} item{{ 's' if e.knowledge_items|length != 1 else '' }}</p>
+  <details style="margin-top:18px;">
+    <summary class="label">Source evidence · {{ e.knowledge_items|length }} item{{ 's' if e.knowledge_items|length != 1 else '' }}</summary>
   {% else %}
   <p class="label" style="margin:0 0 12px;">Knowledge · {{ e.knowledge_items|length }} item{{ 's' if e.knowledge_items|length != 1 else '' }}</p>
   {% endif %}
@@ -85,6 +94,9 @@
     <blockquote>"{{ it.provenance.quote }}"{% if it.provenance.timestamp %} <span class="muted">@ {{ it.provenance.timestamp }}</span>{% endif %}</blockquote>
   </div>
   {% endfor %}
+  {% if e.distilled_note %}
+  </details>
+  {% endif %}
 
   {% if e.application_links %}
   <p class="label" style="margin:16px 0 10px;">Application links</p>
@@ -130,6 +142,12 @@
       {% for r in reasons %}<option value="{{ r }}" {% if e.feedback.reason == r %}selected{% endif %}>{{ r }}</option>{% endfor %}
     </select>
   </div>
+</section>
+
+<section class="card">
+  <form method="post" action="/entries/{{ e.entry_id }}/delete" onsubmit="return confirm('Delete this entry? This cannot be undone.');">
+    <button type="submit" class="danger">Delete entry</button>
+  </form>
 </section>
 {% endblock %}
 

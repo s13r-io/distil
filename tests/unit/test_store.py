@@ -2,6 +2,7 @@
 
 import pytest
 
+from distil.embed import FakeEmbedder
 from distil.models import KBEntry
 from distil.store import Store
 
@@ -85,8 +86,19 @@ def test_new_note_entries_render_teaching_note_and_evidence(store):
     text = path.read_text()
     assert "## Core takeaway" in text
     assert "Small functions are easier to understand." in text
-    assert "## Evidence" in text
+    assert "<summary>Source evidence</summary>" in text
     assert "keep functions small" in text
+
+
+@pytest.mark.unit
+def test_new_note_entries_render_source_url_and_index_note_title(store):
+    entry = _entry(title="[English] weird_file-name.srt", with_note=True)
+    entry.source.url = "https://youtu.be/abc123"
+    path = store.file_entry(entry)
+    text = path.read_text()
+    assert "Source:* [Watch on YouTube](https://youtu.be/abc123)" in text
+    assert "# Small functions" in text
+    assert store.list_entries()[0].title == "Small functions"
 
 
 # ---- T-S2: index row inserted; re-filing same id updates, not duplicates ----
@@ -155,3 +167,19 @@ def test_candidate_lookup_by_topic(store):
     candidates = store.find_candidates(topics=["python"], knowledge_types=["heuristic"], exclude="e_01")
     ids = {c.entry_id for c in candidates}
     assert ids == {"e_02"}
+
+
+@pytest.mark.unit
+def test_delete_entry_removes_file_index_and_vectors(store):
+    store.file_entry(_entry(), embedder=FakeEmbedder(dim=8))
+    assert store.entry_path("e_01").exists()
+    assert store.vector_count() == 1
+    assert store.delete_entry("e_01") is True
+    assert not store.entry_path("e_01").exists()
+    assert store.list_entries() == []
+    assert store.vector_count() == 0
+
+
+@pytest.mark.unit
+def test_delete_missing_entry_returns_false(store):
+    assert store.delete_entry("e_missing") is False

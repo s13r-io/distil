@@ -27,6 +27,7 @@
   </button>
   <div class="collapse-body" style="margin-top:12px;">
     <textarea id="paste" placeholder="Paste a transcript…"></textarea>
+    <input type="url" id="source-url" placeholder="Optional YouTube URL" style="margin-top:10px;">
     <div class="row wrap" style="margin-top:10px;">
       <input type="file" id="file" accept=".srt,.txt,.md" style="flex:1; border:none; padding-left:0;">
     </div>
@@ -185,7 +186,9 @@ document.getElementById('distil-btn').addEventListener('click', async () => {
   const fd=new FormData();
   const file=document.getElementById('file').files[0];
   const paste=document.getElementById('paste').value;
+  const sourceUrl=document.getElementById('source-url').value;
   if(file) fd.append('file',file); else fd.append('paste',paste);
+  fd.append('source_url',sourceUrl);
   const msg=document.getElementById('add-msg');
   if(!file && !paste.trim()){msg.textContent='Paste a transcript or choose a file first.';return;}
   const btn=document.getElementById('distil-btn'); btn.disabled=true;
@@ -193,6 +196,7 @@ document.getElementById('distil-btn').addEventListener('click', async () => {
     const r=await fetch('/ingest',{method:'POST',body:fd});
     if(r.ok){
       document.getElementById('paste').value=''; document.getElementById('file').value='';
+      document.getElementById('source-url').value='';
       const panel=document.getElementById('add-panel');
       panel.classList.add('collapsed');
       document.getElementById('add-head').setAttribute('aria-expanded','false');

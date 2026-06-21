@@ -45,6 +45,7 @@ class Job:
     kind: str  # "paste" | "file"
     title: str
     payload: str  # pasted text, or a stored file path for uploads
+    source_url: str | None
     status: str
     entry_id: str | None
     summary: str | None  # e.g. "kept 6 items - verdict rich"
@@ -64,6 +65,7 @@ class Job:
             "job_id": self.job_id,
             "kind": self.kind,
             "title": self.title,
+            "source_url": self.source_url,
             "status": self.status,
             "entry_id": self.entry_id,
             "summary": self.summary,
@@ -100,6 +102,7 @@ class JobStore:
                 kind       TEXT NOT NULL,
                 title      TEXT NOT NULL,
                 payload    TEXT NOT NULL,
+                source_url TEXT,
                 status     TEXT NOT NULL,
                 entry_id   TEXT,
                 summary    TEXT,
@@ -109,27 +112,39 @@ class JobStore:
             )
             """
         )
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "source_url" not in cols:
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN source_url TEXT")
         self._conn.commit()
 
     def _row(self, r: sqlite3.Row) -> Job:
         return Job(
             job_id=r["job_id"], kind=r["kind"], title=r["title"], payload=r["payload"],
+            source_url=r["source_url"],
             status=r["status"], entry_id=r["entry_id"], summary=r["summary"],
             error=r["error"], created_at=r["created_at"], updated_at=r["updated_at"],
         )
 
-    def enqueue(self, *, kind: str, title: str, payload: str) -> Job:
+    def enqueue(
+        self,
+        *,
+        kind: str,
+        title: str,
+        payload: str,
+        source_url: str | None = None,
+    ) -> Job:
         now = _now()
         job = Job(
             job_id=f"j_{uuid.uuid4().hex[:12]}", kind=kind, title=title, payload=payload,
+            source_url=source_url,
             status=STATUS_QUEUED, entry_id=None, summary=None, error=None,
             created_at=now, updated_at=now,
         )
         self._conn.execute(
-            "INSERT INTO jobs (job_id, kind, title, payload, status, entry_id, summary, "
-            "error, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (job.job_id, job.kind, job.title, job.payload, job.status, None, None, None,
-             job.created_at, job.updated_at),
+            "INSERT INTO jobs (job_id, kind, title, payload, source_url, status, entry_id, "
+            "summary, error, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (job.job_id, job.kind, job.title, job.payload, job.source_url, job.status, None,
+             None, None, job.created_at, job.updated_at),
         )
         self._conn.commit()
         return job

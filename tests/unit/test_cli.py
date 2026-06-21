@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 from distil import cli
 from distil.llm import FakeClient
 from distil.models import Profile
+from distil.source import SourceMetadata
 
 runner = CliRunner()
 
@@ -67,11 +68,31 @@ def _fake(monkeypatch, responses):
 @pytest.mark.unit
 def test_c1_run_file_exits_zero_and_prints_path(env, monkeypatch, tmp_path):
     _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
-    src = tmp_path / "t.txt"
+    monkeypatch.setattr(
+        cli,
+        "fetch_youtube_oembed_metadata",
+        lambda _url: SourceMetadata(
+            title="Fetched Video Title",
+            channel="Fetched Channel",
+            channel_url="https://www.youtube.com/@fetched",
+            thumbnail_url="https://i.ytimg.com/vi/abc/hqdefault.jpg",
+            metadata_provider="youtube_oembed",
+            metadata_fetched_at="2026-06-21T00:00:00+00:00",
+        ),
+    )
+    src = tmp_path / "[English] my-video_title (Transcript).txt"
     src.write_text("Keep functions small and focused.")
-    result = runner.invoke(cli.app, ["run", str(src), "--no-graph"])
+    result = runner.invoke(
+        cli.app, ["run", str(src), "--url", "youtube.com/watch?v=abc", "--no-graph"]
+    )
     assert result.exit_code == 0, result.output
     assert ".md" in result.output
+    entry_id = result.output.strip().split("/")[-1].replace(".md", "").strip()
+    entry = cli._make_store().load_entry(entry_id)
+    assert entry.source.title == "Fetched Video Title"
+    assert entry.source.url == "https://youtube.com/watch?v=abc"
+    assert entry.source.channel == "Fetched Channel"
+    assert entry.source.thumbnail_url == "https://i.ytimg.com/vi/abc/hqdefault.jpg"
 
 
 @pytest.mark.unit
@@ -118,6 +139,11 @@ def test_c3_list_and_show(env, monkeypatch):
     assert "Keep functions small." in show.output
     assert "Core takeaway" in show.output
 
+    delete = runner.invoke(cli.app, ["delete", entry_id, "--yes"])
+    assert delete.exit_code == 0, delete.output
+    assert "Deleted" in delete.output
+    assert not cli._make_store().entry_path(entry_id).exists()
+
 
 @pytest.mark.unit
 def test_c3_show_missing_entry_is_friendly(env, monkeypatch):
@@ -142,4 +168,14 @@ def test_c3_run_bad_file_is_friendly(env, monkeypatch):
     _fake(monkeypatch, [_TRIAGE_RICH])
     result = runner.invoke(cli.app, ["run", "/no/such/file.txt", "--no-graph"])
     assert result.exit_code != 0
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.unit
+def test_c3_run_bad_url_is_friendly(env, monkeypatch):
+    result = runner.invoke(
+        cli.app, ["run", "--paste", "some content", "--url", "https://example.com/x"]
+    )
+    assert result.exit_code != 0
+    assert "YouTube URL" in result.output
     assert "Traceback" not in result.output

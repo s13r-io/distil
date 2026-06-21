@@ -44,13 +44,27 @@ def run_pipeline(
     *,
     source_title: str = "Untitled",
     source_url: str | None = None,
+    source_channel: str | None = None,
+    source_channel_url: str | None = None,
+    source_thumbnail_url: str | None = None,
+    source_metadata_provider: str | None = None,
+    source_metadata_fetched_at: str | None = None,
     config: PipelineConfig | None = None,
     embedder: Embedder | None = None,
 ) -> KBEntry:
     config = config or PipelineConfig()
     entry_id = f"e_{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc).isoformat()
-    source = Source(url=source_url, title=source_title, captured_at=now)
+    source = Source(
+        url=source_url,
+        title=source_title,
+        channel=source_channel,
+        channel_url=source_channel_url,
+        thumbnail_url=source_thumbnail_url,
+        metadata_provider=source_metadata_provider,
+        metadata_fetched_at=source_metadata_fetched_at,
+        captured_at=now,
+    )
     meta = EntryMeta(created_at=now, model_version=config.model_version)
 
     # Stage 1 — triage (always one LLM call).
