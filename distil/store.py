@@ -161,7 +161,30 @@ class Store:
 
     def list_entries(self) -> list[EntryIndexRow]:
         cur = self._conn.execute("SELECT * FROM entries ORDER BY created_at DESC, entry_id")
-        return [self._row_to_index(r) for r in cur.fetchall()]
+        rows: list[EntryIndexRow] = []
+        stale: list[tuple[str, bool]] = []
+        for r in cur.fetchall():
+            row = self._row_to_index(r)
+            if Path(row.file_path).exists():
+                try:
+                    entry = self.load_entry(row.entry_id)
+                except Exception:
+                    rows.append(row)
+                    continue
+                if entry.triage.verdict == "little_to_extract" and not entry.knowledge_items:
+                    stale.append((row.entry_id, True))
+                else:
+                    rows.append(row)
+            else:
+                stale.append((row.entry_id, False))
+        if stale:
+            with self._conn:
+                for entry_id, remove_file in stale:
+                    if remove_file:
+                        self.entry_path(entry_id).unlink(missing_ok=True)
+                    self._conn.execute("DELETE FROM item_vectors_meta WHERE entry_id = ?", (entry_id,))
+                    self._conn.execute("DELETE FROM entries WHERE entry_id = ?", (entry_id,))
+        return rows
 
     def find_candidates(
         self,
@@ -368,7 +391,7 @@ class Store:
         Store._append_source_metadata(lines, entry)
         if note.topics:
             lines.append("")
-            lines.append("*Topics:* " + ", ".join(note.topics))
+            lines.append("*Tags:* " + ", ".join(Store._display_tag(topic) for topic in note.topics))
         lines.append("")
 
         lines.append("## Core takeaway")
@@ -428,6 +451,14 @@ class Store:
             return text
         refs = ", ".join(f"`{item_id}`" for item_id in item_ids)
         return f"{text} ({refs})"
+
+    @staticmethod
+    def _display_tag(tag: str) -> str:
+        acronyms = {"ai", "api", "cli", "db", "kb", "llm", "ui", "ux"}
+        words = []
+        for part in tag.replace("_", " ").replace("-", " ").split():
+            words.append(part.upper() if part.lower() in acronyms else part.capitalize())
+        return " ".join(words)
 
     @staticmethod
     def _append_source_metadata(lines: list[str], entry: KBEntry) -> None:

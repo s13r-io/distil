@@ -465,14 +465,53 @@ button.danger:hover,
 .ask-actions .primary { min-width: 132px; }
 .ask-answer { font-size: 18px; line-height: 1.7; white-space: pre-wrap; }
 
+.source-group {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-muted);
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.source-group summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.source-group summary::-webkit-details-marker { display: none; }
+
+.source-title {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.source-count {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.source-evidence {
+  display: grid;
+  gap: 8px;
+  padding: 0 14px 14px;
+}
+
 .source {
   display: block;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 14px;
-  margin-bottom: 8px;
+  padding: 12px;
   color: inherit;
-  background: var(--surface-muted);
+  background: var(--surface);
 }
 
 .source:hover { text-decoration: none; background: var(--accent-bg); }
@@ -623,6 +662,65 @@ button.danger:hover,
 .library-filter-bar {
   padding: 16px 20px;
   border-bottom: 1px solid var(--line);
+}
+
+.score-filters {
+  margin-bottom: 12px;
+}
+
+.tag-cloud-panel {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.tag-cloud-panel summary {
+  position: relative;
+  cursor: pointer;
+  list-style: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  padding-right: 32px;
+}
+
+.tag-cloud-panel summary::-webkit-details-marker { display: none; }
+
+.tag-cloud-panel summary::before,
+.tag-cloud-panel summary::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  width: 12px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--text-muted);
+  transform: translateY(-50%);
+  transition: opacity .15s ease;
+}
+
+.tag-cloud-panel summary::after {
+  transform: translateY(-50%) rotate(90deg);
+}
+
+.tag-cloud-panel[open] summary::after {
+  opacity: 0;
+}
+
+.tag-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 12px;
+}
+
+.tag-chip {
+  min-height: 32px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 10px;
 }
 
 .search {

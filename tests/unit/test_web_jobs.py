@@ -6,9 +6,13 @@ fake distill_fn, and streaming is exercised via FakeClient.stream (zero network)
 
 import pytest
 
+from distil.embed import FakeEmbedder
 from distil.llm import FakeClient
-from distil.query import stream_ask
+from distil.models import KBEntry
+from distil.query import AskResult, Source, stream_ask
+from web import app as webapp
 from web import jobs as jobsmod
+from web.app import _ask_payload
 
 # ---- JobStore lifecycle ----------------------------------------------------------------
 
@@ -26,6 +30,41 @@ def test_enqueue_then_claim_marks_running(jobstore):
     claimed = jobstore.claim_next_queued()
     assert claimed.job_id == job.job_id
     assert jobstore.get(job.job_id).status == jobsmod.STATUS_RUNNING
+
+
+@pytest.mark.unit
+def test_ask_payload_includes_source_titles_for_grouping():
+    payload = _ask_payload(AskResult(
+        abstained=False,
+        answer="Use clear names.",
+        sources=[
+            Source(
+                item_id="k_01",
+                entry_id="e_1",
+                quote="clear names",
+                timestamp="00:01:00",
+                entry_title="Naming Functions",
+            )
+        ],
+    ))
+    assert payload["sources"][0]["title"] == "Naming Functions"
+
+
+@pytest.mark.unit
+def test_cached_embedder_reuses_loaded_instance(monkeypatch):
+    calls = 0
+    monkeypatch.setattr(webapp, "_EMBEDDER_CACHE", None)
+
+    def fake_make_embedder():
+        nonlocal calls
+        calls += 1
+        return FakeEmbedder(dim=8)
+
+    monkeypatch.setattr(webapp, "_make_embedder", fake_make_embedder)
+    first = webapp._cached_embedder()
+    second = webapp._cached_embedder()
+    assert first is second
+    assert calls == 1
 
 
 @pytest.mark.unit
@@ -102,6 +141,55 @@ def test_worker_processes_done_low_value_and_failed(tmp_path):
     assert store.get(low.job_id).status == jobsmod.STATUS_LOW_VALUE
     assert store.get(bad.job_id).status == jobsmod.STATUS_FAILED
     assert "ANTHROPIC_API_KEY" in store.get(bad.job_id).error
+
+
+@pytest.mark.unit
+def test_web_distill_job_skips_inline_graph_and_reports_timings(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
+    monkeypatch.setenv("DISTIL_KB_DIR", str(tmp_path / "kb"))
+    monkeypatch.setenv("DISTIL_MODEL", "test-model")
+    monkeypatch.setattr(webapp, "_make_client", lambda: object())
+    monkeypatch.setattr(webapp, "_cached_safe_embedder", lambda: None)
+    monkeypatch.setattr(webapp, "_fetch_source_metadata", lambda _url: webapp.SourceMetadata())
+    scheduled: list[str] = []
+    monkeypatch.setattr(webapp, "_schedule_graph_link",
+                        lambda entry_id: scheduled.append(entry_id) or True)
+    captured: dict[str, bool] = {}
+
+    def fake_run_pipeline(*_args, **kwargs):
+        config = kwargs["config"]
+        captured["enable_graph"] = config.enable_graph
+        config.timing_callback("triage", 1.26)
+        return KBEntry.model_validate({
+            "entry_id": "e_fast",
+            "source": {"title": "Fast note", "captured_at": "2026-06-15T00:00:00"},
+            "triage": {
+                "knowledge_types_present": [{"type": "heuristic", "share": 1.0}],
+                "density": "high",
+                "transcript_loss": {"level": "low", "evidence": []},
+                "verdict": "rich",
+            },
+            "knowledge_items": [{
+                "item_id": "k_01",
+                "type": "heuristic",
+                "statement": "Keep functions small.",
+                "stance": "opinion",
+                "provenance": {"quote": "keep functions small"},
+            }],
+            "tags": {"topics": ["function_design"], "knowledge_types": ["heuristic"]},
+            "meta": {"created_at": "2026-06-15T00:00:00", "model_version": "test"},
+        })
+
+    monkeypatch.setattr(webapp, "run_pipeline", fake_run_pipeline)
+    job = jobsmod.JobStore(tmp_path / "distil.db").enqueue(
+        kind="paste", title="t", payload="Keep functions small."
+    )
+    result = webapp._distill_job(job)
+    assert result["status"] == jobsmod.STATUS_DONE
+    assert captured["enable_graph"] is False
+    assert scheduled == ["e_fast"]
+    assert "triage 1.3s" in result["summary"]
+    assert "graph updating" in result["summary"]
 
 
 # ---- /ingest is non-blocking and /jobs reports state -----------------------------------
@@ -198,12 +286,16 @@ def test_stream_ask_streams_then_final(monkeypatch):
     ]
     monkeypatch.setattr(q, "retrieve", lambda *a, **k: fake_items)
     monkeypatch.setattr(q, "_detect_contradiction", lambda *a, **k: None)
-    client = FakeClient(responses=["Use clear names [k_01] always."])
+    client = FakeClient(responses=[
+        '{"answer":"Use clear names [k_01] always.","cited_item_ids":["k_01"],"conflict":null}'
+    ])
     events = list(stream_ask("q", store=object(), embedder=None, client=client))
     kinds = [e.kind for e in events]
     assert "delta" in kinds and kinds[-1] == "final"
     text = "".join(e.text for e in events if e.kind == "delta")
-    assert "clear names" in text
+    assert text == "Use clear names always."
+    assert "answer" not in text
+    assert "k_01" not in text
     final = events[-1].result
     assert final.abstained is False
     assert "k_01" in final.cited_item_ids  # grounded citation preserved

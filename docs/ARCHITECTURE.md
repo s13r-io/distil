@@ -41,7 +41,7 @@ raw input (pasted text or .srt / .txt / .md file) + profile
         ▼
 [1] Triage ──────────► triage verdict (types, density, loss, verdict)
         │                     │
-        │            if verdict == little_to_extract → file a minimal entry, stop
+        │            if verdict == little_to_extract → return low-value result, do not file
         ▼
 [2] Extract (routed by type) ──► raw knowledge items
         │

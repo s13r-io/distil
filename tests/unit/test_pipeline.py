@@ -93,11 +93,31 @@ def test_pl1_respects_llm_budget(profile, store):
     assert client.call_count <= 4  # triage + extract + link + note
 
 
-# ---- T-PL2: little_to_extract path files a minimal entry, makes no extract/link calls ----
+@pytest.mark.unit
+def test_pl1_reports_stage_timings(profile, store):
+    transcript = ingest_text("Keep functions small.")
+    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    timings: dict[str, float] = {}
+    run_pipeline(
+        transcript,
+        profile,
+        store,
+        client,
+        source_title="t",
+        config=PipelineConfig(
+            enable_graph=False,
+            timing_callback=lambda stage, seconds: timings.__setitem__(stage, seconds),
+        ),
+    )
+    assert {"triage", "extract", "normalize", "link", "note", "file"} <= set(timings)
+    assert all(seconds >= 0 for seconds in timings.values())
+
+
+# ---- T-PL2: little_to_extract path returns minimal entry, makes no extract/link calls ----
 
 
 @pytest.mark.unit
-def test_pl2_low_value_files_minimal_no_extract_calls(profile, store):
+def test_pl2_low_value_returns_minimal_without_filing(profile, store):
     transcript = ingest_text("hey guys smash that like button")
     client = FakeClient(responses=[_TRIAGE_LOW])  # ONLY triage; extra calls would IndexError
     entry = run_pipeline(transcript, profile, store, client, source_title="vlog")
@@ -106,8 +126,9 @@ def test_pl2_low_value_files_minimal_no_extract_calls(profile, store):
     assert entry.application_links == []
     # exactly one LLM call was made (triage); no extract/link/graph
     assert client.call_count == 1
-    # still filed (a minimal entry)
-    assert store.entry_path(entry.entry_id).exists()
+    # not filed: low-value jobs remain in Activity, not the Library
+    assert not store.entry_path(entry.entry_id).exists()
+    assert all(row.entry_id != entry.entry_id for row in store.list_entries())
 
 
 @pytest.mark.unit

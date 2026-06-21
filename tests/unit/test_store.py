@@ -91,6 +91,18 @@ def test_new_note_entries_render_teaching_note_and_evidence(store):
 
 
 @pytest.mark.unit
+def test_new_note_entries_render_humanized_tags(store):
+    entry = _entry(with_note=True)
+    entry.distilled_note.topics = ["ai_agent-memory", "function_design"]
+    path = store.file_entry(entry)
+    text = path.read_text()
+    body = text.split("---\n", 2)[-1]
+    assert "*Tags:* AI Agent Memory, Function Design" in body
+    assert "*Topics:*" not in body
+    assert "ai_agent-memory" not in body
+
+
+@pytest.mark.unit
 def test_new_note_entries_render_source_url_and_index_note_title(store):
     entry = _entry(title="[English] weird_file-name.srt", with_note=True)
     entry.source.url = "https://youtu.be/abc123"
@@ -122,6 +134,27 @@ def test_refiling_same_id_updates_not_duplicates(store):
     assert len(rows) == 1
     assert rows[0].title == "New title"
     assert rows[0].score == 5
+
+
+@pytest.mark.unit
+def test_list_entries_prunes_rows_whose_files_are_missing(store):
+    entry = _entry()
+    store.file_entry(entry)
+    store.entry_path(entry.entry_id).unlink()
+    assert store.list_entries() == []
+
+
+@pytest.mark.unit
+def test_list_entries_prunes_legacy_low_value_empty_entries(store):
+    entry = _entry(entry_id="e_low", title="Low value upload")
+    entry.triage.verdict = "little_to_extract"
+    entry.knowledge_items = []
+    store.file_entry(entry, embedder=FakeEmbedder(dim=8))
+
+    assert store.entry_path("e_low").exists()
+    assert store.list_entries() == []
+    assert not store.entry_path("e_low").exists()
+    assert store.vector_count() == 0
 
 
 # ---- T-S3: KB and DB survive process restart (persistence) ----

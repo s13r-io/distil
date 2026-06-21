@@ -148,7 +148,11 @@ def run(
         _fail(f"{exc}")
         return
 
-    typer.echo(str(store.entry_path(entry.entry_id)))
+    path = store.entry_path(entry.entry_id)
+    if not path.exists():
+        typer.echo(f"Nothing filed: verdict {entry.triage.verdict}.")
+        return
+    typer.echo(str(path))
 
 
 def _fetch_source_metadata(source_url: str | None) -> SourceMetadata:

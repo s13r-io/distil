@@ -135,6 +135,34 @@ def test_library_page_renders(seeded, monkeypatch):
     assert r.status_code == 200
     assert "Saved notes" in r.text
     assert "Search titles or tags" in r.text
+    assert "1 star" in r.text
+    assert "2 star" in r.text
+
+
+@pytest.mark.unit
+def test_library_page_renders_collapsed_humanized_tag_cloud(seeded, monkeypatch):
+    monkeypatch.setenv("DISTIL_PUBLIC", "false")
+    store = Store(db_path=seeded / "distil.db", kb_dir=seeded / "kb")
+    entry = KBEntry.model_validate({
+        "entry_id": "e_tags",
+        "source": {"title": "Tagged", "captured_at": "2026-06-15T00:00:00"},
+        "triage": {
+            "knowledge_types_present": [{"type": "heuristic", "share": 1.0}],
+            "density": "high",
+            "transcript_loss": {"level": "low", "evidence": []},
+            "verdict": "rich",
+        },
+        "knowledge_items": [],
+        "tags": {"topics": ["ai_agent_memory"], "knowledge_types": ["heuristic"]},
+        "meta": {"created_at": "2026-06-15T00:00:00", "model_version": "test"},
+    })
+    store.file_entry(entry)
+    client = TestClient(create_app())
+    r = client.get("/library")
+    assert r.status_code == 200
+    assert "<summary>Content tags</summary>" in r.text
+    assert ">AI Agent Memory</button>" in r.text
+    assert ">ai_agent_memory</button>" not in r.text
 
 
 @pytest.mark.unit
@@ -184,6 +212,10 @@ def test_entry_page_renders_distilled_note(seeded, monkeypatch):
     assert "Watch on YouTube" in r.text
     assert "Talk Channel" in r.text
     assert "hqdefault.jpg" in r.text
+    assert ">Tags</h2>" in r.text
+    assert ">Topics</h2>" not in r.text
+    assert "Function Design" in r.text
+    assert "function_design" not in r.text
 
 
 @pytest.mark.unit
@@ -205,7 +237,7 @@ def test_entry_delete_route_removes_entry(seeded, monkeypatch):
     client = TestClient(create_app(), follow_redirects=False)
     r = client.post("/entries/e_delete/delete")
     assert r.status_code == 303
-    assert r.headers["location"] == "/"
+    assert r.headers["location"] == "/library"
     assert not store.entry_path("e_delete").exists()
 
 

@@ -21,6 +21,11 @@ _TRIAGE_RICH = json.dumps({
     "knowledge_types_present": [{"type": "heuristic", "share": 1.0}],
     "density": "high", "transcript_loss": {"level": "low", "evidence": []}, "verdict": "rich",
 })
+_TRIAGE_LOW = json.dumps({
+    "knowledge_types_present": [],
+    "density": "low", "transcript_loss": {"level": "low", "evidence": []},
+    "verdict": "little_to_extract",
+})
 _EXTRACT = json.dumps([{
     "type": "heuristic", "statement": "Keep functions small.", "stance": "opinion",
     "speaker_confidence": "high",
@@ -108,6 +113,17 @@ def test_c1_run_paste_via_option(env, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert ".md" in result.output
+
+
+@pytest.mark.unit
+def test_c1_low_value_run_prints_nothing_filed(env, monkeypatch):
+    _fake(monkeypatch, [_TRIAGE_LOW])
+    result = runner.invoke(
+        cli.app, ["run", "--paste", "hey guys smash that like button", "--no-graph"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Nothing filed" in result.output
+    assert cli._make_store().list_entries() == []
 
 
 # ---- T-C2: distil score mutates the profile ----

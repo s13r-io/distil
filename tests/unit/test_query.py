@@ -136,6 +136,7 @@ def test_q3_answer_cites_only_retrieved_items(store, embedder):
     assert not result.abstained
     retrieved_ids = {s.item_id for s in result.sources}
     assert set(result.cited_item_ids) <= retrieved_ids  # no citation outside retrieved set
+    assert result.answer == "Write tests first and keep functions small."
 
 
 @pytest.mark.unit
@@ -152,6 +153,7 @@ def test_q3_citations_outside_retrieved_set_are_flagged(store, embedder):
     retrieved_ids = {s.item_id for s in result.sources}
     assert "k_fake" not in retrieved_ids
     assert result.ungrounded_citations == ["k_fake"]
+    assert result.answer == "Use microservices always."
 
 
 @pytest.mark.unit
@@ -184,6 +186,7 @@ def test_q4_sources_resolve_to_entry_item_provenance(store, embedder):
     result = ask("testing", store, embedder, client, threshold=0.0, top_k=3)
     src = next(s for s in result.sources if s.item_id == "k_py1")
     assert src.entry_id == "e_py"
+    assert src.entry_title == "e py"
     assert src.timestamp == "00:01:00"
     assert src.quote
 

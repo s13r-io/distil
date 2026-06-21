@@ -29,14 +29,25 @@
     </div>
 
     <div class="library-filter-bar">
-      <div class="toolbar" id="filter-chips">
+      <div class="toolbar score-filters" id="filter-chips">
         <button type="button" class="chip" data-filter="scored" aria-pressed="false">Scored</button>
         <button type="button" class="chip" data-filter="unscored" aria-pressed="false">Unscored</button>
         <button type="button" class="chip" data-filter="star5" aria-pressed="false">5 star</button>
         <button type="button" class="chip" data-filter="star4" aria-pressed="false">4 star</button>
         <button type="button" class="chip" data-filter="star3" aria-pressed="false">3 star</button>
-        {% for t in all_tags %}<button type="button" class="chip" data-tag="{{ t }}" aria-pressed="false">{{ t }}</button>{% endfor %}
+        <button type="button" class="chip" data-filter="star2" aria-pressed="false">2 star</button>
+        <button type="button" class="chip" data-filter="star1" aria-pressed="false">1 star</button>
       </div>
+      {% if all_tags %}
+      <details class="tag-cloud-panel">
+        <summary>Content tags</summary>
+        <div class="tag-cloud" id="tag-cloud">
+          {% for t in all_tags %}
+          <button type="button" class="chip tag-chip" data-tag="{{ t.value }}" aria-pressed="false">{{ t.label }}</button>
+          {% endfor %}
+        </div>
+      </details>
+      {% endif %}
     </div>
 
     <div id="lib-list" class="library-list"></div>
@@ -79,6 +90,12 @@ function formatDate(s){
   if(!s) return '';
   return s.slice(0,16).replace('T',' ');
 }
+function labelTag(t){
+  const acronyms=new Set(['ai','api','cli','db','kb','llm','ui','ux']);
+  return String(t||'').replace(/[_-]+/g,' ').split(/\s+/).filter(Boolean)
+    .map(w=>acronyms.has(w.toLowerCase())?w.toUpperCase():w.charAt(0).toUpperCase()+w.slice(1))
+    .join(' ');
+}
 function renderLib(){
   const sort=document.getElementById('sort').value;
   let list=ENTRIES.filter(matches);
@@ -89,7 +106,7 @@ function renderLib(){
       ? '<span class="badge ok">score '+en.score+'</span>'
       : '<span class="badge">unscored</span>';
     const tags=[...(en.topics||[]),...(en.knowledge_types||[])].slice(0,6)
-      .map(t=>'<span class="badge">'+esc(t)+'</span>').join(' ');
+      .map(t=>'<span class="badge">'+esc(labelTag(t))+'</span>').join(' ');
     return '<a class="entryrow" href="/entries/'+encodeURIComponent(en.entry_id)+'">'
       +'<div class="top"><span class="entry-title">'+esc(en.title)+'</span>'+badge+'</div>'
       +'<div class="meta-line"><span class="muted">'+esc(formatDate(en.created_at))+'</span>'+tags+'</div></a>';
@@ -121,10 +138,19 @@ document.querySelectorAll('#filter-chips .chip').forEach(chip=>{
     shown=PAGE; renderLib();
   };
 });
+document.querySelectorAll('#tag-cloud .chip').forEach(chip=>{
+  chip.onclick=()=>{
+    const isOn=chip.classList.toggle('on');
+    chip.setAttribute('aria-pressed', String(isOn));
+    isOn?activeTags.add(chip.dataset.tag):activeTags.delete(chip.dataset.tag);
+    shown=PAGE; renderLib();
+  };
+});
 document.getElementById('clear-filters').onclick=e=>{
   e.preventDefault(); activeTags.clear(); activeFilters.clear();
   document.getElementById('search').value='';
   document.querySelectorAll('#filter-chips .chip.on').forEach(c=>{c.classList.remove('on');c.setAttribute('aria-pressed','false');});
+  document.querySelectorAll('#tag-cloud .chip.on').forEach(c=>{c.classList.remove('on');c.setAttribute('aria-pressed','false');});
   shown=PAGE; renderLib();
 };
 renderLib();

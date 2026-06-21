@@ -84,9 +84,9 @@
 
       {% if n.topics %}
       <section class="note-section">
-        <h2>Topics</h2>
+        <h2>Tags</h2>
         <div class="row wrap">
-          {% for topic in n.topics %}<span class="badge">{{ topic }}</span>{% endfor %}
+          {% for topic in n.topics %}<span class="badge">{{ topic|humanize_tag }}</span>{% endfor %}
         </div>
       </section>
       {% endif %}

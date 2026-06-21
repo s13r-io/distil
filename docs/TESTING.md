@@ -114,7 +114,7 @@ that must abstain.
 
 ### pipeline.py
 - T-PL1: end-to-end with FakeClient produces a complete, schema-valid KBEntry with `distilled_note`.
-- T-PL2: `little_to_extract` path files a minimal entry and makes no extract/link calls.
+- T-PL2: `little_to_extract` path returns a minimal result without filing and makes no extract/link calls.
 - T-PL3: useful transcript with graph disabled stays within four LLM calls: triage, extract, link, note.
 
 ### cli.py

@@ -11,7 +11,9 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import threading
 from pathlib import Path
+from time import perf_counter
 
 from fastapi import FastAPI, Form, Request, UploadFile
 from fastapi.responses import (
@@ -23,7 +25,8 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from distil.cli import _make_client, _make_embedder, _safe_embedder
+from distil.cli import _make_client, _make_embedder
+from distil.graph import link_graph
 from distil.ingest import ingest_file, ingest_text
 from distil.pipeline import PipelineConfig, run_pipeline
 from distil.profile_update import apply_feedback
@@ -46,6 +49,8 @@ _USER_ID = "owner"
 _TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 _STATIC_DIR = Path(__file__).parent / "static"
 _UPLOAD_DIR = Path(tempfile.gettempdir()) / "distil_uploads"
+_EMBEDDER_LOCK = threading.Lock()
+_EMBEDDER_CACHE = None
 
 
 def _db_path() -> str:
@@ -66,24 +71,29 @@ def _default_profile():
     return Profile(user_id=_USER_ID)
 
 
+def _humanize_tag(tag: str) -> str:
+    acronyms = {"ai", "api", "cli", "db", "kb", "llm", "ui", "ux"}
+    parts = tag.replace("_", " ").replace("-", " ").split()
+    words = [part.upper() if part.lower() in acronyms else part.capitalize() for part in parts]
+    return " ".join(words)
+
+
+_TEMPLATES.env.filters["humanize_tag"] = _humanize_tag
+
+
 def _distill_job(job: jobsmod.Job) -> dict:
     """Worker callback: run the pipeline for one job, return a small result dict.
 
     Builds fresh Store/client/embedder on the worker thread (no cross-thread sqlite sharing).
     """
+    timings: dict[str, float] = {}
+    total_start = perf_counter()
     store = _store()
     profile = store.load_profile(_USER_ID) or _default_profile()
-    if job.kind == "file":
-        p = Path(job.payload)
-        try:
-            transcript = ingest_file(str(p))
-        finally:
-            p.unlink(missing_ok=True)
-    else:
-        transcript = ingest_text(job.payload)
+    transcript = _time_block(timings, "ingest", lambda: _load_job_transcript(job))
     client = _make_client()
-    embedder = _safe_embedder()
-    source_meta = _fetch_source_metadata(job.source_url)
+    embedder = _time_block(timings, "embedder", _cached_safe_embedder)
+    source_meta = _time_block(timings, "metadata", lambda: _fetch_source_metadata(job.source_url))
     entry = run_pipeline(
         transcript, profile, store, client,
         source_title=source_meta.title or job.title,
@@ -93,15 +103,98 @@ def _distill_job(job: jobsmod.Job) -> dict:
         source_thumbnail_url=source_meta.thumbnail_url,
         source_metadata_provider=source_meta.metadata_provider,
         source_metadata_fetched_at=source_meta.metadata_fetched_at,
-        config=PipelineConfig(model_version=os.environ.get("DISTIL_MODEL", "")),
+        config=PipelineConfig(
+            model_version=os.environ.get("DISTIL_MODEL", ""),
+            enable_graph=False,
+            timing_callback=lambda stage, seconds: timings.__setitem__(stage, seconds),
+        ),
         embedder=embedder,
     )
+    total = perf_counter() - total_start
     n = len(entry.knowledge_items)
     if n == 0 and entry.triage.verdict == "little_to_extract":
-        return {"status": jobsmod.STATUS_LOW_VALUE, "entry_id": entry.entry_id,
-                "summary": "Not much to extract — verdict little_to_extract. Nothing filed."}
+        return {"status": jobsmod.STATUS_LOW_VALUE, "entry_id": None,
+                "summary": "Not much to extract — verdict little_to_extract. Nothing filed. "
+                           f"{_format_timings(timings, total)}"}
+    graph_scheduled = _schedule_graph_link(entry.entry_id) if entry.tags.topics else False
+    graph_note = " · graph updating" if graph_scheduled else ""
     return {"status": jobsmod.STATUS_DONE, "entry_id": entry.entry_id,
-            "summary": f"kept {n} item{'s' if n != 1 else ''} · verdict {entry.triage.verdict}"}
+            "summary": f"kept {n} item{'s' if n != 1 else ''} · verdict {entry.triage.verdict} "
+                       f"· {_format_timings(timings, total)}{graph_note}"}
+
+
+def _load_job_transcript(job: jobsmod.Job):
+    if job.kind == "file":
+        p = Path(job.payload)
+        try:
+            return ingest_file(str(p))
+        finally:
+            p.unlink(missing_ok=True)
+    return ingest_text(job.payload)
+
+
+def _cached_embedder():
+    global _EMBEDDER_CACHE
+    if _EMBEDDER_CACHE is not None:
+        return _EMBEDDER_CACHE
+    with _EMBEDDER_LOCK:
+        if _EMBEDDER_CACHE is None:
+            _EMBEDDER_CACHE = _make_embedder()
+        return _EMBEDDER_CACHE
+
+
+def _cached_safe_embedder():
+    try:
+        return _cached_embedder()
+    except Exception:
+        return None
+
+
+def _time_block(timings: dict[str, float], stage: str, fn):
+    start = perf_counter()
+    try:
+        return fn()
+    finally:
+        timings[stage] = perf_counter() - start
+
+
+def _format_timings(timings: dict[str, float], total: float) -> str:
+    ordered = [
+        "ingest", "metadata", "triage", "extract", "normalize", "link", "note",
+        "embedder", "file",
+    ]
+    parts = [
+        f"{stage} {timings[stage]:.1f}s"
+        for stage in ordered
+        if timings.get(stage, 0.0) >= 0.05
+    ]
+    detail = ", ".join(parts[:6])
+    return f"{total:.1f}s" + (f" ({detail})" if detail else "")
+
+
+def _schedule_graph_link(entry_id: str) -> bool:
+    thread = threading.Thread(
+        target=_graph_link_job,
+        args=(entry_id,),
+        name=f"distil-graph-{entry_id}",
+        daemon=True,
+    )
+    thread.start()
+    return True
+
+
+def _graph_link_job(entry_id: str) -> None:
+    store = _store()
+    try:
+        entry = store.load_entry(entry_id)
+        if not entry.tags.topics:
+            return
+        related = link_graph(entry, store, _make_client())
+        if related:
+            entry.related_entries = related
+            store.file_entry(entry)
+    except Exception:
+        return
 
 
 def _fetch_source_metadata(source_url: str | None) -> SourceMetadata:
@@ -166,7 +259,8 @@ def create_app() -> FastAPI:
             for r in rows
         ]
         all_tags = sorted({t for r in rows for t in (list(r.topics) + list(r.knowledge_types))})
-        return {"entries": entries, "all_tags": all_tags, "entry_count": len(entries)}
+        tag_options = [{"value": tag, "label": _humanize_tag(tag)} for tag in all_tags]
+        return {"entries": entries, "all_tags": tag_options, "entry_count": len(entries)}
 
     # ---- home / ask ----
     @app.get("/", response_class=HTMLResponse)
@@ -285,20 +379,20 @@ def create_app() -> FastAPI:
         store = _store()
         if not store.delete_entry(entry_id):
             return JSONResponse({"detail": "not found"}, status_code=404)
-        return RedirectResponse(url="/", status_code=303)
+        return RedirectResponse(url="/library", status_code=303)
 
     # ---- ask (JSON, all-at-once fallback) ----
     @app.get("/ask")
     def ask(q: str, lookup: bool = False):
         store = _store()
-        result = run_ask(q, store, _make_embedder(), _make_client(), lookup_only=lookup)
+        result = run_ask(q, store, _cached_embedder(), _make_client(), lookup_only=lookup)
         return _ask_payload(result)
 
     # ---- ask (streaming) ----
     @app.get("/ask/stream")
     def ask_stream(q: str):
         store = _store()
-        embedder = _make_embedder()
+        embedder = _cached_embedder()
         client = _make_client()
 
         def gen():
@@ -329,7 +423,7 @@ def _ask_payload(result) -> dict:
         "conflict": result.conflict,
         "sources": [
             {"entry_id": s.entry_id, "item_id": s.item_id,
-             "quote": s.quote, "timestamp": s.timestamp}
+             "quote": s.quote, "timestamp": s.timestamp, "title": s.entry_title}
             for s in result.sources
         ],
     }

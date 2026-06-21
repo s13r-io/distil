@@ -48,6 +48,7 @@ class RetrievedItem:
     timestamp: str | None
     similarity: float
     score: float  # composite rank score (similarity × feedback × recency)
+    entry_title: str = ""
     context: str = ""
 
 
@@ -57,6 +58,7 @@ class Source:
     entry_id: str
     quote: str
     timestamp: str | None
+    entry_title: str = ""
 
 
 @dataclass
@@ -92,7 +94,8 @@ def retrieve(
         scored.append(RetrievedItem(
             item_id=item_id, entry_id=entry_id, statement=item.statement,
             quote=item.provenance.quote, timestamp=item.provenance.timestamp,
-            similarity=sim, score=composite, context=context,
+            similarity=sim, score=composite, entry_title=meta.title if meta else entry_id,
+            context=context,
         ))
     scored.sort(key=lambda r: r.score, reverse=True)
     return scored[:top_k]
@@ -119,7 +122,7 @@ def ask(
                     "so it won't guess from outside knowledge.",
         )
 
-    sources = [Source(r.item_id, r.entry_id, r.quote, r.timestamp) for r in cleared]
+    sources = [Source(r.item_id, r.entry_id, r.quote, r.timestamp, r.entry_title) for r in cleared]
 
     # Bare lookup: just the ranked sources, no synthesis call (T-Q5).
     if lookup_only:
@@ -176,10 +179,9 @@ def stream_ask(
         citations, conflict). Sources resolve only after the stream completes.
       * ``error`` — the stream failed partway; callers discard any partial answer and offer retry.
 
-    The answer is streamed using inline ``[item_id]`` citation markers (the synthesis prompt
-    already asks for these); citations and conflict are parsed once the stream closes, so the
-    JSON-or-inline parsing in :func:`_parse_synthesis` is reused without needing a valid-JSON
-    prefix mid-stream.
+    The synthesis contract is JSON, so raw model chunks are buffered and parsed before any
+    answer text is emitted. This prevents the web UI from briefly showing JSON keys or internal
+    ``k_01`` citation IDs; those IDs remain available only in the final structured result.
     """
     results = retrieve(question, store, embedder, top_k=top_k)
     cleared = [r for r in results if r.similarity >= threshold]
@@ -192,7 +194,7 @@ def stream_ask(
         yield StreamEvent(kind="abstain", text=abstain.message, result=abstain)
         return
 
-    sources = [Source(r.item_id, r.entry_id, r.quote, r.timestamp) for r in cleared]
+    sources = [Source(r.item_id, r.entry_id, r.quote, r.timestamp, r.entry_title) for r in cleared]
     notes_block = _render_notes(cleared)
     prompt = build_synthesis_prompt(question, notes_block)
 
@@ -208,13 +210,14 @@ def stream_ask(
             if not delta:
                 continue
             chunks.append(delta)
-            yield StreamEvent(kind="delta", text=delta)
     except Exception as exc:  # WEB_UI_SPEC §9: discard partial, signal retry
         yield StreamEvent(kind="error", text=str(exc) or exc.__class__.__name__)
         return
 
     raw = "".join(chunks)
     answer, cited, conflict = _parse_synthesis(raw)
+    if answer:
+        yield StreamEvent(kind="delta", text=answer)
     retrieved_ids = {r.item_id for r in cleared}
     grounded = [c for c in cited if c in retrieved_ids]
     ungrounded = [c for c in cited if c not in retrieved_ids]
@@ -286,10 +289,19 @@ def _parse_synthesis(raw: str) -> tuple[str, list[str], str | None]:
         # Backfill citations from inline [id] markers if the field is empty.
         if not cited:
             cited = _CITATION.findall(answer)
-        return answer, cited, conflict
+        return _clean_answer_text(answer), cited, conflict
     except json.JSONDecodeError:
         # Degrade gracefully: treat the whole response as the answer; extract inline cites.
-        return text, _CITATION.findall(text), None
+        return _clean_answer_text(text), _CITATION.findall(text), None
+
+
+def _clean_answer_text(answer: str) -> str:
+    """Remove internal item-id citation markers from reader-facing answer text."""
+    text = _CITATION.sub("", answer)
+    text = re.sub(r"[ \t]+([.,;:!?])", r"\1", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def _detect_contradiction(store: Store, items: list[RetrievedItem]) -> str | None:

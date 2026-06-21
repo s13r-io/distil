@@ -95,13 +95,30 @@ function resetAsk(){
 }
 function renderSources(srcs){
   if(!srcs||!srcs.length) return '';
-  let h='<p class="muted" style="margin:14px 0 8px;">Sources / '+srcs.length+'</p>';
-  for(const s of srcs){
-    const ts=s.timestamp?(' @ '+esc(s.timestamp)):'';
-    h+='<a class="source" href="/entries/'+encodeURIComponent(s.entry_id)+'#'+esc(s.item_id)+'">'
-      +'<span class="q">"'+esc(s.quote)+'"</span>'
-      +'<span class="ref">'+esc(s.entry_id)+' / '+esc(s.item_id)+ts+' -></span></a>';
-  }
+  const groups=[];
+  const seen=new Map();
+  srcs.forEach((s,i)=>{
+    const key=s.entry_id;
+    if(!seen.has(key)){
+      const group={entry_id:s.entry_id,title:s.title||s.entry_title||s.entry_id,items:[]};
+      seen.set(key,group); groups.push(group);
+    }
+    seen.get(key).items.push({...s,sourceNumber:i+1});
+  });
+  let h='<p class="muted" style="margin:14px 0 8px;">Sources / '+groups.length+' note'+(groups.length===1?'':'s')+' · '+srcs.length+' evidence item'+(srcs.length===1?'':'s')+'</p>';
+  groups.forEach(g=>{
+    const count=g.items.length;
+    h+='<details class="source-group">'
+      +'<summary><span class="source-title">'+esc(g.title)+'</span><span class="source-count">'+count+' evidence item'+(count===1?'':'s')+'</span></summary>'
+      +'<div class="source-evidence">';
+    g.items.forEach(s=>{
+      const ts=s.timestamp?(' @ '+esc(s.timestamp)):'';
+      h+='<a class="source" href="/entries/'+encodeURIComponent(s.entry_id)+'#'+esc(s.item_id)+'">'
+        +'<span class="q">"'+esc(s.quote)+'"</span>'
+        +'<span class="ref">Evidence '+s.sourceNumber+ts+' -></span></a>';
+    });
+    h+='</div></details>';
+  });
   return h;
 }
 function showFinal(p){
@@ -160,6 +177,10 @@ async function streamAsk(q){
         a.innerHTML='Answer interrupted. <a href="#" id="retry">Retry</a>';a.classList.remove('hide');
         document.getElementById('retry').onclick=(e)=>{e.preventDefault();a.className='banner info';askBtn.click();};
       }else if(ev.type==='final'){
+        if(ev.answer!=null){
+          ansEl.textContent=ev.answer;
+          if(!answerStarted){answerStarted=true;document.getElementById('ask-status').classList.add('hide');document.getElementById('ask-result').classList.remove('hide');}
+        }
         if(ev.conflict){const c=document.getElementById('ask-conflict');c.textContent='Conflict: '+ev.conflict;c.classList.remove('hide');}
         document.getElementById('ask-sources').innerHTML=renderSources(ev.sources);
       }
