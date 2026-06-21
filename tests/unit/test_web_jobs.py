@@ -4,6 +4,8 @@ These protect the new web surface without making real LLM calls: the worker is d
 fake distill_fn, and streaming is exercised via FakeClient.stream (zero network).
 """
 
+import json
+
 import pytest
 
 from distil.embed import FakeEmbedder
@@ -144,7 +146,7 @@ def test_worker_processes_done_low_value_and_failed(tmp_path):
 
 
 @pytest.mark.unit
-def test_web_distill_job_skips_inline_graph_and_reports_timings(tmp_path, monkeypatch):
+def test_web_distill_job_skips_inline_graph_and_reports_timings(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
     monkeypatch.setenv("DISTIL_KB_DIR", str(tmp_path / "kb"))
     monkeypatch.setenv("DISTIL_MODEL", "test-model")
@@ -190,6 +192,13 @@ def test_web_distill_job_skips_inline_graph_and_reports_timings(tmp_path, monkey
     assert scheduled == ["e_fast"]
     assert "triage 1.3s" in result["summary"]
     assert "graph updating" in result["summary"]
+    out = capsys.readouterr().out
+    line = next(line for line in out.splitlines() if line.startswith("distil_timing "))
+    payload = json.loads(line.removeprefix("distil_timing "))
+    assert payload["job_id"] == job.job_id
+    assert payload["entry_id"] == "e_fast"
+    assert payload["status"] == "done"
+    assert payload["timings"]["triage"] == 1.26
 
 
 # ---- /ingest is non-blocking and /jobs reports state -----------------------------------

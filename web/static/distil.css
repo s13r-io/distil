@@ -832,6 +832,57 @@ button.danger:hover,
   background: var(--surface);
 }
 
+.core-head,
+.note-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.note-toolbar {
+  margin-bottom: 8px;
+}
+
+.note-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.note-action {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: var(--pill);
+  padding: 0 11px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.note-actions.compact {
+  gap: 6px;
+}
+
+.note-action.icon-only {
+  width: 30px;
+  min-height: 30px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.note-action:hover {
+  background: var(--accent-bg);
+  color: var(--text);
+  text-decoration: none;
+}
+
 .note-section {
   padding: 22px;
   border-bottom: 1px solid var(--line);

@@ -375,6 +375,57 @@ class Store:
         return "\n".join(lines)
 
     @staticmethod
+    def teaching_note_markdown(entry: KBEntry) -> str:
+        """Reader-facing markdown export for copy/download, without front matter or item IDs."""
+        if entry.distilled_note is None:
+            text = Store._render_markdown(entry)
+            try:
+                return text.split(f"{_FRONT_MATTER_DELIM}\n", 2)[-1].strip() + "\n"
+            except ValueError:
+                return text.strip() + "\n"
+
+        note = entry.distilled_note
+        lines: list[str] = [f"# {display_title(entry.source.title, note.title)}", ""]
+        lines.append("## Metadata")
+        lines.append("")
+        if entry.source.title:
+            lines.append(f"- Source title: {entry.source.title}")
+        if entry.source.url:
+            lines.append(f"- Source URL: {entry.source.url}")
+        if entry.source.channel:
+            lines.append(f"- Channel: {entry.source.channel}")
+        lines.append(f"- Captured: {entry.source.captured_at}")
+        lines.append(f"- Verdict: {entry.triage.verdict}")
+        lines.append(f"- Density: {entry.triage.density}")
+        if note.topics:
+            lines.append("- Tags: " + ", ".join(Store._display_tag(topic) for topic in note.topics))
+        lines.append("")
+
+        lines.append("## Core takeaway")
+        lines.append("")
+        lines.append(note.core_takeaway.text)
+        lines.append("")
+        Store._append_export_section(lines, "Key points", [p.text for p in note.key_points])
+        Store._append_export_section(lines, "Why it matters", [p.text for p in note.why_it_matters])
+        Store._append_export_section(
+            lines, "How to apply this", [step.text for step in note.how_to_apply], ordered=True
+        )
+        Store._append_export_section(lines, "Caveats", [c.text for c in note.caveats])
+        Store._append_export_section(
+            lines,
+            "Review questions",
+            [question.question for question in note.review_questions],
+            ordered=True,
+        )
+        if note.topics:
+            lines.append("## Tags")
+            lines.append("")
+            for topic in note.topics:
+                lines.append(f"- {Store._display_tag(topic)}")
+            lines.append("")
+        return "\n".join(lines).strip() + "\n"
+
+    @staticmethod
     def _render_note_body(entry: KBEntry) -> list[str]:
         note = entry.distilled_note
         assert note is not None
@@ -459,6 +510,20 @@ class Store:
         for part in tag.replace("_", " ").replace("-", " ").split():
             words.append(part.upper() if part.lower() in acronyms else part.capitalize())
         return " ".join(words)
+
+    @staticmethod
+    def _append_export_section(
+        lines: list[str], title: str, values: list[str], *, ordered: bool = False
+    ) -> None:
+        values = [value.strip() for value in values if value.strip()]
+        if not values:
+            return
+        lines.append(f"## {title}")
+        lines.append("")
+        for idx, value in enumerate(values, start=1):
+            prefix = f"{idx}." if ordered else "-"
+            lines.append(f"{prefix} {value}")
+        lines.append("")
 
     @staticmethod
     def _append_source_metadata(lines: list[str], entry: KBEntry) -> None:

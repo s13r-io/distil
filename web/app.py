@@ -8,7 +8,9 @@ with inline scoring. Auth (web/auth.py) is unchanged and gates every data route;
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -20,6 +22,7 @@ from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
+    Response,
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
@@ -37,6 +40,7 @@ from distil.source import (
     SourceMetadataError,
     SourceUrlError,
     clean_source_title,
+    display_title,
     fetch_youtube_oembed_metadata,
     normalize_youtube_url,
 )
@@ -113,11 +117,15 @@ def _distill_job(job: jobsmod.Job) -> dict:
     total = perf_counter() - total_start
     n = len(entry.knowledge_items)
     if n == 0 and entry.triage.verdict == "little_to_extract":
+        _emit_timing_log(job, entry.entry_id, jobsmod.STATUS_LOW_VALUE, entry.triage.verdict, n,
+                         timings, total)
         return {"status": jobsmod.STATUS_LOW_VALUE, "entry_id": None,
                 "summary": "Not much to extract — verdict little_to_extract. Nothing filed. "
                            f"{_format_timings(timings, total)}"}
     graph_scheduled = _schedule_graph_link(entry.entry_id) if entry.tags.topics else False
     graph_note = " · graph updating" if graph_scheduled else ""
+    _emit_timing_log(job, entry.entry_id, jobsmod.STATUS_DONE, entry.triage.verdict, n,
+                     timings, total)
     return {"status": jobsmod.STATUS_DONE, "entry_id": entry.entry_id,
             "summary": f"kept {n} item{'s' if n != 1 else ''} · verdict {entry.triage.verdict} "
                        f"· {_format_timings(timings, total)}{graph_note}"}
@@ -170,6 +178,27 @@ def _format_timings(timings: dict[str, float], total: float) -> str:
     ]
     detail = ", ".join(parts[:6])
     return f"{total:.1f}s" + (f" ({detail})" if detail else "")
+
+
+def _emit_timing_log(
+    job: jobsmod.Job,
+    entry_id: str,
+    status: str,
+    verdict: str,
+    item_count: int,
+    timings: dict[str, float],
+    total: float,
+) -> None:
+    payload = {
+        "job_id": job.job_id,
+        "entry_id": entry_id,
+        "status": status,
+        "verdict": verdict,
+        "item_count": item_count,
+        "total_seconds": round(total, 3),
+        "timings": {stage: round(seconds, 3) for stage, seconds in sorted(timings.items())},
+    }
+    print("distil_timing " + json.dumps(payload, sort_keys=True), flush=True)
 
 
 def _schedule_graph_link(entry_id: str) -> bool:
@@ -357,6 +386,27 @@ def create_app() -> FastAPI:
              "active_page": "library"},
         )
 
+    @app.get("/entries/{entry_id}/teaching-note.md")
+    def teaching_note_markdown(entry_id: str, download: bool = False):
+        store = _store()
+        if not store.entry_path(entry_id).exists():
+            return JSONResponse({"detail": "not found"}, status_code=404)
+        entry = store.load_entry(entry_id)
+        title = display_title(
+            entry.source.title,
+            entry.distilled_note.title if entry.distilled_note is not None else None,
+        )
+        headers = {}
+        if download:
+            headers["Content-Disposition"] = (
+                f'attachment; filename="{_markdown_filename(title)}"'
+            )
+        return Response(
+            Store.teaching_note_markdown(entry),
+            media_type="text/markdown; charset=utf-8",
+            headers=headers,
+        )
+
     @app.post("/entries/{entry_id}/score")
     def score(entry_id: str, score: int = Form(...), reason: str = Form(...)):
         store = _store()
@@ -427,6 +477,12 @@ def _ask_payload(result) -> dict:
             for s in result.sources
         ],
     }
+
+
+def _markdown_filename(title: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "", title)
+    cleaned = re.sub(r"\s+", "-", cleaned).strip("-._ ")
+    return f"{(cleaned or 'teaching-note')[:90]}.md"
 
 
 def _sse(obj: dict) -> str:

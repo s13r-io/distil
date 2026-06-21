@@ -3,7 +3,7 @@
 import pytest
 
 from distil.embed import FakeEmbedder
-from distil.models import KBEntry
+from distil.models import ActionStep, GroundedText, KBEntry, ReviewQuestion
 from distil.store import Store
 
 
@@ -100,6 +100,33 @@ def test_new_note_entries_render_humanized_tags(store):
     assert "*Tags:* AI Agent Memory, Function Design" in body
     assert "*Topics:*" not in body
     assert "ai_agent-memory" not in body
+
+
+@pytest.mark.unit
+def test_teaching_note_markdown_export_is_reader_facing(store):
+    entry = _entry(with_note=True)
+    entry.source.url = "https://www.youtube.com/watch?v=abc"
+    entry.source.channel = "Talk Channel"
+    note = entry.distilled_note
+    note.topics = ["ai_agent-memory", "function_design"]
+    note.why_it_matters = [GroundedText(text="Focused code is easier to review.", item_ids=["k_01"])]
+    note.how_to_apply = [ActionStep(text="Split one large function this week.", item_ids=["k_01"])]
+    note.caveats = [GroundedText(text="This is scoped to library code.", item_ids=["k_01"])]
+    note.review_questions = [ReviewQuestion(question="Where is one function doing too much?",
+                                            item_ids=["k_01"])]
+
+    text = Store.teaching_note_markdown(entry)
+    assert text.startswith("# Small functions")
+    assert "## Metadata" in text
+    assert "- Source URL: https://www.youtube.com/watch?v=abc" in text
+    assert "## Core takeaway" in text
+    assert "## Why it matters" in text
+    assert "1. Split one large function this week." in text
+    assert "## Review questions" in text
+    assert "## Tags" in text
+    assert "AI Agent Memory" in text
+    assert "k_01" not in text
+    assert "---" not in text
 
 
 @pytest.mark.unit

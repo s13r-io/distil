@@ -209,6 +209,9 @@ def test_entry_page_renders_distilled_note(seeded, monkeypatch):
     assert "Teaching note" in r.text
     assert "Core takeaway" in r.text
     assert "Source evidence" in r.text
+    assert 'aria-label="Copy markdown"' in r.text
+    assert 'aria-label="Download markdown"' in r.text
+    assert 'href="/entries/e_note/teaching-note.md?download=true"' in r.text
     assert "Watch on YouTube" in r.text
     assert "Talk Channel" in r.text
     assert "hqdefault.jpg" in r.text
@@ -216,6 +219,52 @@ def test_entry_page_renders_distilled_note(seeded, monkeypatch):
     assert ">Topics</h2>" not in r.text
     assert "Function Design" in r.text
     assert "function_design" not in r.text
+
+    md = client.get("/entries/e_note/teaching-note.md")
+    assert md.status_code == 200
+    assert "# Small functions" in md.text
+    assert "## Metadata" in md.text
+    assert "- Source URL: https://youtu.be/abc123" in md.text
+    assert "## Core takeaway" in md.text
+    assert "## Tags" in md.text
+    assert "Function Design" in md.text
+    assert "k_01" not in md.text
+
+    download = client.get("/entries/e_note/teaching-note.md?download=true")
+    assert download.status_code == 200
+    assert download.headers["content-disposition"] == 'attachment; filename="Small-functions.md"'
+
+
+@pytest.mark.unit
+def test_legacy_entry_page_renders_markdown_icons_in_knowledge_header(seeded, monkeypatch):
+    monkeypatch.setenv("DISTIL_PUBLIC", "false")
+    store = Store(db_path=seeded / "distil.db", kb_dir=seeded / "kb")
+    store.file_entry(KBEntry.model_validate({
+        "entry_id": "e_legacy",
+        "source": {"title": "Legacy note", "captured_at": "2026-06-15T00:00:00"},
+        "triage": {
+            "knowledge_types_present": [{"type": "heuristic", "share": 1.0}],
+            "density": "high",
+            "transcript_loss": {"level": "low", "evidence": []},
+            "verdict": "rich",
+        },
+        "knowledge_items": [{
+            "item_id": "k_01",
+            "type": "heuristic",
+            "statement": "Keep functions small.",
+            "stance": "opinion",
+            "provenance": {"quote": "keep functions small"},
+        }],
+        "meta": {"created_at": "2026-06-15T00:00:00", "model_version": "test"},
+    }))
+    client = TestClient(create_app())
+    r = client.get("/entries/e_legacy")
+    assert r.status_code == 200
+    assert "Knowledge / 1 item" in r.text
+    assert 'aria-label="Copy markdown"' in r.text
+    assert 'aria-label="Download markdown"' in r.text
+    assert 'href="/entries/e_legacy/teaching-note.md?download=true"' in r.text
+    assert "<p class=\"small-title\">Markdown</p>" not in r.text
 
 
 @pytest.mark.unit

@@ -31,7 +31,18 @@
     <article class="panel note-shell">
       <div class="note-intro">
         <p class="muted" style="margin:0 0 8px;">Teaching note</p>
-        <h2 style="margin:0 0 10px; font-size:18px;">Core takeaway</h2>
+        <div class="core-head">
+          <h2 style="margin:0; font-size:18px;">Core takeaway</h2>
+          <div class="note-actions compact">
+            <button type="button" class="note-action icon-only" id="copy-note" data-url="/entries/{{ e.entry_id }}/teaching-note.md" title="Copy markdown" aria-label="Copy markdown">
+              <span aria-hidden="true">⧉</span>
+            </button>
+            <a class="note-action icon-only" href="/entries/{{ e.entry_id }}/teaching-note.md?download=true" title="Download markdown" aria-label="Download markdown">
+              <span aria-hidden="true">↓</span>
+            </a>
+          </div>
+        </div>
+        <p class="muted hide" id="copy-note-status" style="margin:4px 0 8px;"></p>
         <div class="callout">
           <p>{{ n.core_takeaway.text }}</p>
         </div>
@@ -115,7 +126,16 @@
     <section class="panel">
       <div class="panel-head">
         <h2>Knowledge / {{ e.knowledge_items|length }} item{{ 's' if e.knowledge_items|length != 1 else '' }}</h2>
+        <div class="note-actions compact">
+          <button type="button" class="note-action icon-only" id="copy-note" data-url="/entries/{{ e.entry_id }}/teaching-note.md" title="Copy markdown" aria-label="Copy markdown">
+            <span aria-hidden="true">⧉</span>
+          </button>
+          <a class="note-action icon-only" href="/entries/{{ e.entry_id }}/teaching-note.md?download=true" title="Download markdown" aria-label="Download markdown">
+            <span aria-hidden="true">↓</span>
+          </a>
+        </div>
       </div>
+      <p class="muted hide" id="copy-note-status" style="margin:0 18px 8px;"></p>
       <div class="panel-body">
         {% for it in e.knowledge_items %}
         <div class="item" id="{{ it.item_id }}">
@@ -237,6 +257,34 @@ async function submitScore(){
   const r=await fetch('/entries/{{ e.entry_id }}/score',{method:'POST',body:fd});
   const state=document.getElementById('score-state');
   state.textContent = r.ok ? ('Scored '+chosen+' / '+reason+' saved') : 'Could not save score.';
+}
+const copyNote=document.getElementById('copy-note');
+if(copyNote){
+  copyNote.onclick=async()=>{
+    const status=document.getElementById('copy-note-status');
+    try{
+      const r=await fetch(copyNote.dataset.url,{headers:{accept:'text/markdown'}});
+      if(!r.ok) throw new Error('fetch failed');
+      await copyText(await r.text());
+      status.textContent='Copied markdown to clipboard.';
+      status.classList.remove('hide');
+    }catch(e){
+      status.textContent='Could not copy markdown.';
+      status.classList.remove('hide');
+    }
+  };
+}
+async function copyText(text){
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const ta=document.createElement('textarea');
+  ta.value=text; ta.setAttribute('readonly','');
+  ta.style.position='fixed'; ta.style.left='-9999px';
+  document.body.appendChild(ta); ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
 }
 </script>
 {% endblock %}
