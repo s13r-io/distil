@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Concepts - Distil{% endblock %}
+{% block content %}
+
+<header class="hero-strip">
+  <div>
+    <h1>Concepts</h1>
+    <p>Ideas synthesized across the videos you've saved.</p>
+  </div>
+  <div class="row wrap" style="gap:10px;">
+    <span class="badge info" id="concept-count">{{ concept_count }} concept{{ 's' if concept_count != 1 else '' }}</span>
+    <a class="btn" href="/bundle.zip">Download bundle</a>
+  </div>
+</header>
+
+<main class="library-page">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>All concepts</h2>
+      <span class="muted" id="concept-showing"></span>
+    </div>
+
+    <div class="library-tools">
+      <div class="search">
+        <input type="search" id="search" placeholder="Filter by title or description">
+      </div>
+      <select id="sort" aria-label="Sort concepts">
+        <option value="videos">Most videos first</option>
+        <option value="alpha">Alphabetical</option>
+      </select>
+      <a href="#" id="clear-filters" class="btn hide">Clear</a>
+    </div>
+
+    <div id="concept-list" class="library-list"></div>
+    <div class="empty" id="concept-empty">
+      <p id="concept-empty-title" style="margin:0 0 4px;">No concepts yet</p>
+      <p class="muted" id="concept-empty-copy" style="margin:0;">Concepts are synthesized automatically as you add videos.</p>
+    </div>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script id="concept-data" type="application/json">{{ concepts|tojson }}</script>
+<script>
+const CONCEPTS = JSON.parse(document.getElementById('concept-data').textContent);
+function esc(s){const d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML;}
+function matches(c){
+  const term=document.getElementById('search').value.trim().toLowerCase();
+  if(!term) return true;
+  return (c.title+' '+c.description).toLowerCase().includes(term);
+}
+function renderConcepts(){
+  const sort=document.getElementById('sort').value;
+  let list=CONCEPTS.filter(matches);
+  list.sort((a,b)=>{
+    if(sort==='alpha') return a.title.localeCompare(b.title);
+    return b.video_count-a.video_count || a.title.localeCompare(b.title);
+  });
+  document.getElementById('concept-list').innerHTML=list.map(c=>{
+    return '<a class="entryrow" href="/concepts/'+encodeURIComponent(c.concept_id)+'">'
+      +'<div class="top"><span class="entry-title">'+esc(c.title)+'</span>'
+      +'<span class="badge">'+c.video_count+' video'+(c.video_count===1?'':'s')+'</span></div>'
+      +'<div class="meta-line"><span class="muted">'+esc(c.description)+'</span></div></a>';
+  }).join('');
+  const hasSearch=document.getElementById('search').value.trim().length>0;
+  document.getElementById('concept-showing').textContent = hasSearch ? ('showing '+list.length+' of '+CONCEPTS.length) : '';
+  document.getElementById('clear-filters').classList.toggle('hide', !hasSearch);
+  const empty=document.getElementById('concept-empty');
+  empty.classList.toggle('hide', list.length>0);
+  if(list.length===0 && CONCEPTS.length>0){
+    document.getElementById('concept-empty-title').textContent='No matching concepts';
+    document.getElementById('concept-empty-copy').textContent='Clear the filter to see all concepts.';
+  } else {
+    document.getElementById('concept-empty-title').textContent='No concepts yet';
+    document.getElementById('concept-empty-copy').textContent='Concepts are synthesized automatically as you add videos.';
+  }
+}
+document.getElementById('sort').onchange=renderConcepts;
+document.getElementById('search').oninput=renderConcepts;
+document.getElementById('clear-filters').onclick=e=>{e.preventDefault();document.getElementById('search').value='';renderConcepts();};
+renderConcepts();
+</script>
+{% endblock %}

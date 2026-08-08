@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}{{ concept.title }} - Distil{% endblock %}
+{% block content %}
+
+<a class="entry-back" href="/concepts">Back to concepts</a>
+
+<header class="entry-hero">
+  <div>
+    <h1>{{ concept.title }}</h1>
+    <p class="muted" style="margin:10px 0 16px;">{{ concept.description }}</p>
+    <span class="badge info">{{ sources|length }} video{{ 's' if sources|length != 1 else '' }}</span>
+  </div>
+</header>
+
+<div class="reader-grid">
+  <main class="reader-main">
+    {% if has_contradiction %}
+    <div class="banner danger">Cited sources disagree on stance for one or more claims below.</div>
+    {% endif %}
+
+    <section class="panel">
+      <div class="panel-head"><h2>Claims</h2></div>
+      <div class="panel-body">
+        {% if claims %}
+        {% for claim in claims %}
+        <div class="item">
+          <p class="stmt">{{ claim.text }}</p>
+          {% if claim.contradiction %}
+          <p class="sub">
+            <span class="badge danger">Contradiction</span>
+            members disagree on stance:
+            {% for row in claim.contradiction %}{{ row.entry_title }} ({{ row.stance.replace('_',' ') }}){% if not loop.last %}, {% endif %}{% endfor %}
+          </p>
+          {% endif %}
+          {% if claim.citations %}
+          <div class="row wrap" style="margin-top:8px;">
+            {% for c in claim.citations %}
+            <a class="badge" href="/entries/{{ c.entry_id }}#{{ c.item_id }}">{{ c.entry_title }}{% if c.timestamp %} @ {{ c.timestamp }}{% endif %}</a>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="muted" style="margin:0;">No synthesized claims yet.</p>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Sources</h2></div>
+      <div class="panel-body">
+        {% if sources %}
+        {% for s in sources %}
+        <div class="item">
+          <p class="stmt" style="margin:0;"><a href="/entries/{{ s.entry_id }}">{{ s.title }}</a></p>
+          <blockquote>"{{ s.quote }}"{% if s.timestamp %} <span class="muted">@ {{ s.timestamp }}</span>{% endif %}</blockquote>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="muted" style="margin:0;">No sources.</p>
+        {% endif %}
+      </div>
+    </section>
+  </main>
+
+  <aside class="reader-side">
+    {% if edges_by_relation.contrasts_with %}
+    <section class="action-card">
+      <p class="small-title">Contrasts with</p>
+      <div class="row wrap">
+        {% for e in edges_by_relation.contrasts_with %}
+        <a class="badge danger" href="/concepts/{{ e.target_concept_id }}">{{ e.title }}</a>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+    {% if edges_by_relation.builds_on %}
+    <section class="action-card">
+      <p class="small-title">Builds on</p>
+      <div class="row wrap">
+        {% for e in edges_by_relation.builds_on %}
+        <a class="badge ok" href="/concepts/{{ e.target_concept_id }}">{{ e.title }}</a>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+    {% if edges_by_relation.related %}
+    <section class="action-card">
+      <p class="small-title">Related</p>
+      <div class="row wrap">
+        {% for e in edges_by_relation.related %}
+        <a class="badge info" href="/concepts/{{ e.target_concept_id }}">{{ e.title }}</a>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+    {% if not edges_by_relation.contrasts_with and not edges_by_relation.builds_on and not edges_by_relation.related %}
+    <section class="action-card">
+      <p class="small-title">Relationships</p>
+      <p class="muted" style="margin:0;">No typed relationships yet.</p>
+    </section>
+    {% endif %}
+  </aside>
+</div>
+{% endblock %}
