@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -26,6 +27,14 @@ _CITATION = re.compile(r"\[([a-zA-Z0-9_]+)\]")
 
 # Ranking weights for similarity × feedback × recency.
 _RECENCY_HALF_LIFE_DAYS = 180.0
+
+# Depth of concept substance sent to synthesis (Phase C). "claims" sends each claim's own
+# sentence only (pre-Phase-C behavior); "full" additionally sends the real member quotes each
+# claim cites, i.e. the same evidence a reader would see after following the link to the concept
+# page — see the module docstring addendum below and DEPLOY-relevant CLAUDE.md entry for the
+# measured token-cost tradeoff behind the default.
+CONCEPT_NOTE_DEPTH_DEFAULT = "claims"
+_CONCEPT_NOTE_DEPTHS = {"claims", "full"}
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -72,6 +81,16 @@ class Source:
 
 
 @dataclass
+class ConceptRef:
+    """A concept page that cleared the gate and fed this answer — enough to link to
+    ``/concepts/{concept_id}`` (Phase C). Carries no claim/member data: the concept detail page
+    already renders those, so this is just "what contributed," not a duplicate of the page."""
+
+    concept_id: str
+    title: str
+
+
+@dataclass
 class AskResult:
     abstained: bool
     message: str = ""
@@ -80,6 +99,7 @@ class AskResult:
     cited_item_ids: list[str] = field(default_factory=list)
     ungrounded_citations: list[str] = field(default_factory=list)
     conflict: str | None = None
+    concepts: list[ConceptRef] = field(default_factory=list)
 
 
 def retrieve(
@@ -154,6 +174,7 @@ def ask(
     top_k: int = 6,
     concept_top_k: int = 3,
     lookup_only: bool = False,
+    concept_note_depth: str | None = None,
 ) -> AskResult:
     results = retrieve(question, store, embedder, top_k=top_k)
     concepts = retrieve_concepts(question, store, embedder, top_k=concept_top_k)
@@ -169,6 +190,10 @@ def ask(
                     "so it won't guess from outside knowledge.",
         )
 
+    # What fed this answer, for the "concepts behind this answer" panel (Phase C) — computed
+    # for free from the gate above, no extra retrieval or model call.
+    concept_refs = [ConceptRef(c.concept_id, c.title) for c in cleared_concepts]
+
     # Blend in each cleared concept's member items — findable by the concept even when raw
     # per-item similarity alone would have missed them (design report §9 item 6).
     all_items = cleared + _recruit_concept_members(
@@ -180,13 +205,15 @@ def ask(
 
     # Bare lookup: just the ranked sources, no synthesis call (T-Q5).
     if lookup_only:
-        return AskResult(abstained=False, sources=sources)
+        return AskResult(abstained=False, sources=sources, concepts=concept_refs)
 
     # Grounded synthesis over the cleared items plus any synthesized concept prose — the prose
     # is already grounded (every ConceptClaim.item_ids resolves to a real member, T-SYN2), so
     # citing it is exactly as trustworthy as citing a directly-retrieved item.
     notes_block = _render_notes(all_items)
-    concepts_block = _render_concept_notes(cleared_concepts)
+    concepts_block = _render_concept_notes(
+        cleared_concepts, store, depth=_resolve_concept_note_depth(concept_note_depth)
+    )
     if concepts_block:
         notes_block = f"{notes_block}\n\n{concepts_block}" if notes_block else concepts_block
     raw = client.complete(build_synthesis_prompt(question, notes_block), system=SYSTEM)
@@ -208,6 +235,7 @@ def ask(
         cited_item_ids=grounded,
         ungrounded_citations=ungrounded,
         conflict=conflict,
+        concepts=concept_refs,
     )
 
 
@@ -229,6 +257,7 @@ def stream_ask(
     threshold: float = 0.35,
     top_k: int = 6,
     concept_top_k: int = 3,
+    concept_note_depth: str | None = None,
 ):
     """Streaming sibling of :func:`ask` (WEB_UI_SPEC §9).
 
@@ -256,6 +285,8 @@ def stream_ask(
         yield StreamEvent(kind="abstain", text=abstain.message, result=abstain)
         return
 
+    concept_refs = [ConceptRef(c.concept_id, c.title) for c in cleared_concepts]
+
     all_items = cleared + _recruit_concept_members(
         cleared_concepts, store, exclude={r.item_id for r in cleared}
     )
@@ -263,7 +294,9 @@ def stream_ask(
         Source(r.item_id, r.entry_id, r.quote, r.timestamp, r.entry_title) for r in all_items
     ]
     notes_block = _render_notes(all_items)
-    concepts_block = _render_concept_notes(cleared_concepts)
+    concepts_block = _render_concept_notes(
+        cleared_concepts, store, depth=_resolve_concept_note_depth(concept_note_depth)
+    )
     if concepts_block:
         notes_block = f"{notes_block}\n\n{concepts_block}" if notes_block else concepts_block
     prompt = build_synthesis_prompt(question, notes_block)
@@ -299,6 +332,7 @@ def stream_ask(
         result=AskResult(
             abstained=False, answer=answer, sources=sources,
             cited_item_ids=grounded, ungrounded_citations=ungrounded, conflict=conflict,
+            concepts=concept_refs,
         ),
     )
 
@@ -372,21 +406,51 @@ def _recruit_concept_members(
     return out
 
 
-def _render_concept_notes(concepts: list[RetrievedConcept]) -> str:
-    """Pre-synthesized concept-page prose as extra evidence (Phase 18). Already grounded —
-    every ``ConceptClaim.item_ids`` resolves to a real member (T-SYN2) — so citing one of these
-    claims is exactly as trustworthy as citing a raw retrieved item; nothing here is model text
-    trusted as a citation, it's the same ``[item_id]`` marker convention :func:`_render_notes`
-    already uses.
+def _resolve_concept_note_depth(override: str | None) -> str:
+    """``concept_note_depth`` kwarg wins; else ``DISTIL_CONCEPT_NOTE_DEPTH`` env, read at call
+    time (same DI-friendly pattern as the other retrieval knobs in ``store.py``); an unrecognized
+    value falls back to :data:`CONCEPT_NOTE_DEPTH_DEFAULT` rather than raising."""
+    depth = (override or os.environ.get("DISTIL_CONCEPT_NOTE_DEPTH", CONCEPT_NOTE_DEPTH_DEFAULT))
+    depth = depth.strip().lower()
+    return depth if depth in _CONCEPT_NOTE_DEPTHS else CONCEPT_NOTE_DEPTH_DEFAULT
+
+
+def _render_concept_notes(
+    concepts: list[RetrievedConcept], store: Store, *, depth: str = CONCEPT_NOTE_DEPTH_DEFAULT
+) -> str:
+    """Pre-synthesized concept-page prose as extra evidence (Phase 18; depth added Phase C).
+    Already grounded — every ``ConceptClaim.item_ids`` resolves to a real member (T-SYN2) — so
+    citing one of these claims is exactly as trustworthy as citing a raw retrieved item; nothing
+    here is model text trusted as a citation, it's the same ``[item_id]`` marker convention
+    :func:`_render_notes` already uses.
+
+    ``depth="full"`` additionally inlines each cited member's own quote beneath its claim — the
+    same ``ConceptMember.quote`` copied verbatim from real provenance at match time that the
+    concept detail page and the OKF page both cite, i.e. the substance a reader would see after
+    following the link to the concept page, not just its claim summary. This never reaches
+    beyond ``concept.members``/``concept.claims`` (no edge traversal, no member outside this
+    concept's own membership), so grounding is unaffected either way.
     """
     lines: list[str] = []
     for c in concepts:
         if not c.claims:
             continue
         lines.append(f'Concept "{c.title}": {c.description}')
+        members_by_item = {}
+        if depth == "full":
+            full = store.load_concept(c.concept_id)
+            if full is not None:
+                members_by_item = {m.item_id: m for m in full.members}
         for claim in c.claims:
             markers = "".join(f"[{item_id}]" for item_id in claim.item_ids)
             lines.append(f"  {claim.text} {markers}".rstrip())
+            if depth == "full":
+                for item_id in claim.item_ids:
+                    member = members_by_item.get(item_id)
+                    if member is None:
+                        continue
+                    ts = f" @ {member.timestamp}" if member.timestamp else ""
+                    lines.append(f'    [{item_id}] quote: "{member.quote}"{ts}')
     return "\n".join(lines)
 
 

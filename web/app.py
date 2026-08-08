@@ -823,6 +823,9 @@ def _ask_payload(result) -> dict:
              "quote": s.quote, "timestamp": s.timestamp, "title": s.entry_title}
             for s in result.sources
         ],
+        "concepts": [
+            {"concept_id": c.concept_id, "title": c.title} for c in result.concepts
+        ],
     }
 
 

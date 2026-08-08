@@ -13,7 +13,7 @@ import pytest
 from distil.embed import FakeEmbedder
 from distil.llm import FakeClient
 from distil.models import Concept, ConceptClaim, ConceptMember, KBEntry
-from distil.query import ask, cosine, retrieve, retrieve_concepts
+from distil.query import ask, cosine, retrieve, retrieve_concepts, stream_ask
 from distil.store import Store
 
 
@@ -365,3 +365,150 @@ def test_q13_low_similarity_concept_does_not_bypass_gate(store, embedder):
     )
     assert result.abstained is True
     assert client.call_count == 0
+
+
+# ---- Phase C: concept pages behind an answer + configurable synthesis depth -------------
+# Both requirements ride the SAME gate/grounding code paths already covered above; these tests
+# isolate what's new: concept refs surfacing for free, and the depth knob actually changing what
+# reaches the synthesis prompt without touching the gate or citation validation.
+
+
+def _cleared_solo_concept(store, embedder, question, *, member_quote="the member's own quote"):
+    """A concept whose centroid is forced to match ``question`` exactly (T-Q11's pattern),
+    isolating the gate from natural embedding behavior, with a distinguishable member quote so
+    tests can assert on its presence/absence in the synthesis prompt."""
+    concept = _concept(
+        "solo-concept", "Solo Concept", "desc",
+        members=[ConceptMember(
+            entry_id="e_k8s", item_id="k_k1", quote=member_quote, timestamp="00:09:00",
+        )],
+        claims=[ConceptClaim(
+            text="Kubernetes networking is discussed across videos.", item_ids=["k_k1"],
+        )],
+    )
+    store.save_concept(concept)
+    qvec = embedder.embed(question)
+    store.concept_centroid = lambda concept_id: qvec  # type: ignore[method-assign]
+    return concept
+
+
+@pytest.mark.unit
+def test_phaseC_ask_surfaces_concepts_behind_the_answer(store, embedder):
+    question = "a completely unrelated phrasing sharing no vocabulary with any note"
+    _cleared_solo_concept(store, embedder, question)
+    client = FakeClient(responses=[json.dumps({
+        "answer": "Kubernetes networking is discussed [k_k1].",
+        "cited_item_ids": ["k_k1"], "conflict": None,
+    })])
+
+    result = ask(question, store, embedder, client, threshold=0.99, top_k=3)
+
+    assert not result.abstained
+    assert [c.concept_id for c in result.concepts] == ["solo-concept"]
+    assert result.concepts[0].title == "Solo Concept"
+
+
+@pytest.mark.unit
+def test_phaseC_stream_ask_surfaces_concepts_behind_the_answer(store, embedder):
+    question = "a completely unrelated phrasing sharing no vocabulary with any note"
+    _cleared_solo_concept(store, embedder, question)
+    client = FakeClient(responses=[json.dumps({
+        "answer": "Kubernetes networking is discussed [k_k1].",
+        "cited_item_ids": ["k_k1"], "conflict": None,
+    })])
+
+    events = list(stream_ask(question, store, embedder, client, threshold=0.99, top_k=3))
+    final = next(e for e in events if e.kind == "final")
+
+    assert [c.concept_id for c in final.result.concepts] == ["solo-concept"]
+
+
+@pytest.mark.unit
+def test_phaseC_abstained_result_carries_no_concepts(store, embedder):
+    client = FakeClient(responses=["SHOULD NOT BE CALLED"])
+    result = ask("medieval french history and gothic cathedrals", store, embedder, client,
+                 threshold=0.9)
+    assert result.abstained is True
+    assert result.concepts == []
+
+
+@pytest.mark.unit
+def test_phaseC_default_depth_sends_claim_text_only_no_member_quotes(store, embedder):
+    question = "a completely unrelated phrasing sharing no vocabulary with any note"
+    _cleared_solo_concept(store, embedder, question, member_quote="THE-DISTINCT-MEMBER-QUOTE")
+    client = FakeClient(responses=[json.dumps({
+        "answer": "Kubernetes networking is discussed [k_k1].",
+        "cited_item_ids": ["k_k1"], "conflict": None,
+    })])
+
+    ask(question, store, embedder, client, threshold=0.99, top_k=3)
+
+    prompt = client.calls[0].prompt
+    assert "Kubernetes networking is discussed across videos." in prompt  # claim text present
+    assert "THE-DISTINCT-MEMBER-QUOTE" not in prompt  # not duplicated via the concept block
+
+
+@pytest.mark.unit
+def test_phaseC_full_depth_sends_whole_page_member_quotes(store, embedder):
+    question = "a completely unrelated phrasing sharing no vocabulary with any note"
+    _cleared_solo_concept(store, embedder, question, member_quote="THE-DISTINCT-MEMBER-QUOTE")
+    client = FakeClient(responses=[json.dumps({
+        "answer": "Kubernetes networking is discussed [k_k1].",
+        "cited_item_ids": ["k_k1"], "conflict": None,
+    })])
+
+    ask(question, store, embedder, client, threshold=0.99, top_k=3, concept_note_depth="full")
+
+    prompt = client.calls[0].prompt
+    assert "Kubernetes networking is discussed across videos." in prompt
+    assert "THE-DISTINCT-MEMBER-QUOTE" in prompt
+
+
+@pytest.mark.unit
+def test_phaseC_env_var_controls_depth_without_code_change(store, embedder, monkeypatch):
+    question = "a completely unrelated phrasing sharing no vocabulary with any note"
+    _cleared_solo_concept(store, embedder, question, member_quote="THE-DISTINCT-MEMBER-QUOTE")
+    monkeypatch.setenv("DISTIL_CONCEPT_NOTE_DEPTH", "full")
+    client = FakeClient(responses=[json.dumps({
+        "answer": "Kubernetes networking is discussed [k_k1].",
+        "cited_item_ids": ["k_k1"], "conflict": None,
+    })])
+
+    ask(question, store, embedder, client, threshold=0.99, top_k=3)  # no explicit override
+
+    assert "THE-DISTINCT-MEMBER-QUOTE" in client.calls[0].prompt
+
+
+@pytest.mark.unit
+def test_phaseC_full_depth_does_not_weaken_citation_validation(store, embedder):
+    # Same fabricated-citation setup as T-Q3's ungrounded-citation test, but with depth="full" —
+    # proves the richer evidence block doesn't loosen what counts as a grounded citation.
+    question = "a completely unrelated phrasing sharing no vocabulary with any note"
+    _cleared_solo_concept(store, embedder, question)
+    client = FakeClient(responses=[json.dumps({
+        "answer": "Use microservices always [k_fake].",
+        "cited_item_ids": ["k_fake"], "conflict": None,
+    })])
+
+    result = ask(
+        question, store, embedder, client, threshold=0.99, top_k=3, concept_note_depth="full",
+    )
+
+    retrieved_ids = {s.item_id for s in result.sources}
+    assert "k_fake" not in retrieved_ids
+    assert result.ungrounded_citations == ["k_fake"]
+
+
+@pytest.mark.unit
+def test_phaseC_invalid_depth_falls_back_to_default(store, embedder):
+    question = "a completely unrelated phrasing sharing no vocabulary with any note"
+    _cleared_solo_concept(store, embedder, question, member_quote="THE-DISTINCT-MEMBER-QUOTE")
+    client = FakeClient(responses=[json.dumps({
+        "answer": "Kubernetes networking is discussed [k_k1].",
+        "cited_item_ids": ["k_k1"], "conflict": None,
+    })])
+
+    ask(question, store, embedder, client, threshold=0.99, top_k=3, concept_note_depth="bogus")
+
+    # Never raises; degrades to the documented default (claims-only) rather than guessing.
+    assert "THE-DISTINCT-MEMBER-QUOTE" not in client.calls[0].prompt
