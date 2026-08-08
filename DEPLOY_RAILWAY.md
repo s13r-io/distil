@@ -109,25 +109,30 @@ only distil reaches it, over the private network. Also do not raise `numReplicas
 service or attach a volume to the provider service — this project stays single-replica,
 single-volume (see `railway.toml` and the gotchas below).
 
-#### Confirm the plugin actually loaded
+#### Confirm the plugin actually loaded — and that a token is actually requested
 The wiring only *offers* yt-dlp a PO token — confirm yt-dlp is actually discovering the plugin
-before trusting it. From the distil service's shell (`railway ssh --service distil`, or a one-off
-local run with the same `DISTIL_POT_PROVIDER_URL`), run a verbose fetch:
+*and* asking it for one before trusting it (Phase 22 shipped without either of those confirmed,
+which is exactly how it worked for one video and silently stopped for the next — see
+`distil/youtube.py`'s module docstring, Phase 23, for the full root-cause). This no longer needs
+shell access: hit the diagnostic route on the running service —
 
 ```shell
-yt-dlp -v --extractor-args "youtubepot-bgutilhttp:base_url=$DISTIL_POT_PROVIDER_URL" <a video URL>
+curl -s -b "<your auth cookie>" \
+  "https://<your-domain>/diagnostics/youtube-pot?url=<a video URL>" | python3 -m json.tool
 ```
 
-Look for a line like:
+(or, with filesystem access, `distil youtube-diagnose-pot <a video URL>`, or a one-off local
+`yt-dlp` run using this repo's exact `--extractor-args`, per the module docstring). Check two
+things in the response, not just one:
 
-```
-[youtube] [pot] PO Token Providers: bgutil:http-1.3.1 (external)
-```
-
-If that line is missing, or shows `(unavailable)` instead of `(external)`, the plugin isn't
-reaching the provider service — check the internal URL and that the provider service is actually
-running (`railway logs --service bgutil-pot-provider`) before assuming the bot check itself is
-the problem.
+1. `provider_discovery` should look like `[youtube] [pot] PO Token Providers: bgutil:http-1.3.1
+   (external)`. Missing, or `(unavailable)` instead of `(external)`, means the plugin isn't
+   reaching the provider service — check the internal URL and that the provider service is
+   actually running (`railway logs --service bgutil-pot-provider`) before assuming the bot check
+   itself is the problem.
+2. `context_attempts` should be non-empty (at minimum a `player`/`mweb` entry). An *empty* list
+   with a healthy `provider_discovery` means the plugin loaded fine but yt-dlp never asked it for
+   anything — a discovery line alone was never sufficient proof the wiring works end to end.
 
 ### 5. Confirm the start command
 `railway.toml` already sets it to bind the injected port:

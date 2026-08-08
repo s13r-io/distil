@@ -48,6 +48,7 @@ from distil.source import (
     clean_source_title,
     display_title,
     fetch_youtube_oembed_metadata,
+    is_youtube_host,
     normalize_youtube_url,
 )
 from distil.store import Store
@@ -866,6 +867,25 @@ def create_app() -> FastAPI:
         if not run_delete_entry_stage(entry_id, store):
             return JSONResponse({"detail": "not found"}, status_code=404)
         return RedirectResponse(url="/library", status_code=303)
+
+    # ---- diagnostics (Phase 23) ----
+    @app.get("/diagnostics/youtube-pot")
+    def diagnose_youtube_pot(url: str):
+        """Run a verbose yt-dlp fetch for ``url`` and report PO-token provider discovery and
+        per-context attempts — the permanent replacement for SSH'ing in to run this by hand
+        (see distil/youtube.py's module docstring, Phase 23)."""
+        if not is_youtube_host(url):
+            return JSONResponse({"detail": "url must be a YouTube URL."}, status_code=400)
+        result = youtube.diagnose_pot(url)
+        return JSONResponse({
+            "returncode": result.returncode,
+            "provider_discovery": result.provider_discovery,
+            "context_attempts": [
+                {"context": context, "client": client}
+                for context, client in result.context_attempts
+            ],
+            "raw_output": result.raw_output,
+        })
 
     # ---- ask (JSON, all-at-once fallback) ----
     @app.get("/ask")
