@@ -31,6 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from distil import youtube
+from distil.canonicalize import run_delete_entry_stage
 from distil.cli import _make_client, _make_embedder
 from distil.graph import link_graph
 from distil.ingest import ingest_file, ingest_text
@@ -470,7 +471,7 @@ def create_app() -> FastAPI:
     @app.post("/entries/{entry_id}/delete")
     def delete_entry(entry_id: str):
         store = _store()
-        if not store.delete_entry(entry_id):
+        if not run_delete_entry_stage(entry_id, store):
             return JSONResponse({"detail": "not found"}, status_code=404)
         return RedirectResponse(url="/library", status_code=303)
 

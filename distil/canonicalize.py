@@ -159,6 +159,57 @@ def run_canonicalize_stage(entry: KBEntry, store: Store, client: LLMClient) -> l
     return touched
 
 
+def run_delete_entry_stage(entry_id: str, store: Store) -> bool:
+    """Delete-path counterpart to :func:`run_canonicalize_stage` — the one orchestration entry
+    point that also talks to ``okf.py`` for deletion. :meth:`Store.delete_entry` stays pure
+    DB/file-store-only (kb file, index row, vectors, membership retraction); this closes the
+    OKF-bundle gaps that leaves open:
+
+    - a concept dropped to zero members by the retraction loses its DB row but not its
+      ``concepts/<id>.md`` page (mirrors the "survivor" half of ``run_canonicalize_stage``'s own
+      §5 gap, just on the delete path instead of re-file);
+    - a concept that *survives* with other members still needs its page re-exported, or its
+      ``## Sources``/``videos:`` keep a one-way link to a source that's gone;
+    - the entry's own ``sources/<slug>.md``/``raw/<slug>.md`` pages need removing even when the
+      ``kb/<id>.md`` file is missing or fails to parse, since ``Store.delete_entry`` can no
+      longer supply a loaded entry to derive the slug from. The slug is instead recovered from
+      ``sources/<slug>.md``'s own ``distil_entry_id`` frontmatter (:func:`okf.find_slug_for_entry_id`),
+      the same identity ``okf.slug_for_entry`` already keys off when an entry *is* available.
+
+    Slug resolution must happen before ``store.delete_entry`` runs, since that call is what
+    removes the ``kb/`` file a normal (non-degraded) slug lookup would otherwise use.
+    """
+    entry: KBEntry | None
+    try:
+        entry = store.load_entry(entry_id)
+    except Exception:
+        entry = None
+
+    slug = (
+        okf.slug_for_entry(entry, store.okf_root)
+        if entry is not None
+        else okf.find_slug_for_entry_id(entry_id, store.okf_root)
+    )
+
+    prior_concept_ids = {
+        c.concept_id for c in store.list_concepts() if any(m.entry_id == entry_id for m in c.members)
+    }
+
+    deleted = store.delete_entry(entry_id)
+
+    if slug is not None:
+        okf.remove_entry_pages(slug, store.okf_root)
+
+    for concept_id in prior_concept_ids:
+        survivor = store.load_concept(concept_id)
+        if survivor is None:
+            okf.remove_concept(concept_id, store.okf_root)
+        else:
+            okf.export_concept(survivor, store, store.okf_root)
+
+    return deleted
+
+
 def _rank_by_similarity(entry: KBEntry, touched: list[Concept], store: Store) -> list[Concept]:
     """``touched``, highest-similarity-to-this-video's-items first (design report §6)."""
     from .query import cosine  # local import: avoids a canonicalize<->query circular import

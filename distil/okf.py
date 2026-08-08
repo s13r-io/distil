@@ -147,11 +147,43 @@ def export_entry(entry: KBEntry, transcript: Transcript, okf_root: str | Path) -
 
 def remove_entry(entry: KBEntry, okf_root: str | Path) -> None:
     """Delete an entry's OKF pages (if present) and regenerate both indexes."""
+    remove_entry_pages(slug_for_entry(entry, okf_root), okf_root)
+
+
+def remove_entry_pages(slug: str, okf_root: str | Path) -> None:
+    """Delete ``sources/<slug>.md`` and ``raw/<slug>.md`` (if present) and regenerate both
+    indexes. The slug-only counterpart to :func:`remove_entry`, for callers (delete-cascade
+    orchestration) that need to remove an entry's pages without a loadable ``KBEntry`` — see
+    :func:`find_slug_for_entry_id` for recovering the slug in that case.
+    """
     root = Path(okf_root)
-    slug = slug_for_entry(entry, root)
     (root / "sources" / f"{slug}.md").unlink(missing_ok=True)
     (root / "raw" / f"{slug}.md").unlink(missing_ok=True)
     _rebuild_indexes(root)
+
+
+def find_slug_for_entry_id(entry_id: str, okf_root: str | Path) -> str | None:
+    """Recover a ``sources/<slug>.md`` page's slug from its ``distil_entry_id`` frontmatter
+    alone — no loadable :class:`KBEntry` needed. This is the same lookup
+    :func:`slug_for_entry` uses internally to keep a slug stable across re-exports; it is
+    exposed here for callers (e.g. delete-cascade orchestration) that only have an ``entry_id``
+    because the ``kb/<id>.md`` file is missing or failed to parse.
+    """
+    return _slug_owned_by(Path(okf_root) / "sources", entry_id)
+
+
+def rebuild_indexes(okf_root: str | Path) -> None:
+    """Public entry point for regenerating ``index.md``/``sources/index.md``/``concepts/
+    index.md`` from whatever pages currently exist on disk — used by reconcile after removing
+    orphaned files so the indexes reflect the repaired bundle."""
+    _rebuild_indexes(Path(okf_root))
+
+
+def frontmatter_field(text: str, key: str) -> str | None:
+    """Public wrapper over the frontmatter scan every page type in this module shares —
+    exposed for callers outside this module (reconcile) that need to read a page's own
+    frontmatter without duplicating the parsing rule."""
+    return _frontmatter_field(text, key)
 
 
 def render_source_with_concepts(entry: KBEntry, store: Store, okf_root: str | Path) -> None:

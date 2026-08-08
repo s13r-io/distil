@@ -130,7 +130,7 @@ that must abstain.
 - T-S4: new entries with `distilled_note` render a teaching note first and preserve raw evidence below it; legacy entries still render.
 - T-S5: noisy source filenames are cleaned for display, optional YouTube URLs render near the top of notes, and Note v1 evidence is collapsed/de-emphasized.
 - T-S6 (OKF, Phase 2): `file_entry(..., transcript=...)` exports `sources/<slug>.md` + `raw/<slug>.md` under `okf_root`; omitting `transcript` (feedback-only re-file) leaves no `okf_root` directory.
-- T-S7 (OKF, Phase 2): `okf_root` defaults to a sibling of `kb_dir`; `delete_entry` removes an entry's OKF pages too.
+- T-S7 (OKF, Phase 2): `okf_root` defaults to a sibling of `kb_dir`. `delete_entry` is pure DB/file-store (kb file, index row, vectors, membership retraction) and deliberately does not touch OKF pages — see T-DEL1-4 for the orchestration layer (`canonicalize.run_delete_entry_stage`) that does.
 
 ### pipeline.py
 - T-PL1: end-to-end with FakeClient produces a complete, schema-valid KBEntry with `distilled_note`.
@@ -180,6 +180,19 @@ that must abstain.
 - T-CANON8 (Phase 15.2): `synthesize_touched_concepts` ranks a video's touched concepts by embedding similarity (`Store.concept_centroid`) and synthesizes only the top `MAX_CONCEPTS_TO_SYNTHESIZE_PER_VIDEO` (env `DISTIL_CONCEPTS_SYNTH_PER_VIDEO`, default 5); the rest are marked `pending_synthesis=True` and make no LLM call. A touched set within the cap synthesizes all of them.
 - T-CANON-EVAL1 (eval, Phase 15.3, §6 validation gate): against the real configured model + a real local embedder, 3 genuine paraphrases of the same idea ("traditional RAG") land in one concept, while a lexically-adjacent but distinct idea ("agentic RAG") does not merge into it.
 - T-CANON-EVAL2 (eval, Phase 15.3, §6 validation gate): under real model output, `synthesize_concept` produces at least one kept claim, and every claim's `item_ids` are non-empty and all resolve to real members of the concept.
+
+### canonicalize.py — run_delete_entry_stage (delete-cascade orchestration — unit, FakeClient/FakeEmbedder)
+- T-DEL1: deleting an entry that was the sole source of a concept removes both the DB row (`Store.delete_entry`'s existing retraction) and the now-orphaned `concepts/<id>.md` page + index entries.
+- T-DEL2: deleting one of several sources of a surviving concept retracts only that membership and re-exports the concept's page, so it stops listing the deleted video (no stale back-reference).
+- T-DEL3/T-DEL4: when `kb/<id>.md` is missing or fails to parse, the entry's `sources/<slug>.md`/`raw/<slug>.md` pages are still removed — the slug is recovered from the source page's own `distil_entry_id` frontmatter (`okf.find_slug_for_entry_id`) rather than requiring a loadable `KBEntry`.
+- The reconciled/deleted bundle lints clean (`okf_lint.lint`) in every case above.
+
+### reconcile.py (bundle drift repair — unit, FakeClient/FakeEmbedder)
+- T-REC1: an orphaned `sources/<slug>.md` (`distil_entry_id` not a live DB entry) is removed along with its `raw/<slug>.md` pair; a legitimate, live-owned pair is left untouched.
+- T-REC2: an orphaned `concepts/<id>.md` (concept_id not in the DB) is removed and indexes regenerated; removing it also re-renders any live source's "## Concepts covered" section that pointed at it, so no dangling link survives.
+- T-REC3: dry run (`apply=False`, the default) reports every file it would remove but deletes nothing.
+- T-REC4: a `sources/` page with no (or unparseable) `distil_entry_id`, or a `raw/` page with no matching `sources/` page, has an undeterminable owner — reported as skipped, never deleted.
+- T-REC5: reconcile never touches `kb/` or the database; the reconciled bundle passes `okf_lint.lint`.
 
 ### synthesize_concept.py (concept-page synthesis, Phase 15.2 — unit, FakeClient)
 - T-SYN1: valid claims JSON parses into cleaned `ConceptClaim`s.
