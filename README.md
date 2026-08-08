@@ -52,6 +52,7 @@ distil list                               # browse your knowledge base
 distil ask "what do my notes say about X" # grounded answer + source links (or "no notes")
 distil reindex                            # embed older entries for the read layer
 distil delete <entry_id> --yes            # remove an entry, index row, and vectors
+distil reconcile [--apply]                # repair a drifted OKF bundle (dry run by default)
 ```
 
 `run` cleans noisy uploaded filenames before using them as fallback titles, and `--url` stores
