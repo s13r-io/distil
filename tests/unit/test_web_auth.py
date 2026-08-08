@@ -82,6 +82,29 @@ def test_a2_health_is_open_even_in_public_mode(seeded, monkeypatch):
     assert client.get("/health").status_code == 200
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/concepts",
+        "/concepts/some-concept",
+        "/entries/some-entry/transcript.md",
+        "/bundle.zip",
+    ],
+)
+def test_a2_new_concept_and_bundle_routes_require_auth(seeded, monkeypatch, path):
+    monkeypatch.setenv("DISTIL_PUBLIC", "true")
+    monkeypatch.setenv("DISTIL_AUTH_SECRET", "s3cret")
+    client = TestClient(create_app(), follow_redirects=False)
+    r = client.get(path, headers={"accept": "text/html"})
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login"
+    r_api = client.get(path, headers={"accept": "application/json"})
+    assert r_api.status_code == 401
+    r_ok = client.get(path, headers={"Authorization": "Bearer s3cret"})
+    assert r_ok.status_code in (200, 404)  # authenticated: reaches the route, not the auth gate
+
+
 # ---- T-A3: localhost (not public) reachable without the secret ----
 
 

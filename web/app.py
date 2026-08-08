@@ -9,6 +9,7 @@ with inline scoring. Auth (web/auth.py) is unchanged and gates every data route;
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import zipfile
 from pathlib import Path
 from time import perf_counter
 
@@ -30,7 +32,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from distil import youtube
+from distil import okf, youtube
 from distil.canonicalize import run_delete_entry_stage
 from distil.cli import _make_client, _make_embedder
 from distil.graph import link_graph
@@ -49,6 +51,7 @@ from distil.source import (
     normalize_youtube_url,
 )
 from distil.store import Store
+from distil.synthesize_concept import find_claim_contradictions
 from distil.youtube import YoutubeFetchError
 
 from . import auth
@@ -276,6 +279,137 @@ def _fetch_source_metadata(source_url: str | None) -> SourceMetadata:
         return SourceMetadata()
 
 
+def _concept_detail_context(store: Store, concept) -> dict:
+    """Template context for a concept detail page: claims with resolved citations/
+    contradictions, deduped sources, and typed edges grouped by relation. Every citation and
+    source link resolves from verified member/entry data, never model text — same discipline
+    ``okf._render_concept`` already applies to the OKF page for this concept."""
+    member_entries: dict[str, object] = {}
+    for member in concept.members:
+        if member.entry_id in member_entries:
+            continue
+        try:
+            member_entries[member.entry_id] = store.load_entry(member.entry_id)
+        except Exception:
+            continue
+
+    members_by_item = {m.item_id: m for m in concept.members}
+    contradictions = find_claim_contradictions(concept, store)
+    claims = []
+    for idx, claim in enumerate(concept.claims):
+        citations = []
+        for item_id in claim.item_ids:
+            member = members_by_item.get(item_id)
+            if member is None:
+                continue
+            entry = member_entries.get(member.entry_id)
+            citations.append({
+                "entry_id": member.entry_id,
+                "entry_title": entry.source.title if entry is not None else member.entry_id,
+                "item_id": item_id,
+                "timestamp": member.timestamp,
+            })
+        contradiction = None
+        rows = contradictions.get(idx)
+        if rows:
+            contradiction = [
+                {
+                    "entry_title": (
+                        member_entries[entry_id].source.title
+                        if entry_id in member_entries else entry_id
+                    ),
+                    "stance": stance,
+                }
+                for entry_id, _item_id, stance in rows
+            ]
+        claims.append({"text": claim.text, "citations": citations, "contradiction": contradiction})
+
+    sources = []
+    seen_entries: set[str] = set()
+    for member in concept.members:
+        if member.entry_id in seen_entries:
+            continue
+        seen_entries.add(member.entry_id)
+        entry = member_entries.get(member.entry_id)
+        if entry is None:
+            continue
+        sources.append({
+            "entry_id": member.entry_id,
+            "title": entry.source.title,
+            "quote": member.quote,
+            "timestamp": member.timestamp,
+        })
+
+    other_titles = {
+        c.concept_id: c.title for c in store.list_concepts() if c.concept_id != concept.concept_id
+    }
+    edges_by_relation: dict[str, list[dict]] = {"contrasts_with": [], "builds_on": [], "related": []}
+    for edge in concept.edges:
+        if edge.target_concept_id in other_titles:
+            edges_by_relation[edge.relation].append({
+                "target_concept_id": edge.target_concept_id,
+                "title": other_titles[edge.target_concept_id],
+            })
+
+    return {
+        "concept": concept,
+        "claims": claims,
+        "sources": sources,
+        "edges_by_relation": edges_by_relation,
+        "has_contradiction": any(c["contradiction"] for c in claims),
+    }
+
+
+def _concepts_for_entry(store: Store, entry_id: str) -> list[dict]:
+    return [
+        {"concept_id": c.concept_id, "title": c.title}
+        for c in store.list_concepts()
+        if any(m.entry_id == entry_id for m in c.members)
+    ]
+
+
+class _ZipChunkBuffer(io.RawIOBase):
+    """A write-only, non-seekable buffer ``zipfile.ZipFile`` can write into; ``get()`` drains
+    whatever has accumulated so a caller can yield it as one chunk of a streamed response,
+    instead of the whole archive being built in memory before anything is sent."""
+
+    def __init__(self) -> None:
+        self._data = bytearray()
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, b) -> int:
+        self._data += b
+        return len(b)
+
+    def get(self) -> bytes:
+        chunk = bytes(self._data)
+        self._data.clear()
+        return chunk
+
+
+def _iter_bundle_zip(okf_root: Path):
+    buf = _ZipChunkBuffer()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        if okf_root.exists():
+            resolved_root = okf_root.resolve()
+            for path in sorted(okf_root.rglob("*")):
+                if not path.is_file():
+                    continue
+                try:
+                    path.resolve().relative_to(resolved_root)
+                except ValueError:
+                    continue  # never include anything outside the bundle directory
+                zf.write(path, arcname=str(path.relative_to(okf_root)))
+                chunk = buf.get()
+                if chunk:
+                    yield chunk
+    tail = buf.get()
+    if tail:
+        yield tail
+
+
 def create_app() -> FastAPI:
     auth.assert_startup_safe()  # fail closed before serving (T-A1)
     app = FastAPI(title="Distil", docs_url=None, redoc_url=None)
@@ -332,6 +466,18 @@ def create_app() -> FastAPI:
         tag_options = [{"value": tag, "label": _humanize_tag(tag)} for tag in all_tags]
         return {"entries": entries, "all_tags": tag_options, "entry_count": len(entries)}
 
+    def _concepts_template_context() -> dict:
+        concepts = [
+            {
+                "concept_id": c.concept_id,
+                "title": c.title,
+                "description": c.description,
+                "video_count": len({m.entry_id for m in c.members}),
+            }
+            for c in _store().list_concepts()
+        ]
+        return {"concepts": concepts, "concept_count": len(concepts)}
+
     # ---- home / ask ----
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
@@ -346,6 +492,25 @@ def create_app() -> FastAPI:
         return _TEMPLATES.TemplateResponse(
             request, "library.html",
             {**_library_template_context(), "active_page": "library"},
+        )
+
+    # ---- concepts ----
+    @app.get("/concepts", response_class=HTMLResponse)
+    def concepts_list(request: Request):
+        return _TEMPLATES.TemplateResponse(
+            request, "concepts.html",
+            {**_concepts_template_context(), "active_page": "concepts"},
+        )
+
+    @app.get("/concepts/{concept_id}", response_class=HTMLResponse)
+    def concept_page(request: Request, concept_id: str):
+        store = _store()
+        concept = store.load_concept(concept_id)
+        if concept is None:
+            return HTMLResponse("<p>Concept not found.</p>", status_code=404)
+        return _TEMPLATES.TemplateResponse(
+            request, "concept.html",
+            {**_concept_detail_context(store, concept), "active_page": "concepts"},
         )
 
     # ---- ingest (non-blocking) ----
@@ -422,12 +587,49 @@ def create_app() -> FastAPI:
             return HTMLResponse("<p>Entry not found.</p>", status_code=404)
         e = store.load_entry(entry_id)
         mix = [(s.type, round(s.share * 100)) for s in e.triage.knowledge_types_present]
+        slug = okf.slug_for_entry(e, store.okf_root)
+        has_transcript = (store.okf_root / "raw" / f"{slug}.md").exists()
         return _TEMPLATES.TemplateResponse(
             request, "entry.html",
             {"e": e, "mix": mix,
+             "has_transcript": has_transcript,
+             "concepts_for_entry": _concepts_for_entry(store, entry_id),
              "reasons": ["relevant", "already_knew", "bad_source", "wrong_for_me",
                          "irrelevant_now"],
              "active_page": "library"},
+        )
+
+    @app.get("/entries/{entry_id}/transcript.md")
+    def transcript_markdown(entry_id: str, download: bool = False):
+        store = _store()
+        if not store.entry_path(entry_id).exists():
+            return JSONResponse({"detail": "not found"}, status_code=404)
+        entry = store.load_entry(entry_id)
+        slug = okf.slug_for_entry(entry, store.okf_root)
+        raw_path = store.okf_root / "raw" / f"{slug}.md"
+        if not raw_path.exists():
+            return JSONResponse({"detail": "transcript not available"}, status_code=404)
+        headers = {}
+        if download:
+            title = display_title(
+                entry.source.title,
+                entry.distilled_note.title if entry.distilled_note is not None else None,
+            )
+            filename = _markdown_filename(f"{title}-transcript")
+            headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return Response(
+            raw_path.read_text(encoding="utf-8"),
+            media_type="text/markdown; charset=utf-8",
+            headers=headers,
+        )
+
+    # ---- bundle export ----
+    @app.get("/bundle.zip")
+    def bundle_download():
+        okf_root = _store().okf_root
+        headers = {"Content-Disposition": 'attachment; filename="distil-bundle.zip"'}
+        return StreamingResponse(
+            _iter_bundle_zip(okf_root), media_type="application/zip", headers=headers
         )
 
     @app.get("/entries/{entry_id}/teaching-note.md")

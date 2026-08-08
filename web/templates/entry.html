@@ -217,6 +217,24 @@
       {% endif %}
     </section>
 
+    {% if has_transcript %}
+    <section class="action-card">
+      <p class="small-title">Transcript</p>
+      <p style="margin:0;"><a class="btn" href="/entries/{{ e.entry_id }}/transcript.md">View raw transcript</a></p>
+    </section>
+    {% endif %}
+
+    {% if concepts_for_entry %}
+    <section class="action-card">
+      <p class="small-title">Concepts</p>
+      <div class="row wrap">
+        {% for c in concepts_for_entry %}
+        <a class="badge info" href="/concepts/{{ c.concept_id }}">{{ c.title }}</a>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
     <section class="score-panel">
       <p class="label" style="margin:0 0 2px; font-size:13px;">How useful was this?</p>
       <p class="muted" id="score-state" style="margin:0;">
