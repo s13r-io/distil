@@ -13,10 +13,10 @@ COPY pyproject.toml README.md LICENSE ./
 COPY distil ./distil
 COPY web ./web
 
-# Core + provider + local embeddings + vector search. Drop embed-local if hosting tiny
-# (set DISTIL_EMBEDDER=api) to shrink the image.
+# Core + provider + local embeddings + vector search + YouTube ingest. Drop embed-local if
+# hosting tiny (set DISTIL_EMBEDDER=api) to shrink the image.
 RUN pip install --upgrade pip && \
-    pip install ".[anthropic,embed-local,vec,web]"
+    pip install ".[anthropic,embed-local,vec,web,youtube]"
 
 # Pre-download the default local embedding model at BUILD time so the runtime volume is never
 # written during build and cold starts are fast. Override DISTIL_EMBED_MODEL as needed.

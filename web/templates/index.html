@@ -20,8 +20,8 @@
     <div class="collapse-body panel-body">
       <div class="add-form">
         <div class="field">
-          <label for="source-url">Source URL</label>
-          <input type="url" id="source-url" placeholder="Optional YouTube URL">
+          <label for="source-url">YouTube URL</label>
+          <input type="url" id="source-url" placeholder="Video or playlist URL, or attribution for a paste/file below">
         </div>
         <div class="field drop-zone file-drop">
           <label for="file">Upload transcript file</label>
@@ -202,17 +202,23 @@ document.getElementById('distil-btn').addEventListener('click', async () => {
   if(file) fd.append('file',file); else fd.append('paste',paste);
   fd.append('source_url',sourceUrl);
   const msg=document.getElementById('add-msg');
-  if(!file && !paste.trim()){msg.textContent='Paste a transcript or choose a file first.';return;}
+  if(!file && !paste.trim() && !sourceUrl.trim()){
+    msg.textContent='Paste a transcript, choose a file, or add a YouTube URL first.'; return;
+  }
   const btn=document.getElementById('distil-btn'); btn.disabled=true;
   try{
     const r=await fetch('/ingest',{method:'POST',body:fd});
     if(r.ok){
+      const body=await r.json();
       document.getElementById('paste').value=''; document.getElementById('file').value='';
       document.getElementById('source-url').value='';
       const panel=document.getElementById('add-panel');
       panel.classList.add('collapsed');
       document.getElementById('add-head').setAttribute('aria-expanded','false');
-      msg.textContent='Queued. Activity will update shortly.'; loadJobs();
+      msg.textContent=body.count>1
+        ? 'Queued '+body.count+' videos. Activity will update shortly.'
+        : 'Queued. Activity will update shortly.';
+      loadJobs();
     }else{const d=await r.json();msg.textContent=d.detail||'Could not queue.';}
   }finally{btn.disabled=false;}
 });

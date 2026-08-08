@@ -109,13 +109,19 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 |------|---------------------------------------|--------|----|----|----|-------|-------|
 | 12.1 | FastAPI list/view/score + ask box; auth middleware (T-A2) | done | ✅ | ✅ | ✅ | agent | web/app.py: index w/ ask box, /entries, /entries/{id}, score, /ask; auth middleware front of data routes. 9 web tests |
 
+## Phase 13 — YouTube video/playlist ingest (OKF Phase 1) (T-Y*)
+
+| ID   | Task                                          | Status | T? | C? | P? | Owner | Notes |
+|------|------------------------------------------------|--------|----|----|----|-------|-------|
+| 13.1 | youtube.py fetch layer + web ADD-by-URL wiring | done   | ✅ | ✅ | ✅ | agent | distil/youtube.py (yt-dlp via injectable `run`): playlist enumeration + caption fetch → `ingest.ingest_srt_text`; web/app.py ADD input accepts a video/playlist URL, enqueues one `youtube` job per video through the existing web/jobs.py Worker; per-video failures skipped+reported, never fatal to the batch. `youtube` optional extra added. |
+
 ---
 
 ## Decisions needed (owner answers here)
 | #  | Question                                                            | Default                        | Owner decision |
 |----|---------------------------------------------------------------------|--------------------------------|----------------|
 | D1 | Score per-document or per-application-link?                         | per-document (per-link optional) | **per-document** |
-| D2 | Include YouTube URL fetch in MVP, or transcript text only?          | text only in MVP               | **text only; paste OR file upload (.srt/.txt/.md); handle transcripts with or without timestamps** (FR1, FR21, FR22) |
+| D2 | Include YouTube URL fetch in MVP, or transcript text only? *(superseded by Phase 13 — YouTube video/playlist fetch via yt-dlp shipped 2026-08-08)* | text only in MVP               | **MVP: text only; paste OR file upload (.srt/.txt/.md); handle transcripts with or without timestamps** (FR1, FR21, FR22). **Phase 13: YouTube video/playlist URL fetch added** (T-Y*). |
 | D3 | Commit generated `kb/` to git, or keep local/gitignored?           | gitignored (git-remote backup) | **gitignored; back up via scheduled push to a separate private repo** |
 | D4 | LLM provider/model to default to?                                   | Claude API, model via env      | **Claude API, model via env** |
 | D5 | Embeddings: local model or API?                                     | local (provider-independent)   | **local** (watch instance RAM when hosted — ARCH §8.4) |
@@ -140,6 +146,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 - 2026-06-21 Note v1 done: added DistilledNote + note.py grounded synthesis, bounded extra note call, fallback on malformed output, markdown/web teaching-note rendering, note topics as entry tags, and query retrieval context from cited note sections. 163 unit tests green.
 - 2026-06-21 Source metadata UX done: CLI/web accept optional YouTube URLs, uploaded filenames are cleaned before display, Note v1 evidence is collapsed/de-emphasized in markdown and web, and index titles prefer synthesized note titles. 171 unit tests green.
 - 2026-06-21 YouTube metadata + deletion done: YouTube URLs fetch best-effort oEmbed metadata (title/channel/channel URL/thumbnail/provider/fetched_at), notes render retained video metadata, and CLI/web deletion removes markdown, index row, and vectors. Unit tests/lint green.
+- 2026-08-08 Phase 13.1 done: YouTube video/playlist ingest (OKF Phase 1) — youtube.py fetches captions via yt-dlp and enumerates playlists, web ADD input enqueues one `youtube` job per video through the existing Worker, per-video failures are skipped+reported (never fatal to the batch). `youtube` extra added. 206 unit tests green.
 
 ## Agent notes (non-blocking observations)
 - ENV: stack pins Python >=3.11 (ARCHITECTURE.md §1) and CI uses 3.11. The dev sandbox here runs 3.10, so `pip install -e .` is refused by `requires-python`; tests are run via `PYTHONPATH=.` instead. No stack change made — flagging only. If the owner wants the sandbox to do editable installs, lowering the floor to 3.10 would be a stack decision (raise in Decisions needed first).

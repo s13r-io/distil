@@ -50,6 +50,14 @@ def clean_source_title(raw: str | None, *, fallback: str = "Pasted transcript") 
     return title or fallback
 
 
+def is_youtube_host(url: str) -> bool:
+    """True if ``url`` is an ``http(s)`` link to a recognized YouTube domain."""
+    candidate = url if "://" in url else f"https://{url}"
+    parsed = urlparse(candidate)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme in {"http", "https"} and host in _YOUTUBE_HOSTS
+
+
 def normalize_youtube_url(raw: str | None) -> str | None:
     """Validate and normalize an optional YouTube URL for attribution/navigation.
 
@@ -60,12 +68,11 @@ def normalize_youtube_url(raw: str | None) -> str | None:
     url = (raw or "").strip()
     if not url:
         return None
+    if not is_youtube_host(url):
+        raise SourceUrlError("Source URL must be a YouTube URL.")
     if "://" not in url:
         url = f"https://{url}"
     parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    if parsed.scheme not in {"http", "https"} or host not in _YOUTUBE_HOSTS:
-        raise SourceUrlError("Source URL must be a YouTube URL.")
     video_id = _youtube_video_id(parsed)
     if not video_id:
         raise SourceUrlError("Source URL must include a YouTube video id.")
