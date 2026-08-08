@@ -64,7 +64,7 @@ def slug_for_entry(entry: KBEntry, okf_root: str | Path | None = None) -> str:
     With ``okf_root``, existing ``sources/*.md`` frontmatter is consulted to keep the slug
     stable across re-exports and to disambiguate title collisions between distinct entries.
     """
-    base = _slugify(entry.source.title) or entry.entry_id
+    base = slugify(entry.source.title) or entry.entry_id
     if okf_root is None:
         return base
 
@@ -79,7 +79,7 @@ def slug_for_entry(entry: KBEntry, okf_root: str | Path | None = None) -> str:
 
     suffix_len = 6
     while True:
-        suffix = _slugify(entry.entry_id[-suffix_len:]) or entry.entry_id
+        suffix = slugify(entry.entry_id[-suffix_len:]) or entry.entry_id
         candidate = f"{base}-{suffix}"
         owner = _owner_of_slug(sources_dir, candidate)
         if owner is None or owner == entry.entry_id:
@@ -105,7 +105,12 @@ def _owner_of_slug(sources_dir: Path, slug: str) -> str | None:
     return _frontmatter_field(path.read_text(encoding="utf-8"), "distil_entry_id")
 
 
-def _slugify(text: str) -> str:
+def slugify(text: str) -> str:
+    """Lowercase, hyphenate, and strip ``text`` into a URL-safe slug fragment.
+
+    Shared by :func:`slug_for_entry` and, for concept titles, ``canonicalize.py`` — the one
+    slugification rule every OKF path-identity slug in Distil derives from.
+    """
     return _SLUG_RUN.sub("-", text.strip().lower()).strip("-")
 
 

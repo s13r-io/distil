@@ -4,7 +4,7 @@ import pytest
 
 from distil.embed import FakeEmbedder
 from distil.ingest import Segment, Transcript
-from distil.models import ActionStep, GroundedText, KBEntry, ReviewQuestion
+from distil.models import ActionStep, Concept, ConceptMember, GroundedText, KBEntry, ReviewQuestion
 from distil.store import Store
 
 
@@ -282,3 +282,123 @@ def test_delete_entry_removes_okf_pages(store):
     store.delete_entry("e_01")
     assert not (store.okf_root / "sources" / "a-talk.md").exists()
     assert not (store.okf_root / "raw" / "a-talk.md").exists()
+
+
+# ---- Concepts table (Phase 15.1 — canonicalize engine, design report §3, §5) -------------
+
+
+def _concept(concept_id="c1", title="C1", members=None) -> Concept:
+    return Concept(
+        concept_id=concept_id,
+        title=title,
+        description="d",
+        members=members or [],
+        created_at="2026-06-15T00:00:00",
+        updated_at="2026-06-15T00:00:00",
+    )
+
+
+@pytest.mark.unit
+def test_save_and_load_concept_round_trips(store):
+    store.file_entry(_entry(), embedder=FakeEmbedder(dim=8))
+    concept = _concept(
+        members=[ConceptMember(entry_id="e_01", item_id="k_01", quote="q", timestamp=None)]
+    )
+    store.save_concept(concept)
+    assert store.load_concept("c1") == concept
+    assert [c.concept_id for c in store.list_concepts()] == ["c1"]
+
+
+@pytest.mark.unit
+def test_resaving_concept_updates_not_duplicates(store):
+    store.file_entry(_entry(), embedder=FakeEmbedder(dim=8))
+    store.save_concept(_concept(title="Old title"))
+    store.save_concept(_concept(title="New title"))
+    concepts = store.list_concepts()
+    assert len(concepts) == 1
+    assert concepts[0].title == "New title"
+
+
+@pytest.mark.unit
+def test_delete_concept(store):
+    store.save_concept(_concept())
+    assert store.delete_concept("c1") is True
+    assert store.load_concept("c1") is None
+    assert store.delete_concept("c1") is False
+
+
+@pytest.mark.unit
+def test_load_missing_concept_returns_none(store):
+    assert store.load_concept("nope") is None
+
+
+@pytest.mark.unit
+def test_concept_centroid_is_mean_of_member_vectors_and_drives_candidates(store):
+    store.file_entry(_entry(), embedder=FakeEmbedder(dim=8))
+    vec = next(v for _iid, eid, v in store.iter_item_vectors() if eid == "e_01")
+    store.save_concept(
+        _concept(members=[ConceptMember(entry_id="e_01", item_id="k_01", quote="q", timestamp=None)])
+    )
+    candidates = store.find_concept_candidates(vec, [], "")
+    assert candidates and candidates[0].concept_id == "c1"
+    assert candidates[0].similarity == pytest.approx(1.0)
+
+
+@pytest.mark.unit
+def test_find_concept_candidates_below_floor_and_no_token_overlap_returns_empty(store):
+    store.save_concept(_concept(title="Something Unrelated"))  # zero members -> empty centroid
+    candidates = store.find_concept_candidates([1.0, 0.0], [], "totally different words")
+    assert candidates == []
+
+
+@pytest.mark.unit
+def test_find_concept_candidates_respects_max_candidates_env(store, monkeypatch):
+    store.file_entry(_entry(), embedder=FakeEmbedder(dim=8))
+    vec = next(v for _iid, eid, v in store.iter_item_vectors() if eid == "e_01")
+    for i in range(3):
+        store.save_concept(
+            _concept(
+                concept_id=f"c{i}",
+                members=[ConceptMember(entry_id="e_01", item_id="k_01", quote="q", timestamp=None)],
+            )
+        )
+    monkeypatch.setenv("DISTIL_CONCEPT_MAX_CANDIDATES", "1")
+    assert len(store.find_concept_candidates(vec, [], "")) == 1
+
+
+@pytest.mark.unit
+def test_retract_entry_concept_memberships_deletes_zero_member_concept(store):
+    store.file_entry(_entry(), embedder=FakeEmbedder(dim=8))
+    store.save_concept(
+        _concept(members=[ConceptMember(entry_id="e_01", item_id="k_01", quote="q", timestamp=None)])
+    )
+    store.retract_entry_concept_memberships("e_01")
+    assert store.load_concept("c1") is None
+
+
+@pytest.mark.unit
+def test_retract_entry_concept_memberships_keeps_other_entries_members(store):
+    store.file_entry(_entry(entry_id="e_01"), embedder=FakeEmbedder(dim=8))
+    store.file_entry(_entry(entry_id="e_02"), embedder=FakeEmbedder(dim=8))
+    store.save_concept(
+        _concept(
+            members=[
+                ConceptMember(entry_id="e_01", item_id="k_01", quote="q", timestamp=None),
+                ConceptMember(entry_id="e_02", item_id="k_01", quote="q", timestamp=None),
+            ]
+        )
+    )
+    store.retract_entry_concept_memberships("e_01")
+    remaining = store.load_concept("c1")
+    assert remaining is not None
+    assert {m.entry_id for m in remaining.members} == {"e_02"}
+
+
+@pytest.mark.unit
+def test_delete_entry_retracts_concept_membership(store):
+    store.file_entry(_entry(), embedder=FakeEmbedder(dim=8))
+    store.save_concept(
+        _concept(members=[ConceptMember(entry_id="e_01", item_id="k_01", quote="q", timestamp=None)])
+    )
+    store.delete_entry("e_01")
+    assert store.load_concept("c1") is None

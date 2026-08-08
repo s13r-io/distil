@@ -226,3 +226,28 @@ class KBEntry(_Model):
     tags: Tags = Field(default_factory=Tags)
     feedback: Feedback = Field(default_factory=Feedback)
     meta: EntryMeta
+
+
+# ---- Concept (Phase 15.1 — canonicalize engine; OKF Phase 3a design report §3) ----------
+
+
+class ConceptMember(_Model):
+    """One knowledge item's membership in a concept, copied at match/new-creation time."""
+
+    entry_id: str
+    item_id: str
+    quote: str
+    timestamp: str | None = None
+
+
+class Concept(_Model):
+    """A canonical idea spanning one or more videos. ``concept_id`` == the slug (OKF's "path
+    is identity"). No feedback/application-link data by construction — see report §3."""
+
+    concept_id: str
+    title: str
+    description: str
+    members: list[ConceptMember] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+    body_model_version: str = ""
