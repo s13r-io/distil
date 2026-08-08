@@ -66,14 +66,19 @@ raw input (pasted text or .srt / .txt / .md file) + profile
         │                synthesize+export touched concept pages to okf/concepts/ (§4)
         │
         ▼
-[9] Feedback (later) ──► score+reason → profile update (pure logic, SCHEMA §3)
+[9] Concept edges ─────► classify typed links between concepts just synthesized (capped LLM
+        │                call per candidate pair), re-export changed concept pages (§4)
+        │
+        ▼
+[10] Feedback (later) ─► score+reason → profile update (pure logic, SCHEMA §3)
 ```
 
-LLM-backed stages: **1, 2, 4, 5, 6, 8** (6 only needs the LLM for relation classification, candidate
-matching is a deterministic index lookup first; 8 likewise — embedding-similarity candidates first,
-one capped batched LLM call for matching plus capped synthesis calls). Pure/deterministic stages:
-**0, 3, 7, 9**. Keep the core LLM-call count per useful transcript bounded (target ≤ 4 before graph
-relation classification: triage, extract, link, note). Low-value transcripts still stop after triage.
+LLM-backed stages: **1, 2, 4, 5, 6, 8, 9** (6 only needs the LLM for relation classification,
+candidate matching is a deterministic index lookup first; 8 and 9 likewise — embedding/centroid
+similarity candidates first, one capped batched LLM call for matching plus capped synthesis calls
+for 8, one capped LLM call per candidate pair for 9). Pure/deterministic stages: **0, 3, 7, 10**.
+Keep the core LLM-call count per useful transcript bounded (target ≤ 4 before graph relation
+classification: triage, extract, link, note). Low-value transcripts still stop after triage.
 
 **Timestamps are optional.** Stage 0 captures a timestamp per segment when the source has one
 (`.srt`, or inline markers like `00:12:30`), and leaves it null otherwise, always keeping a
@@ -97,11 +102,12 @@ distil/
   graph.py           # stage 6 (candidate lookup + relation classify)
   canonicalize.py    # stage 8: concept-matching engine, per-item match/new/reject against `concepts` table, plus `run_canonicalize_stage` orchestration (see AGENTS.md)
   synthesize_concept.py  # concept-page synthesis: grounded ConceptClaim synthesis + code-rendered citations, called from `run_canonicalize_stage` (see AGENTS.md)
-  profile_update.py  # stage 9 (PURE: implements SCHEMA §3 table)
+  concept_graph.py   # stage 9: concept<->concept typed-edge classification, per-concept centroid candidates + capped LLM classify, plus `run_concept_edges_stage` orchestration (see AGENTS.md)
+  profile_update.py  # stage 10 (PURE: implements SCHEMA §3 table)
   embed.py           # Embedder protocol + LocalEmbedder + ApiEmbedder + FakeEmbedder (tests)
   query.py           # read layer: retrieve + retrieve_concepts → relevance gate → grounded synthesis → sources (see AGENTS.md)
   store.py           # SQLite (+ sqlite-vec vectors) + markdown filing (+ OKF export at File, §4)
-  pipeline.py        # orchestrates 1→8 (now also embeds items at the File stage; canonicalize gated by PipelineConfig.enable_canonicalize)
+  pipeline.py        # orchestrates 1→9 (now also embeds items at the File stage; canonicalize gated by PipelineConfig.enable_canonicalize, concept edges by PipelineConfig.enable_concept_edges)
   cli.py             # Typer commands (run, score, list, show, ask, reindex)
   youtube.py         # fetch layer (Phase 1): yt-dlp playlist listing + caption fetch → Transcript (see AGENTS.md)
   okf.py             # OKF export layer: per-video sources/+raw/ pages (Phase 2) + concept pages (Phase 15.2) + indexes (see AGENTS.md)
@@ -124,6 +130,7 @@ data/                # distil.db incl. vectors (gitignored)
 - **KBEntry**: the markdown file in `kb/<entry_id>.md` is the source of truth for human reading. New entries include a `distilled_note` (core takeaway, key points, applications, caveats, review questions) plus the atomic evidence items in a collapsed source-evidence block. A row in SQLite (`entries` table: id, title, topics, knowledge_types, score, created_at, file_path) is the index used for graph candidate lookup and browsing.
 - **OKF export layer (Phase 2)**: at the File stage, `store.file_entry(..., transcript=...)` derives a second, neutral bundle under `okf_root` (default a sibling of `kb_dir`, e.g. `data/../okf`) via `okf.py` — `sources/<slug>.md` (summary + key moments + a link to the raw page) and `raw/<slug>.md` (immutable timestamped transcript), plus regenerated `index.md`/`sources/index.md`. It carries no feedback or application-link data, and is skipped when `transcript` is omitted (e.g. feedback-only re-files). `okf_lint.py` (`python -m distil.okf_lint <okf_root>`) validates the bundle. See `AGENTS.md` for the slug-stability rule and phase boundaries, and `docs/TESTING.md` (T-OKF*, T-OKFL*) for the test catalog.
 - **Concept canonicalization + synthesis (Stage 8, OKF Phase 3)**: `canonicalize.run_canonicalize_stage(entry, store, client)` is `pipeline.run_pipeline`'s Stage 8, gated by `PipelineConfig.enable_canonicalize` (default `True`). It calls `canonicalize_entry` (decides match/new/reject per knowledge item against existing `concepts` rows — embedding-similarity candidates + a capped LLM call — returning the touched `Concept`s), then `synthesize_touched_concepts` (ranks touched concepts by embedding similarity and, up to a per-video cap, calls `synthesize_concept.py` to build grounded `ConceptClaim`s), then keeps the OKF bundle in sync via `okf.export_concept`/`remove_concept` (including concepts that lost this entry as a member, not just touched ones) and `okf.render_source_with_concepts` (the source page's "## Concepts covered" backlink). `okf_lint.py`'s E5-E8 checks validate the resulting `concepts/` bundle. See `AGENTS.md` for the full data-flow detail and phase boundaries.
+- **Concept↔concept typed edges (Stage 9, OKF Phase 3b)**: `concept_graph.run_concept_edges_stage(touched, store, client)` is `pipeline.run_pipeline`'s Stage 9, gated by `PipelineConfig.enable_concept_edges` (default `True`). For each concept Stage 8 actually synthesized this run, `link_concept_graph` finds candidates via centroid-to-centroid cosine similarity (`Store.find_concept_edge_candidates`) and classifies each into `contrasts_with`/`builds_on`/`related` (or drops it) with one capped LLM call, replacing `Concept.edges` wholesale. `Store.prune_dangling_concept_edges` then drops edges left dangling by any concept deleted this run, and every concept whose edges changed gets its OKF page re-exported (`## Contrasts with`/`## Builds on`/`## Related`, plus a deterministic `> **Contradiction:**` flag from `synthesize_concept.find_claim_contradictions`). `okf_lint.py`'s E8 check counts these typed-edge links as valid inbound links. See `AGENTS.md` for the full data-flow detail.
 - **Provenance** is stored inside each item; the transcript itself is not retained after processing unless the user opts in (privacy).
 
 ## 5. LLM boundary (critical for testing)
