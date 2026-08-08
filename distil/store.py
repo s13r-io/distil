@@ -204,24 +204,28 @@ class Store:
         return KBEntry.model_validate_json(payload)
 
     def delete_entry(self, entry_id: str) -> bool:
-        """Delete a KB entry, its SQLite index row, its item vectors, its OKF pages, and
-        retract any concept memberships it holds (Phase 15.1 design report §5 point 3)."""
+        """Delete a KB entry: its ``kb/`` file, its SQLite index row, its item vectors, and
+        any concept memberships it holds (Phase 15.1 design report §5 point 3).
+
+        Pure DB/file-store operation by design — it never touches the OKF bundle. Removing an
+        entry's ``sources/``/``raw/`` pages and repairing any surviving concept's back-references
+        is orchestrated by :func:`distil.canonicalize.run_delete_entry_stage`, which must resolve
+        the entry's OKF slug *before* calling this (this method deletes the ``kb/`` file that
+        slug resolution can depend on)."""
         path = self.entry_path(entry_id)
         file_existed = path.exists()
-        entry: KBEntry | None = None
-        if file_existed:
-            try:
-                entry = self.load_entry(entry_id)
-            except Exception:
-                entry = None
         path.unlink(missing_ok=True)
         with self._conn:
             self._conn.execute("DELETE FROM item_vectors_meta WHERE entry_id = ?", (entry_id,))
             cur = self._conn.execute("DELETE FROM entries WHERE entry_id = ?", (entry_id,))
         self.retract_entry_concept_memberships(entry_id)
-        if entry is not None:
-            okf.remove_entry(entry, self.okf_root)
         return file_existed or cur.rowcount > 0
+
+    def all_entry_ids(self) -> set[str]:
+        """Every ``entry_id`` currently indexed in the DB — a read-only snapshot (no pruning
+        side effect, unlike :meth:`list_entries`) for callers such as reconcile that need live
+        entry identity without risking a write."""
+        return {r["entry_id"] for r in self._conn.execute("SELECT entry_id FROM entries")}
 
     def list_entries(self) -> list[EntryIndexRow]:
         cur = self._conn.execute("SELECT * FROM entries ORDER BY created_at DESC, entry_id")

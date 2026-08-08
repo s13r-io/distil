@@ -15,6 +15,7 @@ import sys
 
 import typer
 
+from .canonicalize import run_delete_entry_stage
 from .embed import Embedder, make_embedder
 from .ingest import IngestError, Transcript, ingest_file, ingest_text
 from .llm import AnthropicClient, LLMClient
@@ -22,6 +23,7 @@ from .models import Profile
 from .pipeline import PipelineConfig, run_pipeline
 from .profile_update import apply_feedback
 from .query import ask as run_ask
+from .reconcile import reconcile_okf_bundle
 from .source import (
     SourceMetadata,
     SourceMetadataError,
@@ -236,7 +238,7 @@ def delete_entry(
     if not yes and not typer.confirm(f"Delete {entry_id}?"):
         typer.echo("Cancelled.")
         raise typer.Exit(0)
-    store.delete_entry(entry_id)
+    run_delete_entry_stage(entry_id, store)
     typer.echo(f"Deleted {entry_id}.")
 
 
@@ -293,6 +295,32 @@ def reindex():
         return
     n = store.reindex(embedder)
     typer.echo(f"Reindexed {n} item vector(s).")
+
+
+@app.command()
+def reconcile(
+    apply: bool = typer.Option(
+        False, "--apply", help="Actually remove orphaned OKF files (default: dry run)."
+    ),
+):
+    """Repair the OKF bundle after drift: remove concept/source/raw pages with no live DB
+    owner. Defaults to a dry run that only reports what it would remove; pass --apply to
+    actually delete. Never touches kb/ or the database — the derived okf/ bundle only."""
+    store = _make_store()
+    report = reconcile_okf_bundle(store, apply=apply)
+    if report.removed:
+        verb = "Removed" if apply else "Would remove"
+        typer.echo(f"{verb} {len(report.removed)} file(s):")
+        for path in report.removed:
+            typer.echo(f"  - {path}")
+    else:
+        typer.echo("No orphaned files found.")
+    if report.skipped:
+        typer.echo(f"\nSkipped {len(report.skipped)} file(s) with no determinable owner:")
+        for path in report.skipped:
+            typer.echo(f"  - {path}")
+    if report.dry_run and report.removed:
+        typer.echo("\nDry run — no files were deleted. Re-run with --apply to remove them.")
 
 
 def _safe_embedder() -> Embedder | None:

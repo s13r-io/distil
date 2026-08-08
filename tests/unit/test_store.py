@@ -274,14 +274,17 @@ def test_okf_root_defaults_to_sibling_of_kb_dir(tmp_path):
 
 
 @pytest.mark.unit
-def test_delete_entry_removes_okf_pages(store):
+def test_delete_entry_is_pure_db_and_does_not_touch_okf_pages(store):
+    """Store.delete_entry is DB/file-store-only by design (see its docstring) — OKF page
+    removal is orchestrated by canonicalize.run_delete_entry_stage instead (see
+    tests/unit/test_delete_cascade.py), which needs the entry loaded before this call runs."""
     entry = _entry()
     transcript = Transcript(segments=[Segment(text="keep functions small", locator="seg:0",
                                               timestamp="00:12:30")])
     store.file_entry(entry, transcript=transcript)
     store.delete_entry("e_01")
-    assert not (store.okf_root / "sources" / "a-talk.md").exists()
-    assert not (store.okf_root / "raw" / "a-talk.md").exists()
+    assert (store.okf_root / "sources" / "a-talk.md").exists()
+    assert (store.okf_root / "raw" / "a-talk.md").exists()
 
 
 # ---- Concepts table (Phase 15.1 — canonicalize engine, design report §3, §5) -------------
