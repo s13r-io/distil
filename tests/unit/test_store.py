@@ -347,6 +347,23 @@ def test_concept_centroid_is_mean_of_member_vectors_and_drives_candidates(store)
 
 
 @pytest.mark.unit
+def test_concept_centroid_getter_matches_saved_centroid(store):
+    store.file_entry(_entry(), embedder=FakeEmbedder(dim=8))
+    vec = next(v for _iid, eid, v in store.iter_item_vectors() if eid == "e_01")
+    store.save_concept(
+        _concept(
+            members=[ConceptMember(entry_id="e_01", item_id="k_01", quote="q", timestamp=None)]
+        )
+    )
+    assert store.concept_centroid("c1") == pytest.approx(vec)
+
+
+@pytest.mark.unit
+def test_concept_centroid_missing_concept_returns_empty(store):
+    assert store.concept_centroid("nope") == []
+
+
+@pytest.mark.unit
 def test_find_concept_candidates_below_floor_and_no_token_overlap_returns_empty(store):
     store.save_concept(_concept(title="Something Unrelated"))  # zero members -> empty centroid
     candidates = store.find_concept_candidates([1.0, 0.0], [], "totally different words")

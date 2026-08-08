@@ -15,6 +15,7 @@ result rather than accumulating duplicates.
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 
@@ -23,10 +24,15 @@ from .models import Concept, ConceptMember, KBEntry, KnowledgeItem
 from .okf import slugify
 from .prompts.canonicalize import SYSTEM, build_canonicalize_prompt
 from .store import ConceptCandidate, Store
+from .synthesize_concept import synthesize_concept
 
 _ALLOWED_DECISIONS = {"match", "new", "reject"}
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 _TITLE_NORM = re.compile(r"[^a-z0-9]+")
+
+# Per-video synthesis capping (design report §6, Phase 15.2 / T-CANON8). Tunable via env
+# without a code change, mirroring CONCEPT_SIM_FLOOR/MAX_CONCEPT_CANDIDATES in store.py.
+MAX_CONCEPTS_TO_SYNTHESIZE_PER_VIDEO = 5
 
 
 def canonicalize_entry(entry: KBEntry, store: Store, client: LLMClient) -> list[Concept]:
@@ -78,6 +84,51 @@ def canonicalize_entry(entry: KBEntry, store: Store, client: LLMClient) -> list[
     for concept in touched.values():
         store.save_concept(concept)
     return list(touched.values())
+
+
+def synthesize_touched_concepts(
+    entry: KBEntry, touched: list[Concept], store: Store, client: LLMClient
+) -> None:
+    """Per-video synthesis capping (design report §6, T-CANON8). (Re-)synthesizes at most
+    ``MAX_CONCEPTS_TO_SYNTHESIZE_PER_VIDEO`` (env override ``DISTIL_CONCEPTS_SYNTH_PER_VIDEO``)
+    of ``touched`` — the concepts ``canonicalize_entry`` just matched into or created for this
+    video — choosing the highest-embedding-similarity ones first. Any excess is marked
+    ``pending_synthesis=True`` for a later catch-up pass (Phase 17's ``sync-pending`` CLI), so a
+    single "hub" video's filing latency/cost stays bounded regardless of how many concepts it
+    touches.
+
+    This is an orchestration function only, called directly (e.g. by tests or a future Stage 8)
+    right after ``canonicalize_entry`` — it is not itself wired into ``pipeline.py`` (15.3).
+    """
+    if not touched:
+        return
+    cap = int(
+        os.environ.get("DISTIL_CONCEPTS_SYNTH_PER_VIDEO", MAX_CONCEPTS_TO_SYNTHESIZE_PER_VIDEO)
+    )
+    ranked = _rank_by_similarity(entry, touched, store)
+    for concept in ranked[:cap]:
+        store.save_concept(synthesize_concept(concept, store, client))
+    for concept in ranked[cap:]:
+        concept.pending_synthesis = True
+        concept.updated_at = _now()
+        store.save_concept(concept)
+
+
+def _rank_by_similarity(entry: KBEntry, touched: list[Concept], store: Store) -> list[Concept]:
+    """``touched``, highest-similarity-to-this-video's-items first (design report §6)."""
+    from .query import cosine  # local import: avoids a canonicalize<->query circular import
+
+    item_vectors = [vec for _iid, e_id, vec in store.iter_item_vectors() if e_id == entry.entry_id]
+    if not item_vectors:
+        return list(touched)
+
+    def score(concept: Concept) -> float:
+        centroid = store.concept_centroid(concept.concept_id)
+        if not centroid:
+            return 0.0
+        return max(cosine(vec, centroid) for vec in item_vectors)
+
+    return sorted(touched, key=score, reverse=True)
 
 
 def _build_payloads(

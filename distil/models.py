@@ -240,6 +240,15 @@ class ConceptMember(_Model):
     timestamp: str | None = None
 
 
+class ConceptClaim(_Model):
+    """A synthesized sentence/paragraph and the members it's grounded in — same shape as
+    ``GroundedText``, reused at concept scope (Phase 15.2 design report §3, §4): the LLM
+    writes text, code enforces every claim traces to real membership before it's rendered."""
+
+    text: str
+    item_ids: list[str] = Field(default_factory=list)
+
+
 class Concept(_Model):
     """A canonical idea spanning one or more videos. ``concept_id`` == the slug (OKF's "path
     is identity"). No feedback/application-link data by construction — see report §3."""
@@ -248,6 +257,8 @@ class Concept(_Model):
     title: str
     description: str
     members: list[ConceptMember] = Field(default_factory=list)
+    claims: list[ConceptClaim] = Field(default_factory=list)
     created_at: str
     updated_at: str
     body_model_version: str = ""
+    pending_synthesis: bool = False
