@@ -75,7 +75,10 @@ def test_truncated_array_recovery_still_applies_quote_truncation_and_discipline(
     """Bullet 3: recovered items still go through _truncate_overlong_quotes /
     _enforce_quote_discipline, same as normally-parsed items."""
     overlong_quote = " ".join(["word"] * 20)
-    head = {**_COMPLETE_ITEM, "provenance": {"quote": overlong_quote, "timestamp": None, "locator": None}}
+    head = {
+        **_COMPLETE_ITEM,
+        "provenance": {"quote": overlong_quote, "timestamp": None, "locator": None},
+    }
     t = ingest_text(overlong_quote + " and more transcript text")
     raw = _truncated_array(head)
     items = run_extraction(t, _triage("conceptual"), FakeClient(responses=[raw]))
