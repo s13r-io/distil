@@ -15,9 +15,9 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 import threading
 import zipfile
+from dataclasses import asdict
 from pathlib import Path
 from time import perf_counter
 
@@ -36,7 +36,7 @@ from distil import okf, youtube
 from distil.canonicalize import run_delete_entry_stage
 from distil.cli import _make_client, _make_embedder
 from distil.graph import link_graph
-from distil.ingest import ingest_file, ingest_text
+from distil.ingest import Segment, Transcript, ingest_file, ingest_text
 from distil.pipeline import PipelineConfig, run_pipeline
 from distil.profile_update import apply_feedback
 from distil.query import ask as run_ask
@@ -61,9 +61,10 @@ from . import jobs as jobsmod
 _USER_ID = "owner"
 _TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 _STATIC_DIR = Path(__file__).parent / "static"
-_UPLOAD_DIR = Path(tempfile.gettempdir()) / "distil_uploads"
 _EMBEDDER_LOCK = threading.Lock()
 _EMBEDDER_CACHE = None
+
+_PLAYLIST_FETCH_DELAY_DEFAULT = 3.0  # seconds; see create_app()'s Fetcher wiring for why
 
 
 def _db_path() -> str:
@@ -76,6 +77,42 @@ def _kb_dir() -> str:
 
 def _store() -> Store:
     return Store(db_path=_db_path(), kb_dir=_kb_dir())
+
+
+def _staging_root() -> Path:
+    """Where in-flight job content (uploads, prefetched transcripts) is staged.
+
+    Derived from ``DISTIL_DB_PATH``'s own directory by default — that's the volume Railway
+    (or any host) already mounts persistently (DEPLOY_RAILWAY.md), so staged content survives a
+    redeploy without needing a second volume path configured. ``DISTIL_STAGING_DIR`` overrides
+    it directly, same convention as ``DISTIL_DB_PATH``/``DISTIL_KB_DIR``.
+    """
+    override = os.environ.get("DISTIL_STAGING_DIR")
+    if override:
+        return Path(override)
+    return Path(_db_path()).parent / "staging"
+
+
+def _upload_dir() -> Path:
+    d = _staging_root() / "uploads"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _transcript_stage_dir() -> Path:
+    d = _staging_root() / "transcripts"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _playlist_fetch_delay_seconds() -> float:
+    raw = os.environ.get("DISTIL_PLAYLIST_FETCH_DELAY_SECONDS")
+    if not raw:
+        return _PLAYLIST_FETCH_DELAY_DEFAULT
+    try:
+        return float(raw)
+    except ValueError:
+        return _PLAYLIST_FETCH_DELAY_DEFAULT
 
 
 def _default_profile():
@@ -227,21 +264,76 @@ def _distill_job(job: jobsmod.Job) -> dict:
 def _load_job_transcript(job: jobsmod.Job, *, on_phase=None):
     if job.kind == "youtube":
         # youtube.fetch_video_transcript reports its own transcript_fetch/caption_parse
-        # start/finish pair around the yt-dlp call and the srt parse respectively.
+        # start/finish pair around the yt-dlp call and the srt parse respectively. Only a
+        # single-video submission still reaches here — a playlist video's transcript is fetched
+        # up front by the Fetcher (see _fetch_playlist_video) and arrives as kind
+        # KIND_YOUTUBE_STAGED below, so this branch never blocks the rest of a playlist.
         return youtube.fetch_video_transcript(job.payload, on_phase=on_phase)
     if on_phase is not None:
         on_phase("ingest", "start")
     if job.kind == "file":
         p = Path(job.payload)
-        try:
-            result = ingest_file(str(p))
-        finally:
-            p.unlink(missing_ok=True)
+        if not p.exists():
+            raise FileNotFoundError("Source content no longer available — please re-add.")
+        result = ingest_file(str(p))
+    elif job.kind == jobsmod.KIND_YOUTUBE_STAGED:
+        p = Path(job.payload)
+        if not p.exists():
+            raise FileNotFoundError("Source content no longer available — please re-add.")
+        result = _load_staged_transcript(p)
     else:
         result = ingest_text(job.payload)
     if on_phase is not None:
         on_phase("ingest", "finish")
     return result
+
+
+def _fetch_playlist_video(job: jobsmod.Job) -> dict:
+    """Fetcher worker callback: fetch one playlist video's transcript and stage it to the
+    persistent volume. Never raises — a fetch failure (no captions, bot check, timeout, missing
+    yt-dlp binary) becomes a ``failed`` result so it fails only this job, exactly like the old
+    inline-fetch-at-distill-time path did (WEB_UI_SPEC §8 / _enqueue_youtube_source docstring)."""
+    jobs_store = jobsmod.JobStore(_db_path())
+    reporter = _PhaseReporter(jobs_store, job.job_id, ["transcript_fetch", "caption_parse"])
+    try:
+        transcript = youtube.fetch_video_transcript(job.payload, on_phase=reporter.on_phase)
+    except YoutubeFetchError as exc:
+        return {"status": "failed", "error": str(exc)}
+    except subprocess.TimeoutExpired:
+        return {"status": "failed", "error": "Fetching the transcript timed out."}
+    except OSError as exc:
+        return {"status": "failed", "error": f"Could not run yt-dlp: {exc}"}
+    staged_path = _stage_transcript(job.job_id, transcript)
+    return {"status": "fetched", "kind": jobsmod.KIND_YOUTUBE_STAGED, "payload": str(staged_path)}
+
+
+def _stage_transcript(job_id: str, transcript: Transcript) -> Path:
+    """Persist a fetched Transcript to the volume as JSON — the exact shape ingest.py already
+    produces, so reading it back needs no re-parsing, just reconstruction (_load_staged_transcript)."""
+    path = _transcript_stage_dir() / f"{job_id}.json"
+    data = {"segments": [asdict(s) for s in transcript.segments]}
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def _load_staged_transcript(path: Path) -> Transcript:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return Transcript(segments=[Segment(**s) for s in data["segments"]])
+
+
+def _staged_path_for_job(job: jobsmod.Job) -> Path | None:
+    """The on-disk file (if any) a job's payload points at — the two kinds staged on the
+    persistent volume rather than held inline. ``missing_ok`` unlinking elsewhere makes it safe
+    to call this even after the file's already been consumed."""
+    if job.kind in ("file", jobsmod.KIND_YOUTUBE_STAGED):
+        return Path(job.payload)
+    return None
+
+
+def _cleanup_staged_file(job: jobsmod.Job) -> None:
+    path = _staged_path_for_job(job)
+    if path is not None:
+        path.unlink(missing_ok=True)
 
 
 def _cached_embedder():
@@ -332,10 +424,16 @@ def _graph_link_job(entry_id: str) -> None:
 def _enqueue_youtube_source(store_jobs: jobsmod.JobStore, url: str):
     """ADD input: a bare YouTube video or playlist URL, no paste/file.
 
-    A playlist enqueues one ``youtube`` job per video through the existing single-worker
-    queue; a bad video's caption/availability failure only fails its own job (jobs.py
-    ``Worker`` already isolates per-job exceptions), so one skipped video never blocks the
-    rest of the playlist.
+    A playlist enqueues one ``youtube`` job per video, each starting in
+    ``STATUS_PENDING_FETCH`` rather than ``queued``: the ``Fetcher`` background thread (jobs.py)
+    fetches every video's transcript up front, one at a time with a pause between (Phase E —
+    see ``_fetch_playlist_video``), staging each onto the persistent volume as it succeeds and
+    flipping that job to ``queued`` (kind ``youtube_staged``) for the still-single-worker distill
+    ``Worker`` to pick up. Distilling of the first video therefore starts as soon as it's fetched,
+    while the rest of the playlist keeps fetching in the background (the two workers claim
+    disjoint job statuses, so neither blocks the other). A bad video's caption/availability
+    failure only fails its own job (``Fetcher``/``Worker`` both isolate per-job exceptions), so
+    one skipped video never blocks the rest of the playlist.
     """
     if youtube.is_playlist_url(url):
         try:
@@ -349,6 +447,7 @@ def _enqueue_youtube_source(store_jobs: jobsmod.JobStore, url: str):
         job_ids = [
             store_jobs.enqueue(
                 kind="youtube", title="YouTube video", payload=v_url, source_url=v_url,
+                status=jobsmod.STATUS_PENDING_FETCH,
             ).job_id
             for v_url in video_urls
         ]
@@ -563,18 +662,28 @@ def create_app() -> FastAPI:
     auth.assert_startup_safe()  # fail closed before serving (T-A1)
     app = FastAPI(title="Distil", docs_url=None, redoc_url=None)
     _STATIC_DIR.mkdir(parents=True, exist_ok=True)
-    _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
-    worker = jobsmod.Worker(_db_path(), _distill_job)
+    # on_finished only fires for a successful (done/low_value) terminal status — a failed job's
+    # staged file must stay on disk so a retry can still read it (see _load_job_transcript).
+    worker = jobsmod.Worker(_db_path(), _distill_job, on_finished=_cleanup_staged_file)
+    # A second, independent single-worker thread (Phase E): fetches playlist videos'
+    # transcripts up front, overlapping with `worker` distilling whatever's already staged —
+    # they claim disjoint job statuses (pending_fetch/fetching vs queued/running), so neither
+    # blocks the other, and distilling stays exactly as single-threaded as before.
+    fetcher = jobsmod.Fetcher(
+        _db_path(), _fetch_playlist_video, delay_seconds=_playlist_fetch_delay_seconds(),
+    )
 
     @app.on_event("startup")
     def _start_worker():
         worker.start()
+        fetcher.start()
 
     @app.on_event("shutdown")
     def _stop_worker():
         worker.stop()
+        fetcher.stop()
 
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
@@ -713,7 +822,7 @@ def create_app() -> FastAPI:
             suffix = Path(file.filename).suffix.lower()
             if suffix not in {".srt", ".txt", ".md"}:
                 return JSONResponse({"detail": "Unsupported file type"}, status_code=400)
-            dest = _UPLOAD_DIR / f"{os.urandom(6).hex()}{suffix}"
+            dest = _upload_dir() / f"{os.urandom(6).hex()}{suffix}"
             with dest.open("wb") as out:
                 shutil.copyfileobj(file.file, out)
             job = store_jobs.enqueue(
@@ -736,11 +845,22 @@ def create_app() -> FastAPI:
     # ---- jobs (Activity) ----
     @app.get("/jobs")
     def jobs_list():
-        return [j.to_dict() for j in jobsmod.JobStore(_db_path()).list_active()]
+        store_jobs = jobsmod.JobStore(_db_path())
+        # A failed job's staged file is kept for retry(), but must not accumulate on the volume
+        # forever if nobody retries or removes it — reap it once the job has sat failed past the
+        # same 24h bound list_active()'s autoclear already uses for finished rows.
+        store_jobs.autoclear(on_stale_failed=_cleanup_staged_file)
+        return [j.to_dict() for j in store_jobs.list_active()]
 
     @app.post("/jobs/{job_id}/remove")
     def jobs_remove(job_id: str):
-        ok = jobsmod.JobStore(_db_path()).remove_queued(job_id)
+        store_jobs = jobsmod.JobStore(_db_path())
+        job = store_jobs.get(job_id)
+        ok = store_jobs.remove_queued(job_id)
+        # A removed job never ran, so nothing already cleaned up its staged file (uploaded file
+        # or prefetched transcript) — do it now rather than leaking it on the persistent volume.
+        if ok and job is not None:
+            _cleanup_staged_file(job)
         return JSONResponse({"ok": ok}, status_code=200 if ok else 409)
 
     @app.post("/jobs/{job_id}/retry")
@@ -750,7 +870,19 @@ def create_app() -> FastAPI:
 
     @app.post("/jobs/clear")
     def jobs_clear(scope: str = "finished"):
-        n = jobsmod.JobStore(_db_path()).clear(scope)
+        store_jobs = jobsmod.JobStore(_db_path())
+        statuses = (
+            {jobsmod.STATUS_DONE, jobsmod.STATUS_LOW_VALUE, jobsmod.STATUS_REMOVED}
+            if scope == "finished"
+            else {jobsmod.STATUS_FAILED} if scope == "failed" else set()
+        )
+        # A done/low_value job's staged file was already unlinked on success, and a removed one
+        # at removal time — but a failed job's file is deliberately kept for retry(), so clearing
+        # failed rows here is the one place that still needs to clean it up.
+        for job in store_jobs.list_active():
+            if job.status in statuses:
+                _cleanup_staged_file(job)
+        n = store_jobs.clear(scope)
         return {"cleared": n}
 
     # ---- entries ----

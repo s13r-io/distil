@@ -31,6 +31,16 @@ STATUS_DONE = "done"
 STATUS_LOW_VALUE = "low_value"
 STATUS_FAILED = "failed"
 STATUS_REMOVED = "removed"
+# Playlist up-front fetch (Phase E): a video waits here before the Fetcher claims it, mirroring
+# queued/running one stage earlier. A job never sits in both queues at once — the Fetcher moves
+# a job PENDING_FETCH -> FETCHING -> (QUEUED, now kind=KIND_YOUTUBE_STAGED) or FAILED; only once
+# it's QUEUED does the distill Worker ever see it.
+STATUS_PENDING_FETCH = "pending_fetch"
+STATUS_FETCHING = "fetching"
+
+# A playlist video whose transcript has already been fetched and staged to disk (persistent
+# volume — see web/app.py's _staging_root). ``payload`` is the staged file path, not a URL.
+KIND_YOUTUBE_STAGED = "youtube_staged"
 
 _FINISHED = {STATUS_DONE, STATUS_LOW_VALUE, STATUS_REMOVED}
 _AUTOCLEAR_AFTER_SECONDS = 24 * 60 * 60  # done/low_value/removed clear after 24h; failed never
@@ -164,12 +174,13 @@ class JobStore:
         title: str,
         payload: str,
         source_url: str | None = None,
+        status: str = STATUS_QUEUED,
     ) -> Job:
         now = _now()
         job = Job(
             job_id=f"j_{uuid.uuid4().hex[:12]}", kind=kind, title=title, payload=payload,
             source_url=source_url,
-            status=STATUS_QUEUED, entry_id=None, summary=None, error=None,
+            status=status, entry_id=None, summary=None, error=None,
             created_at=now, updated_at=now,
         )
         self._conn.execute(
@@ -207,6 +218,33 @@ class JobStore:
             )
         job.status = STATUS_RUNNING
         return job
+
+    def claim_next_pending_fetch(self) -> Job | None:
+        """Atomically move the oldest pending-fetch job to fetching and return it — the same
+        one-at-a-time claim shape as ``claim_next_queued``, one stage earlier."""
+        with self._conn:
+            r = self._conn.execute(
+                "SELECT * FROM jobs WHERE status=? ORDER BY created_at ASC LIMIT 1",
+                (STATUS_PENDING_FETCH,),
+            ).fetchone()
+            if not r:
+                return None
+            job = self._row(r)
+            self._conn.execute(
+                "UPDATE jobs SET status=?, updated_at=? WHERE job_id=? AND status=?",
+                (STATUS_FETCHING, _now(), job.job_id, STATUS_PENDING_FETCH),
+            )
+        job.status = STATUS_FETCHING
+        return job
+
+    def mark_fetched(self, job_id: str, *, kind: str, payload: str) -> None:
+        """A prefetch succeeded: flip the job to ``queued`` with its staged payload — from here
+        on it looks like any other distill-ready job to the (unmodified) distill Worker."""
+        self._conn.execute(
+            "UPDATE jobs SET status=?, kind=?, payload=?, updated_at=? WHERE job_id=?",
+            (STATUS_QUEUED, kind, payload, _now(), job_id),
+        )
+        self._conn.commit()
 
     def start_phase(self, job_id: str, *, phase: str, index: int, total: int) -> None:
         """Record that ``phase`` has just started — the entry/exit signal (WEB_UI_SPEC)."""
@@ -276,9 +314,10 @@ class JobStore:
         self._conn.commit()
 
     def remove_queued(self, job_id: str) -> bool:
-        """Remove a job from the queue — only legal while still queued (WEB_UI_SPEC §6)."""
+        """Remove a job from the queue — only legal while still waiting in line, either queued
+        for distill or (Phase E) queued for its up-front fetch (WEB_UI_SPEC §6)."""
         r = self._conn.execute("SELECT status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
-        if not r or r["status"] != STATUS_QUEUED:
+        if not r or r["status"] not in (STATUS_QUEUED, STATUS_PENDING_FETCH):
             return False
         self._set_status(job_id, STATUS_REMOVED)
         return True
@@ -310,8 +349,14 @@ class JobStore:
         self._conn.commit()
         return cur.rowcount
 
-    def autoclear(self) -> int:
-        """Delete done/low_value/removed rows older than 24h. Failed rows persist forever."""
+    def autoclear(self, *, on_stale_failed: Callable[[Job], None] | None = None) -> int:
+        """Delete done/low_value/removed rows older than 24h. Failed rows persist forever — but
+        a failed job's *staged file* (upload/prefetched transcript) is another matter: it has to
+        outlive the row for ``retry()`` to work, yet must not accumulate on the volume forever if
+        nobody ever retries or removes the job. If ``on_stale_failed`` is given, it's invoked once
+        per failed row that has sat untouched past the same 24h bound, so a caller can reap that
+        file (never the row, and never anything within the retry window) on the same cadence this
+        already runs on."""
         cutoff = time.time() - _AUTOCLEAR_AFTER_SECONDS
         removed = 0
         for r in self._conn.execute(
@@ -327,16 +372,30 @@ class JobStore:
                 removed += 1
         if removed:
             self._conn.commit()
+        if on_stale_failed is not None:
+            for r in self._conn.execute(
+                "SELECT * FROM jobs WHERE status=?", (STATUS_FAILED,)
+            ).fetchall():
+                job = self._row(r)
+                if job.age_seconds() > _AUTOCLEAR_AFTER_SECONDS:
+                    on_stale_failed(job)
         return removed
 
     def recover_interrupted(self) -> int:
-        """Re-queue jobs left 'running' by a crash/restart (WEB_UI_SPEC §8)."""
-        cur = self._conn.execute(
+        """Re-queue jobs left 'running' or 'fetching' by a crash/restart (WEB_UI_SPEC §8). Their
+        staged payload (if any) lives on the persistent volume, so it's still there once the
+        job is picked back up — nothing here touches the filesystem, only job status."""
+        now = _now()
+        cur1 = self._conn.execute(
             "UPDATE jobs SET status=?, updated_at=? WHERE status=?",
-            (STATUS_QUEUED, _now(), STATUS_RUNNING),
+            (STATUS_QUEUED, now, STATUS_RUNNING),
+        )
+        cur2 = self._conn.execute(
+            "UPDATE jobs SET status=?, updated_at=? WHERE status=?",
+            (STATUS_PENDING_FETCH, now, STATUS_FETCHING),
         )
         self._conn.commit()
-        return cur.rowcount
+        return cur1.rowcount + cur2.rowcount
 
 
 class Worker:
@@ -345,6 +404,11 @@ class Worker:
     ``distill_fn(job)`` does the real pipeline work and returns a small result dict
     ``{"status", "entry_id", "summary"}``. It's injected so tests can drive the worker with a
     fake that makes no LLM calls.
+
+    ``on_finished(job)``, if given, fires only once a job reaches a *successful* terminal
+    status (done/low_value) — never on failed. This is where a caller reclaims resources the
+    job consumed (e.g. a staged upload/transcript file): a failed job's payload must stay on
+    disk so ``JobStore.retry()`` has something to re-read.
     """
 
     def __init__(
@@ -353,10 +417,12 @@ class Worker:
         distill_fn: Callable[[Job], dict],
         *,
         poll_seconds: float = 1.0,
+        on_finished: Callable[[Job], None] | None = None,
     ):
         self._db_path = db_path
         self._distill_fn = distill_fn
         self._poll = poll_seconds
+        self._on_finished = on_finished
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._store: JobStore | None = None
@@ -413,3 +479,88 @@ class Worker:
             )
         else:
             store.mark_failed(job.job_id, error=result.get("error", "unknown pipeline result"))
+            return
+        if self._on_finished is not None:
+            self._on_finished(job)
+
+
+class Fetcher:
+    """Single background thread: claim pending-fetch job -> run fetch_fn -> record outcome.
+
+    The exact same one-worker-at-a-time shape as :class:`Worker`, one stage earlier, so a
+    playlist's transcripts get fetched up front while the (unmodified, still single-worker)
+    distill ``Worker`` keeps grinding through whatever's already ``queued`` — the two never
+    contend for the same jobs, since they claim disjoint statuses.
+
+    ``fetch_fn(job)`` does the real yt-dlp fetch + stage-to-disk work and returns
+    ``{"status": "fetched", "kind": ..., "payload": ...}`` or ``{"status": "failed", "error":
+    ...}``; injected so tests can drive the fetcher with a fake that makes no network calls.
+
+    ``delay_seconds`` is the configurable pause applied *before* every fetch after the first —
+    never before the first, since there's nothing yet to look robotic relative to.
+    """
+
+    def __init__(
+        self,
+        db_path: str | Path,
+        fetch_fn: Callable[[Job], dict],
+        *,
+        poll_seconds: float = 1.0,
+        delay_seconds: float = 3.0,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
+        self._db_path = db_path
+        self._fetch_fn = fetch_fn
+        self._poll = poll_seconds
+        self._delay_seconds = delay_seconds
+        self._sleep = sleep
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._store: JobStore | None = None
+        self._fetched_any = False
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        JobStore(self._db_path).recover_interrupted()
+        self._thread = threading.Thread(target=self._run, name="distil-fetcher", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        self._store = JobStore(self._db_path)  # fetcher-owned connection
+        while not self._stop.is_set():
+            if not self.process_once():
+                self._stop.wait(self._poll)
+
+    def process_once(self) -> bool:
+        """Synchronous single-step for tests: pause (if not the first fetch), claim, fetch one
+        video. Returns True if a job ran."""
+        store = self._store or JobStore(self._db_path)
+        self._store = store
+        job = store.claim_next_pending_fetch()
+        if job is None:
+            return False
+        if self._fetched_any:
+            self._sleep(self._delay_seconds)
+        self._fetched_any = True
+        self._process(job)
+        return True
+
+    def _process(self, job: Job) -> None:
+        store = self._store
+        assert store is not None
+        try:
+            result = self._fetch_fn(job)
+        except Exception as exc:  # any unexpected failure -> failed, isolated to this video
+            store.mark_failed(job.job_id, error=str(exc) or exc.__class__.__name__)
+            return
+        if result.get("status") == "fetched":
+            store.mark_fetched(job.job_id, kind=result["kind"], payload=result["payload"])
+        else:
+            store.mark_failed(job.job_id, error=result.get("error", "unknown fetch result"))

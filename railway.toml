@@ -25,6 +25,8 @@ numReplicas = 1   # single-user, single-volume — do not scale horizontally (on
 #   DISTIL_PUBLIC=true           required for public hosting
 #   DISTIL_AUTH_SECRET           REQUIRED when DISTIL_PUBLIC=true (app fails closed without it)
 #   DISTIL_RETRIEVAL_THRESHOLD, DISTIL_TOP_K, DISTIL_NOVELTY_RATIO, DISTIL_PROFILE_ALPHA (optional)
+#   DISTIL_STAGING_DIR            optional; defaults next to DISTIL_DB_PATH (already on the volume)
+#   DISTIL_PLAYLIST_FETCH_DELAY_SECONDS   optional; default 3.0
 #
 # --- Also in the dashboard: attach a Volume mounted at /data ---
 #   Volumes mount at RUNTIME only (not during build). One volume per service.

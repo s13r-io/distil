@@ -5,10 +5,14 @@ fake distill_fn, and streaming is exercised via FakeClient.stream (zero network)
 """
 
 import json
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
 from distil.embed import FakeEmbedder
+from distil.ingest import Segment, Transcript
 from distil.llm import FakeClient
 from distil.models import KBEntry
 from distil.query import AskResult, ConceptRef, Source, stream_ask
@@ -120,6 +124,217 @@ def test_recover_interrupted_requeues_running(jobstore):
     jobstore.claim_next_queued()  # now running
     assert jobstore.recover_interrupted() == 1
     assert jobstore.get(job.job_id).status == jobsmod.STATUS_QUEUED
+
+
+# ---- Phase E: playlist up-front fetch — pending_fetch/fetching lifecycle -----------------
+
+
+@pytest.mark.unit
+def test_claim_next_pending_fetch_marks_fetching(jobstore):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_PENDING_FETCH
+    )
+    claimed = jobstore.claim_next_pending_fetch()
+    assert claimed.job_id == job.job_id
+    assert jobstore.get(job.job_id).status == jobsmod.STATUS_FETCHING
+
+
+@pytest.mark.unit
+def test_mark_fetched_transitions_to_queued_with_staged_payload(jobstore):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_PENDING_FETCH
+    )
+    jobstore.claim_next_pending_fetch()
+    jobstore.mark_fetched(job.job_id, kind=jobsmod.KIND_YOUTUBE_STAGED, payload="/staged/j1.json")
+    got = jobstore.get(job.job_id)
+    assert got.status == jobsmod.STATUS_QUEUED
+    assert got.kind == jobsmod.KIND_YOUTUBE_STAGED
+    assert got.payload == "/staged/j1.json"
+
+
+@pytest.mark.unit
+def test_recover_interrupted_requeues_fetching_to_pending_fetch(jobstore):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_PENDING_FETCH
+    )
+    jobstore.claim_next_pending_fetch()  # now fetching
+    assert jobstore.recover_interrupted() == 1
+    assert jobstore.get(job.job_id).status == jobsmod.STATUS_PENDING_FETCH
+
+
+@pytest.mark.unit
+def test_recover_interrupted_handles_both_running_and_fetching_in_one_call(jobstore):
+    running = jobstore.enqueue(kind="paste", title="a", payload="x")
+    jobstore.claim_next_queued()
+    fetching = jobstore.enqueue(
+        kind="youtube", title="b", payload="https://x/1", status=jobsmod.STATUS_PENDING_FETCH
+    )
+    jobstore.claim_next_pending_fetch()
+    assert jobstore.recover_interrupted() == 2
+    assert jobstore.get(running.job_id).status == jobsmod.STATUS_QUEUED
+    assert jobstore.get(fetching.job_id).status == jobsmod.STATUS_PENDING_FETCH
+
+
+@pytest.mark.unit
+def test_remove_allowed_while_pending_fetch_not_while_fetching(jobstore):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_PENDING_FETCH
+    )
+    assert jobstore.remove_queued(job.job_id) is True
+    assert jobstore.get(job.job_id).status == jobsmod.STATUS_REMOVED
+
+    j2 = jobstore.enqueue(
+        kind="youtube", title="t2", payload="https://x/2", status=jobsmod.STATUS_PENDING_FETCH
+    )
+    jobstore.claim_next_pending_fetch()
+    assert jobstore.remove_queued(j2.job_id) is False
+
+
+# ---- Fetcher: batches a playlist's transcripts up front, overlapping with the distill Worker
+
+
+@pytest.mark.unit
+def test_fetcher_default_delay_is_three_seconds():
+    fetcher = jobsmod.Fetcher("unused.db", lambda job: {"status": "fetched"})
+    assert fetcher._delay_seconds == 3.0
+
+
+@pytest.mark.unit
+def test_fetcher_fetches_all_pending_jobs_up_front(tmp_path):
+    db = tmp_path / "distil.db"
+    store = jobsmod.JobStore(db)
+    jobs = [
+        store.enqueue(
+            kind="youtube", title=f"v{i}", payload=f"https://x/{i}",
+            status=jobsmod.STATUS_PENDING_FETCH,
+        )
+        for i in range(3)
+    ]
+
+    calls = []
+
+    def fake_fetch(job):
+        calls.append(job.payload)
+        return {
+            "status": "fetched", "kind": jobsmod.KIND_YOUTUBE_STAGED,
+            "payload": f"/staged/{job.job_id}.json",
+        }
+
+    fetcher = jobsmod.Fetcher(db, fake_fetch, sleep=lambda s: None)
+    while fetcher.process_once():
+        pass
+    assert len(calls) == 3
+    for j in jobs:
+        got = store.get(j.job_id)
+        assert got.status == jobsmod.STATUS_QUEUED
+        assert got.kind == jobsmod.KIND_YOUTUBE_STAGED
+
+
+@pytest.mark.unit
+def test_fetcher_pause_between_fetches_is_configurable(tmp_path):
+    db = tmp_path / "distil.db"
+    store = jobsmod.JobStore(db)
+    for i in range(3):
+        store.enqueue(
+            kind="youtube", title=f"v{i}", payload=f"https://x/{i}",
+            status=jobsmod.STATUS_PENDING_FETCH,
+        )
+
+    def fake_fetch(job):
+        return {"status": "fetched", "kind": jobsmod.KIND_YOUTUBE_STAGED, "payload": "/s.json"}
+
+    sleeps = []
+    fetcher = jobsmod.Fetcher(db, fake_fetch, delay_seconds=4.5, sleep=sleeps.append)
+    while fetcher.process_once():
+        pass
+    # 3 fetches -> a pause before the 2nd and 3rd, never before the 1st.
+    assert sleeps == [4.5, 4.5]
+
+
+@pytest.mark.unit
+def test_fetcher_isolates_one_unfetchable_video_from_the_rest(tmp_path):
+    db = tmp_path / "distil.db"
+    store = jobsmod.JobStore(db)
+    bad = store.enqueue(
+        kind="youtube", title="no captions", payload="https://x/1",
+        status=jobsmod.STATUS_PENDING_FETCH,
+    )
+    good = store.enqueue(
+        kind="youtube", title="captioned", payload="https://x/2",
+        status=jobsmod.STATUS_PENDING_FETCH,
+    )
+
+    def fake_fetch(job):
+        if job.title == "no captions":
+            return {"status": "failed", "error": "No English captions available for this video."}
+        return {"status": "fetched", "kind": jobsmod.KIND_YOUTUBE_STAGED, "payload": "/s.json"}
+
+    fetcher = jobsmod.Fetcher(db, fake_fetch, sleep=lambda s: None)
+    assert fetcher.process_once() and fetcher.process_once()
+    assert store.get(bad.job_id).status == jobsmod.STATUS_FAILED
+    assert "captions" in store.get(bad.job_id).error
+    assert store.get(good.job_id).status == jobsmod.STATUS_QUEUED
+
+
+@pytest.mark.unit
+def test_fetcher_isolates_unfetchable_video_when_fetch_fn_raises(tmp_path):
+    """A raised exception (not just a {"status": "failed"} result) also fails only its own
+    job — the same safety net Worker._process already has for distill_fn."""
+    db = tmp_path / "distil.db"
+    store = jobsmod.JobStore(db)
+    bad = store.enqueue(
+        kind="youtube", title="bad", payload="https://x/1", status=jobsmod.STATUS_PENDING_FETCH
+    )
+    good = store.enqueue(
+        kind="youtube", title="good", payload="https://x/2", status=jobsmod.STATUS_PENDING_FETCH
+    )
+
+    def fake_fetch(job):
+        if job.title == "bad":
+            raise RuntimeError("Sign in to confirm you're not a bot")
+        return {"status": "fetched", "kind": jobsmod.KIND_YOUTUBE_STAGED, "payload": "/s.json"}
+
+    fetcher = jobsmod.Fetcher(db, fake_fetch, sleep=lambda s: None)
+    assert fetcher.process_once() and fetcher.process_once()
+    assert store.get(bad.job_id).status == jobsmod.STATUS_FAILED
+    assert store.get(good.job_id).status == jobsmod.STATUS_QUEUED
+
+
+@pytest.mark.unit
+def test_distilling_first_video_starts_before_last_fetch_completes(tmp_path):
+    """Overlap, proven deterministically: after only the first of two videos has been fetched,
+    it's already distillable while the second hasn't even started fetching yet."""
+    db = tmp_path / "distil.db"
+    store = jobsmod.JobStore(db)
+    v1 = store.enqueue(
+        kind="youtube", title="v1", payload="https://x/1", status=jobsmod.STATUS_PENDING_FETCH
+    )
+    v2 = store.enqueue(
+        kind="youtube", title="v2", payload="https://x/2", status=jobsmod.STATUS_PENDING_FETCH
+    )
+
+    def fake_fetch(job):
+        return {
+            "status": "fetched", "kind": jobsmod.KIND_YOUTUBE_STAGED,
+            "payload": f"/staged/{job.job_id}.json",
+        }
+
+    fetcher = jobsmod.Fetcher(db, fake_fetch, sleep=lambda s: None)
+    assert fetcher.process_once()  # fetches v1 only
+
+    assert store.get(v1.job_id).status == jobsmod.STATUS_QUEUED
+    assert store.get(v2.job_id).status == jobsmod.STATUS_PENDING_FETCH  # untouched so far
+
+    def fake_distill(job):
+        return {"status": "done", "entry_id": "e_1", "summary": "kept 1 item"}
+
+    worker = jobsmod.Worker(db, fake_distill)
+    assert worker.process_once()  # distills v1 while v2 is still only pending_fetch
+    assert store.get(v1.job_id).status == jobsmod.STATUS_DONE
+    assert store.get(v2.job_id).status == jobsmod.STATUS_PENDING_FETCH  # fetch continues after
+
+    assert fetcher.process_once()  # now fetch v2
+    assert store.get(v2.job_id).status == jobsmod.STATUS_QUEUED
 
 
 @pytest.mark.unit
@@ -487,6 +702,39 @@ def test_ingest_youtube_playlist_enqueues_one_job_per_video(client, monkeypatch)
 
 
 @pytest.mark.unit
+def test_ingest_youtube_playlist_jobs_start_pending_fetch_not_queued(client, monkeypatch):
+    """A playlist video's transcript isn't fetched inline anymore — it waits for the Fetcher —
+    so it must not start life already `queued` for distill (WEB_UI_SPEC honesty requirement)."""
+    monkeypatch.setattr(
+        webapp.youtube, "list_playlist_video_urls",
+        lambda url, **kw: ["https://www.youtube.com/watch?v=vid1"],
+    )
+    r = client.post(
+        "/ingest", data={"source_url": "https://www.youtube.com/playlist?list=PL999"}
+    )
+    job_id = r.json()["job_ids"][0]
+    jobs = client.get("/jobs", headers={"accept": "application/json"}).json()
+    job = next(j for j in jobs if j["job_id"] == job_id)
+    assert job["status"] == "pending_fetch"
+
+
+@pytest.mark.unit
+def test_jobs_remove_cleans_up_staged_transcript_file(client, tmp_path):
+    db = tmp_path / "distil.db"
+    store = jobsmod.JobStore(db)
+    transcript = webapp.Transcript(
+        segments=[webapp.Segment(text="hi", locator="seg:0", timestamp=None)]
+    )
+    staged = webapp._stage_transcript("j_http_remove", transcript)
+    job = store.enqueue(kind=webapp.jobsmod.KIND_YOUTUBE_STAGED, title="t", payload=str(staged))
+    assert staged.exists()
+
+    r = client.post(f"/jobs/{job.job_id}/remove")
+    assert r.status_code == 200
+    assert not staged.exists()
+
+
+@pytest.mark.unit
 def test_ingest_youtube_playlist_listing_failure_returns_400(client, monkeypatch):
     from distil.youtube import YoutubeFetchError
 
@@ -528,6 +776,161 @@ def test_load_job_transcript_dispatches_youtube_kind(monkeypatch):
 
 
 @pytest.mark.unit
+def test_load_job_transcript_dispatches_youtube_staged_kind_and_keeps_staged_file(tmp_path):
+    """Reading must not delete: a downstream pipeline failure after this call still needs the
+    file on disk so JobStore.retry() can requeue a run that re-reads it (see the retry test
+    below) — cleanup happens only once the job reaches a real terminal outcome."""
+    staged = tmp_path / "j1.json"
+    staged.write_text(
+        json.dumps({"segments": [{"text": "hi", "locator": "seg:0", "timestamp": None}]}),
+        encoding="utf-8",
+    )
+    job = jobsmod.Job(
+        job_id="j1", kind=jobsmod.KIND_YOUTUBE_STAGED, title="t", payload=str(staged),
+        source_url=None, status="queued", entry_id=None, summary=None, error=None,
+        created_at="", updated_at="",
+    )
+    result = webapp._load_job_transcript(job)
+    assert result.segments[0].text == "hi"
+    assert staged.exists()  # not deleted just from being read
+
+
+@pytest.mark.unit
+def test_load_job_transcript_raises_honest_error_when_staged_file_missing(tmp_path):
+    missing = tmp_path / "gone.json"
+    job = jobsmod.Job(
+        job_id="j1", kind=jobsmod.KIND_YOUTUBE_STAGED, title="t", payload=str(missing),
+        source_url=None, status="queued", entry_id=None, summary=None, error=None,
+        created_at="", updated_at="",
+    )
+    with pytest.raises(FileNotFoundError, match="no longer available"):
+        webapp._load_job_transcript(job)
+
+
+@pytest.mark.unit
+def test_fetch_playlist_video_stages_transcript_and_reports_fetched(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
+    transcript = Transcript(
+        segments=[Segment(text="hello", locator="seg:0", timestamp="00:00:01")]
+    )
+    monkeypatch.setattr(webapp.youtube, "fetch_video_transcript", lambda url, **kw: transcript)
+    job = jobsmod.JobStore(tmp_path / "distil.db").enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_PENDING_FETCH,
+    )
+    result = webapp._fetch_playlist_video(job)
+    assert result["status"] == "fetched"
+    assert result["kind"] == jobsmod.KIND_YOUTUBE_STAGED
+    staged = Path(result["payload"])
+    assert staged.exists()
+    reloaded = webapp._load_staged_transcript(staged)
+    assert reloaded.segments[0].text == "hello"
+
+
+@pytest.mark.unit
+def test_fetch_playlist_video_reports_failed_on_youtube_fetch_error(tmp_path, monkeypatch):
+    from distil.youtube import YoutubeFetchError
+
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
+
+    def boom(url, **kw):
+        raise YoutubeFetchError("No English captions available for this video.")
+
+    monkeypatch.setattr(webapp.youtube, "fetch_video_transcript", boom)
+    job = jobsmod.JobStore(tmp_path / "distil.db").enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_PENDING_FETCH,
+    )
+    result = webapp._fetch_playlist_video(job)
+    assert result["status"] == "failed"
+    assert "captions" in result["error"]
+
+
+# ---- Staging on the persistent volume (Phase E) — fixes the ephemeral-tmp upload bug ---
+
+
+@pytest.mark.unit
+def test_upload_dir_is_derived_from_db_path_not_ephemeral_tmp(tmp_path, monkeypatch):
+    """Regression: on main, uploads are staged under tempfile.gettempdir(), which a container
+    restart/redeploy wipes even though the job row (in sqlite, on the volume) survives — the job
+    then fails with "file not found" and nothing to recover. Staging must live alongside the
+    configured db (the persistent volume), not the ephemeral system temp dir.
+
+    ``tempfile.gettempdir`` is monkeypatched to a sentinel directory distinct from ``tmp_path``:
+    pytest's own ``tmp_path`` fixture is itself carved out of the system temp dir, so asserting
+    against the real ``tempfile.gettempdir()`` would make this test depend on incidental path
+    resolution (e.g. macOS's ``/tmp`` -> ``/private/tmp`` symlink masking the match while Linux's
+    literal ``/tmp`` doesn't) rather than on the behavior actually being regression-tested."""
+    system_tmp = tmp_path / "system_tmp"
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(system_tmp))
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
+    upload_dir = webapp._upload_dir()
+    assert tmp_path == upload_dir.parent.parent
+    assert not str(upload_dir).startswith(str(system_tmp))
+
+
+@pytest.mark.unit
+def test_staging_dir_overridable_via_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "unused" / "distil.db"))
+    monkeypatch.setenv("DISTIL_STAGING_DIR", str(tmp_path / "custom_staging"))
+    assert webapp._upload_dir().parent == tmp_path / "custom_staging"
+
+
+@pytest.mark.unit
+def test_staged_transcript_survives_a_simulated_restart(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
+    transcript = Transcript(segments=[Segment(text="hello", locator="seg:0", timestamp=None)])
+    staged_path = webapp._stage_transcript("j_restart", transcript)
+    assert staged_path.exists()
+
+    # "Restart" = nothing survives except the filesystem and sqlite file (both on the volume) —
+    # simulate it with fresh objects reading the same paths, no shared in-memory state at all.
+    reloaded = webapp._load_staged_transcript(staged_path)
+    assert reloaded.segments[0].text == "hello"
+
+
+@pytest.mark.unit
+def test_staged_file_cleaned_up_when_its_job_is_removed(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
+    transcript = Transcript(segments=[Segment(text="hello", locator="seg:0", timestamp=None)])
+    staged_path = webapp._stage_transcript("j_remove", transcript)
+    job = jobsmod.Job(
+        job_id="j_remove", kind=jobsmod.KIND_YOUTUBE_STAGED, title="t", payload=str(staged_path),
+        source_url=None, status=jobsmod.STATUS_QUEUED, entry_id=None, summary=None, error=None,
+        created_at="", updated_at="",
+    )
+    assert staged_path.exists()
+    webapp._cleanup_staged_file(job)
+    assert not staged_path.exists()
+
+
+@pytest.mark.unit
+def test_recovered_running_job_still_finds_its_staged_transcript(tmp_path, monkeypatch):
+    """A job left `running` by a crash mid-distill is recovered to `queued` on restart — its
+    staged transcript (kind youtube_staged) must still be readable, since nothing ever got the
+    chance to unlink it."""
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
+    db = tmp_path / "distil.db"
+    store = jobsmod.JobStore(db)
+    job = store.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_PENDING_FETCH,
+    )
+    transcript = Transcript(segments=[Segment(text="hi", locator="seg:0", timestamp=None)])
+    staged_path = webapp._stage_transcript(job.job_id, transcript)
+    store.mark_fetched(job.job_id, kind=jobsmod.KIND_YOUTUBE_STAGED, payload=str(staged_path))
+    store.claim_next_queued()  # distill Worker claims it -> running, then the process "crashes"
+    assert store.get(job.job_id).status == jobsmod.STATUS_RUNNING
+
+    # Simulate a restart: a fresh JobStore connection, same db file + same staged file on disk.
+    fresh_store = jobsmod.JobStore(db)
+    assert fresh_store.recover_interrupted() == 1
+    recovered = fresh_store.get(job.job_id)
+    assert recovered.status == jobsmod.STATUS_QUEUED
+    assert recovered.kind == jobsmod.KIND_YOUTUBE_STAGED
+
+    transcript_again = webapp._load_job_transcript(recovered)
+    assert transcript_again.segments[0].text == "hi"
+
+
+@pytest.mark.unit
 def test_worker_reports_uncaptioned_video_failure_without_blocking_next_job(tmp_path):
     from distil.youtube import YoutubeFetchError
 
@@ -546,6 +949,88 @@ def test_worker_reports_uncaptioned_video_failure_without_blocking_next_job(tmp_
     assert store.get(bad.job_id).status == jobsmod.STATUS_FAILED
     assert "captions" in store.get(bad.job_id).error
     assert store.get(good.job_id).status == jobsmod.STATUS_DONE
+
+
+# ---- staged-file lifecycle: kept across a downstream failure, reclaimed only on success ---
+
+
+@pytest.mark.unit
+def test_worker_on_finished_fires_only_for_success_not_failure(tmp_path):
+    db = tmp_path / "distil.db"
+    store = jobsmod.JobStore(db)
+    ok = store.enqueue(kind="paste", title="ok", payload="x")
+    bad = store.enqueue(kind="paste", title="bad", payload="y")
+
+    def fake_distill(job):
+        if job.title == "bad":
+            raise RuntimeError("boom")
+        return {"status": "done", "entry_id": "e_1", "summary": "s"}
+
+    finished = []
+    worker = jobsmod.Worker(db, fake_distill, on_finished=finished.append)
+    assert worker.process_once() and worker.process_once()
+    assert store.get(bad.job_id).status == jobsmod.STATUS_FAILED
+    assert store.get(ok.job_id).status == jobsmod.STATUS_DONE
+    assert [j.job_id for j in finished] == [ok.job_id]
+
+
+@pytest.mark.unit
+def test_failed_youtube_staged_job_keeps_file_for_retry_then_cleans_up_on_success(tmp_path):
+    """Reproduces the pre-fix bug: a downstream pipeline failure (after the staged transcript
+    was already read) used to leave the file deleted, so JobStore.retry() requeued a job whose
+    payload no longer existed and every subsequent retry crashed with FileNotFoundError. The
+    file must survive the failure, and be reclaimed only once a retry actually succeeds."""
+    db = tmp_path / "distil.db"
+    store = jobsmod.JobStore(db)
+    transcript = Transcript(segments=[Segment(text="hi", locator="seg:0", timestamp=None)])
+    staged_path = webapp._stage_transcript("j_retry_lifecycle", transcript)
+    job = store.enqueue(kind=jobsmod.KIND_YOUTUBE_STAGED, title="t", payload=str(staged_path))
+
+    attempts = []
+
+    def flaky_distill(job):
+        webapp._load_job_transcript(job)  # reads the staged file, no longer deletes it
+        attempts.append(job.job_id)
+        if len(attempts) == 1:
+            raise RuntimeError("LLM call failed")
+        return {"status": "done", "entry_id": "e_1", "summary": "kept 1 item"}
+
+    worker = jobsmod.Worker(db, flaky_distill, on_finished=webapp._cleanup_staged_file)
+    assert worker.process_once()
+    assert store.get(job.job_id).status == jobsmod.STATUS_FAILED
+    assert staged_path.exists()  # kept — a retry must still be able to read it
+
+    assert store.retry(job.job_id) is True
+    assert worker.process_once()
+    assert store.get(job.job_id).status == jobsmod.STATUS_DONE
+    assert not staged_path.exists()  # reclaimed now that the job is actually done
+
+
+@pytest.mark.unit
+def test_autoclear_reaps_stale_failed_jobs_staged_file(jobstore):
+    job = jobstore.enqueue(
+        kind=jobsmod.KIND_YOUTUBE_STAGED, title="t", payload="/staged/x.json"
+    )
+    jobstore.mark_failed(job.job_id, error="boom")
+    stale = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+    jobstore._conn.execute("UPDATE jobs SET updated_at=? WHERE job_id=?", (stale, job.job_id))
+    jobstore._conn.commit()
+
+    reaped = []
+    jobstore.autoclear(on_stale_failed=reaped.append)
+    assert [j.job_id for j in reaped] == [job.job_id]
+    assert jobstore.get(job.job_id).status == jobsmod.STATUS_FAILED  # row itself untouched
+
+
+@pytest.mark.unit
+def test_autoclear_does_not_reap_a_recently_failed_job(jobstore):
+    job = jobstore.enqueue(
+        kind=jobsmod.KIND_YOUTUBE_STAGED, title="t", payload="/staged/x.json"
+    )
+    jobstore.mark_failed(job.job_id, error="boom")
+    reaped = []
+    jobstore.autoclear(on_stale_failed=reaped.append)
+    assert reaped == []
 
 
 # ---- streaming ask: deltas then final; abstention makes zero synthesis calls -----------

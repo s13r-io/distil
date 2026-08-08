@@ -236,11 +236,13 @@ document.getElementById('distil-btn').addEventListener('click', async () => {
 });
 
 /* ---------- Activity ---------- */
-const ACTIVE=new Set(['queued','running']);
+const ACTIVE=new Set(['queued','running','pending_fetch','fetching']);
 let _jobsPollTimer=null;
 let _jobsLoading=false;
 function jobBadge(s){
   const map={queued:['','Queued'],running:['info','<span class="spinner"></span>Distilling'],
+    pending_fetch:['','Waiting to fetch'],
+    fetching:['info','<span class="spinner"></span>Fetching'],
     done:['ok','Done'],low_value:['warn','Low-value'],failed:['danger','Failed']};
   const [cls,txt]=map[s]||['','Unknown'];
   return '<span class="badge '+cls+'">'+txt+'</span>';
@@ -280,8 +282,8 @@ async function loadJobs(){
           const phase=j.current_phase?(' (failed during '+esc(PHASE_LABELS[j.current_phase]||j.current_phase)+')'):'';
           detail='<span style="color:var(--danger)">'+esc(j.error||'failed')+phase+'</span> / <a href="#" data-retry="'+j.job_id+'">Retry</a>';
         }
-        else if(j.status==='queued') detail='<a href="#" data-remove="'+j.job_id+'">Remove</a>';
-        else if(j.status==='running') detail=progressDetail(j);
+        else if(j.status==='queued'||j.status==='pending_fetch') detail='<a href="#" data-remove="'+j.job_id+'">Remove</a>';
+        else if(j.status==='running'||j.status==='fetching') detail=progressDetail(j);
         return '<div class="jobrow"><div class="top"><span class="entry-title">'+esc(j.title)+'</span>'+jobBadge(j.status)+'</div>'
           +'<div class="meta-line muted">'+detail+'</div></div>';
       }).join('');
