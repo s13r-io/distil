@@ -86,6 +86,7 @@ that must abstain.
 - T-E5: a response truncated mid-array (output-token cap or dropped connection) recovers whatever complete leading items parsed, discarding only the cut-off tail; recovered items still go through quote truncation/discipline.
 - T-E6: a response truncated before even its first item completes yields nothing recoverable → clean `ParseError`, not a crash; a non-array response is still rejected outright.
 - T-E7: a dropped connection (`client.complete` raises) retries and can still succeed; a persistent parse or connection failure raises after exhausting the bounded retry count; a schema-level failure in a fully-parsed item is never retried.
+- T-E8: an item whose `type` is a `stance` value (e.g. `personal_experience`) is repaired to the requested `KnowledgeType`; a `type` that's a different but still-valid `KnowledgeType` is left alone; an item that still fails validation after repair is dropped while valid siblings survive; an all-bad array, or a batch below the salvage floor, still raises — schema-level failures remain un-retried (T-E7 unchanged).
 
 ### normalize.py (PURE)
 - T-N1: near-duplicate items are merged.
