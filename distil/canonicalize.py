@@ -6,10 +6,12 @@ with embedding similarity (``Store.find_concept_candidates``) as the primary can
 instead of topic overlap (too coarse within a single video — items in the same transcript can
 belong to different concepts despite sharing one ``entry.tags.topics`` set).
 
-This module produces DB rows only: no OKF export, no synthesis, no pipeline wiring. Those land
-in Phase 15.2/15.3. The invariant this module guarantees is **idempotent membership**: re-filing
-the same entry retracts its prior memberships before recomputing them, so it reproduces the same
-result rather than accumulating duplicates.
+``canonicalize_entry`` and ``synthesize_touched_concepts`` stay pure DB-only functions (matching
+and synthesis, no rendering); ``run_canonicalize_stage`` (Phase 15.3) is the one orchestration
+entry point that also talks to ``okf.py`` and is what ``pipeline.py``'s Stage 8 calls. The
+invariant every layer guarantees is **idempotent membership**: re-filing the same entry retracts
+its prior memberships before recomputing them, so it reproduces the same result — and the same
+rendered pages — rather than accumulating duplicates or drifting.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import os
 import re
 from datetime import datetime, timezone
 
+from . import okf
 from .llm import LLMClient
 from .models import Concept, ConceptMember, KBEntry, KnowledgeItem
 from .okf import slugify
@@ -112,6 +115,48 @@ def synthesize_touched_concepts(
         concept.pending_synthesis = True
         concept.updated_at = _now()
         store.save_concept(concept)
+
+
+def run_canonicalize_stage(entry: KBEntry, store: Store, client: LLMClient) -> list[Concept]:
+    """Pipeline Stage 8, one clean call (design report §5): canonicalize this entry's items,
+    (re-)synthesize the concepts it touched (capped), and keep the OKF ``concepts/`` bundle plus
+    this entry's ``sources/<slug>.md`` backlink in sync. This is the one place that talks to
+    ``okf.py`` — ``canonicalize_entry``/``synthesize_touched_concepts`` stay pure DB-only
+    functions so matching/synthesis logic never has to know about rendering.
+
+    Also closes the "genuine gap" the design report flags in §5 point 1/3: a concept that
+    *survives* this entry's retraction with other members remaining still needs its page
+    re-exported (its ``videos:``/``## Sources`` no longer include this entry) — otherwise its
+    page would keep a one-way link to a source that no longer links back, failing the E7
+    bidirectional-link check. A concept that drops to zero members is already deleted from the
+    DB by ``canonicalize_entry`` -> ``retract_entry_concept_memberships``; this removes its now-
+    orphaned OKF page too.
+
+    Idempotent: re-filing an unchanged entry retracts and reproduces the same membership (§5),
+    so re-running this on the same entry re-renders byte-identical pages rather than drifting.
+    """
+    prior_concept_ids = {
+        c.concept_id
+        for c in store.list_concepts()
+        if any(m.entry_id == entry.entry_id for m in c.members)
+    }
+
+    touched = canonicalize_entry(entry, store, client)
+    synthesize_touched_concepts(entry, touched, store, client)
+
+    touched_ids = {c.concept_id for c in touched}
+    for concept_id in prior_concept_ids - touched_ids:
+        survivor = store.load_concept(concept_id)
+        if survivor is None:
+            okf.remove_concept(concept_id, store.okf_root)
+        else:
+            okf.export_concept(survivor, store, store.okf_root)
+
+    for concept in touched:
+        okf.export_concept(concept, store, store.okf_root)
+
+    okf.render_source_with_concepts(entry, store, store.okf_root)
+    return touched
 
 
 def _rank_by_similarity(entry: KBEntry, touched: list[Concept], store: Store) -> list[Concept]:
