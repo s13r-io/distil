@@ -546,11 +546,6 @@ def test_diagnose_pot_output_never_leaks_provider_url(monkeypatch):
 def test_diagnose_pot_never_raises_and_redacts_url_on_timeout(monkeypatch):
     provider_url = "http://bgutil-pot-provider.railway.internal:4416"
     monkeypatch.setenv("DISTIL_POT_PROVIDER_URL", provider_url)
-    cmd = [
-        "yt-dlp",
-        "--extractor-args",
-        f"youtubepot-bgutilhttp:base_url={provider_url}",
-    ]
 
     def fake_run(cmd, **kwargs):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=60.0)
