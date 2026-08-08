@@ -135,6 +135,8 @@ that must abstain.
 - T-PL4 (OKF, Phase 2): filing a useful transcript exports both OKF pages (`sources/<slug>.md`, `raw/<slug>.md`) via `store.file_entry`'s `transcript` kwarg.
 - T-PL5 (Phase 15.3): with `enable_canonicalize=True`, filing a useful transcript produces a concept page under `okf_root/concepts/` (`type: concept`, a "## Sources" section).
 - T-PL6 (Phase 15.3): with `enable_canonicalize=False`, the canonicalize stage makes zero LLM calls and creates no concepts or concept pages.
+- T-PL7 (Phase 16): with `enable_concept_edges=True`, a second video whose concept centroid is similar to an existing concept's gets a classified typed edge, rendered under a `## Contrasts with`/`## Builds on`/`## Related` heading on its OKF page.
+- T-PL8 (Phase 16): with `enable_concept_edges=False`, the concept-edges stage makes zero LLM calls even when a candidate would otherwise exist, and no concept gains an edge.
 
 ### okf.py (OKF export layer, Phase 2 — pure, no LLM)
 - T-OKF1: the export slug is derived from `source.title` (slugified); falls back to `entry_id` when the title yields nothing usable; stable across repeated calls.
@@ -148,6 +150,8 @@ that must abstain.
 - T-OKFC2 (Phase 15.2): re-exporting an unchanged concept is byte-identical.
 - T-OKFC3 (Phase 15.2): `render_source_with_concepts` (a separate post-canonicalize step, since `export_entry`/Stage 7 runs before canonicalize/Stage 8) adds a source page's "## Concepts covered" backlink section when the source has covering concepts, omits the section when it has none, and is idempotent on re-render.
 - T-OKFC4 (Phase 15.2): `remove_concept` deletes the concept page and regenerates `concepts/index.md` and the root index; a concept retracted to zero members is removable this way.
+- T-OKFC5 (Phase 16): `export_concept` renders `## Contrasts with`/`## Builds on`/`## Related` sections (same-directory links) only for the relations actually present in `concept.edges`; a concept with no edges renders none of them.
+- T-OKFC6 (Phase 16): claims render under a `## Claims` heading, and a claim whose cited members' `stance` values disagree gets a `> **Contradiction:**` line naming each disagreeing member by its resolved OKF slug and stance.
 
 ### okf_lint.py (stdlib-only bundle validator, `python -m distil.okf_lint <okf_root>`)
 - T-OKFL1 (E1): every non-reserved `.md` file must have YAML frontmatter with a non-empty `type`.
@@ -157,7 +161,7 @@ that must abstain.
 - T-OKFL5 (E5, Phase 15.3): every `concepts/<concept_id>.md` must have `type: concept` frontmatter and appear in `concepts/index.md`.
 - T-OKFL6 (E6, Phase 15.3): every source cited in a concept's "## Sources" section must be one of that concept's `videos:` frontmatter slugs.
 - T-OKFL7 (E7, Phase 15.3): concept<->source links must be bidirectional — a concept page's `videos:` slug must have a matching backlink on that source's "## Concepts covered" section, and vice versa.
-- T-OKFL8 (E8, Phase 15.3): no orphan concept pages — every `concepts/<concept_id>.md` must be linked from at least one source's "## Concepts covered" section (the `concepts/index.md` listing alone does not count).
+- T-OKFL8 (E8, Phase 15.3): no orphan concept pages — every `concepts/<concept_id>.md` must be linked from at least one source's "## Concepts covered" section (the `concepts/index.md` listing alone does not count); Phase 16 extends this to also recognize another concept's typed-edge link (`## Contrasts with`/`## Builds on`/`## Related`) as a valid inbound link.
 - A freshly generated bundle (including concept pages produced by `canonicalize.run_canonicalize_stage`) lints clean, and `main()` exits non-zero when any error is present.
 
 ### canonicalize.py (concept matching engine, Phase 15.1 — unit, FakeClient/FakeEmbedder)
@@ -178,6 +182,15 @@ that must abstain.
 - T-SYN2: a claim whose `item_ids` don't ALL resolve to real members of this concept is dropped whole (stricter than `note.py`'s per-id filtering).
 - T-SYN3: malformed/empty-after-cleaning model output falls back to a deterministic one-liner built from the concept description and member statements; never raises.
 - T-SYN4: `render_claim` is a pure function — the rendered citation parenthetical exactly matches the code-derived `(okf_slug, timestamp)` map, including multi-citation and no-timestamp cases; the synthesis model never authors citation text.
+- T-SYN5 (Phase 16): `find_claim_contradictions` flags a claim whose cited members' `stance` values disagree, keyed by claim index with the full `(entry_id, item_id, stance)` row per member; a claim whose members agree (or that cites only one member) is absent from the result — no LLM involved.
+
+### concept_graph.py (concept<->concept typed edges, Phase 16 — unit, FakeClient/FakeEmbedder)
+- T-CEDGE1: with no other concepts in the store, `link_concept_graph` makes zero LLM calls and returns no edges (mirrors T-G1's no-candidates shortcut).
+- T-CEDGE2: a concept whose centroid is similar enough to another concept's becomes a classified candidate; the LLM's relation is stored as a `ConceptEdge`.
+- T-CEDGE3: a `none` relation, or any value outside `{contrasts_with, builds_on, related}`, is dropped rather than trusted (mirrors T-G2).
+- T-CEDGE4: the candidate pool is capped at `MAX_CONCEPT_EDGE_CANDIDATES` (default 3) even when more concepts qualify.
+- T-CEDGE5: `run_concept_edges_stage` skips concepts still `pending_synthesis` (zero LLM calls, no edges written) and exports the OKF page only for concepts whose edges actually changed.
+- T-CEDGE6: `Store.prune_dangling_concept_edges` drops an edge whose target concept was deleted, and the affected concept's OKF page is re-exported without the stale edge section.
 
 ### cli.py
 - T-C1: `distil run <file>` accepts `.srt`/`.txt`/`.md` and `distil run --paste` (or stdin) accepts pasted text; exits 0 and prints the entry path.

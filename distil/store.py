@@ -41,6 +41,11 @@ MAX_CONCEPT_CANDIDATES = 5
 _K_EMBED = 8
 _TOKEN = re.compile(r"[a-z0-9]+")
 
+# Concept-to-concept typed-edge candidate cap (concept_graph.py, Phase 16 design report §9 item
+# 4) — reuses CONCEPT_SIM_FLOOR as the same "similar enough to be worth classifying" threshold,
+# mirroring graph.MAX_CANDIDATES=3 in spirit at concept granularity.
+MAX_CONCEPT_EDGE_CANDIDATES = 3
+
 
 @dataclass
 class VectorRow:
@@ -510,6 +515,61 @@ class Store:
             )
             for c, sim in pool
         ]
+
+    def find_concept_edge_candidates(
+        self, concept_id: str, *, exclude_concept_ids: set[str] | None = None
+    ) -> list[ConceptCandidate]:
+        """Deterministic candidate pool for concept-to-concept typed-edge classification
+        (``concept_graph.py``, Phase 16 design report §9 item 4): every other concept's
+        centroid, cosine-compared against ``concept_id``'s own centroid, kept above
+        ``CONCEPT_SIM_FLOOR`` and capped at ``MAX_CONCEPT_EDGE_CANDIDATES`` highest-similarity
+        first. Reuses the same centroid machinery ``find_concept_candidates`` already
+        established (§2), applied to a concept's own centroid instead of a single item vector.
+        """
+        from .query import cosine  # local import: avoids a store<->query circular import
+
+        centroid = self.concept_centroid(concept_id)
+        if not centroid:
+            return []
+        exclude = {concept_id} | (exclude_concept_ids or set())
+        sim_floor = float(os.environ.get("DISTIL_CONCEPT_SIM_FLOOR", CONCEPT_SIM_FLOOR))
+
+        scored: list[tuple[Concept, float]] = []
+        for concept, other_centroid in self._concepts_with_centroid():
+            if concept.concept_id in exclude or not other_centroid:
+                continue
+            scored.append((concept, cosine(centroid, other_centroid)))
+
+        pool = sorted(
+            (pair for pair in scored if pair[1] >= sim_floor), key=lambda p: p[1], reverse=True
+        )[:MAX_CONCEPT_EDGE_CANDIDATES]
+        return [
+            ConceptCandidate(
+                concept_id=c.concept_id, title=c.title, description=c.description, similarity=sim
+            )
+            for c, sim in pool
+        ]
+
+    def prune_dangling_concept_edges(self) -> set[str]:
+        """Drop any edge whose target concept no longer exists, from every concept's ``edges``
+        (Phase 16 idempotency: a deleted concept's inbound edges must never dangle). A full pass
+        over the whole ``concepts`` table is cheap at Distil's target scale (tens-to-low-
+        hundreds of concepts, ARCHITECTURE.md §1) — simpler and just as correct as threading
+        "which concepts were deleted this run" through the retraction call chain. Returns the
+        concept_ids whose ``edges`` were actually modified, so callers know which OKF pages need
+        re-exporting.
+        """
+        concepts = self.list_concepts()
+        existing_ids = {c.concept_id for c in concepts}
+        changed: set[str] = set()
+        for concept in concepts:
+            remaining = [e for e in concept.edges if e.target_concept_id in existing_ids]
+            if len(remaining) != len(concept.edges):
+                concept.edges = remaining
+                concept.updated_at = datetime.now(timezone.utc).isoformat()
+                self.save_concept(concept)
+                changed.add(concept.concept_id)
+        return changed
 
     def _concepts_with_centroid(self) -> list[tuple[Concept, list[float]]]:
         cur = self._conn.execute("SELECT data, centroid FROM concepts ORDER BY concept_id")

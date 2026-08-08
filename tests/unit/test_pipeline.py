@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from distil.embed import FakeEmbedder
 from distil.ingest import ingest_text
 from distil.llm import FakeClient
 from distil.models import KBEntry, Profile
@@ -65,6 +66,22 @@ _CANON_NEW = json.dumps([{
 _SYNTH_CLAIMS = json.dumps([
     {"text": "Keep functions small and focused on one job.", "item_ids": ["k_01"]}
 ])
+_EXTRACT_RAG = json.dumps([{
+    "type": "conceptual", "statement": "Traditional RAG retrieves then generates.",
+    "stance": "fact", "speaker_confidence": "high", "rationale": None, "scope": None,
+    "provenance": {
+        "quote": "Traditional RAG retrieves then generates", "timestamp": None, "locator": None,
+    },
+}])
+_CANON_NEW_A = json.dumps([{
+    "item_id": "k_01", "decision": "new", "title": "Concept A", "description": "d",
+}])
+_SYNTH_A = json.dumps([{"text": "Concept A claim.", "item_ids": ["k_01"]}])
+_CANON_NEW_B = json.dumps([{
+    "item_id": "k_01", "decision": "new", "title": "Concept B", "description": "d",
+}])
+_SYNTH_B = json.dumps([{"text": "Concept B claim.", "item_ids": ["k_01"]}])
+_EDGE_RELATED = json.dumps({"relation": "related"})
 
 
 # ---- T-PL1: end-to-end with FakeClient produces a complete, schema-valid KBEntry ----
@@ -203,3 +220,66 @@ def test_pl6_canonicalize_disabled_makes_zero_canonicalize_calls(profile, store)
     concepts_dir = store.okf_root / "concepts"
     pages = [p for p in concepts_dir.glob("*.md") if p.name != "index.md"]
     assert pages == []
+
+
+# ---- Phase 16 — Stage 9 concept<->concept typed edges (design report §9 item 4) --------------
+
+
+@pytest.mark.unit
+def test_pl7_concept_edges_enabled_computes_and_renders_edges(profile, store):
+    embedder = FakeEmbedder(dim=32)
+    transcript = ingest_text("Traditional RAG retrieves then generates.")
+
+    run_pipeline(
+        transcript, profile, store,
+        FakeClient(responses=[_TRIAGE_RICH, _EXTRACT_RAG, _LINK, _NOTE, _CANON_NEW_A, _SYNTH_A]),
+        source_title="Video A",
+        config=PipelineConfig(enable_graph=False, enable_canonicalize=True, enable_concept_edges=True),
+        embedder=embedder,
+    )
+    run_pipeline(
+        transcript, profile, store,
+        FakeClient(
+            responses=[
+                _TRIAGE_RICH, _EXTRACT_RAG, _LINK, _NOTE, _CANON_NEW_B, _SYNTH_B, _EDGE_RELATED,
+            ]
+        ),
+        source_title="Video B",
+        config=PipelineConfig(enable_graph=False, enable_canonicalize=True, enable_concept_edges=True),
+        embedder=embedder,
+    )
+
+    concepts = store.list_concepts()
+    assert len(concepts) == 2
+    concept_b = next(c for c in concepts if c.title == "Concept B")
+    assert concept_b.edges != []
+    page = store.okf_root / "concepts" / f"{concept_b.concept_id}.md"
+    assert "## Related" in page.read_text()
+
+
+@pytest.mark.unit
+def test_pl8_concept_edges_disabled_makes_zero_edge_calls(profile, store):
+    embedder = FakeEmbedder(dim=32)
+    transcript = ingest_text("Traditional RAG retrieves then generates.")
+
+    run_pipeline(
+        transcript, profile, store,
+        FakeClient(responses=[_TRIAGE_RICH, _EXTRACT_RAG, _LINK, _NOTE, _CANON_NEW_A, _SYNTH_A]),
+        source_title="Video A",
+        config=PipelineConfig(enable_graph=False, enable_canonicalize=True, enable_concept_edges=False),
+        embedder=embedder,
+    )
+    # No _EDGE_RELATED response supplied; an edge-classification call would IndexError.
+    client = FakeClient(
+        responses=[_TRIAGE_RICH, _EXTRACT_RAG, _LINK, _NOTE, _CANON_NEW_B, _SYNTH_B]
+    )
+    run_pipeline(
+        transcript, profile, store, client,
+        source_title="Video B",
+        config=PipelineConfig(enable_graph=False, enable_canonicalize=True, enable_concept_edges=False),
+        embedder=embedder,
+    )
+
+    assert client.call_count == 6
+    concept_b = next(c for c in store.list_concepts() if c.title == "Concept B")
+    assert concept_b.edges == []
