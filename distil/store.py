@@ -405,7 +405,12 @@ class Store:
                 data=excluded.data,
                 centroid=excluded.centroid
             """,
-            (concept.concept_id, concept.concept_id, concept.model_dump_json(), json.dumps(centroid)),
+            (
+                concept.concept_id,
+                concept.concept_id,
+                concept.model_dump_json(),
+                json.dumps(centroid),
+            ),
         )
         self._conn.commit()
 

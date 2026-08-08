@@ -106,8 +106,14 @@ def test_canon2_empty_pool_creates_new_concept(store, embedder):
     fake = FakeClient(
         responses=[
             json.dumps(
-                [{"item_id": "k_01", "decision": "new", "title": "Agentic RAG",
-                  "description": "RAG with a planning loop."}]
+                [
+                    {
+                        "item_id": "k_01",
+                        "decision": "new",
+                        "title": "Agentic RAG",
+                        "description": "RAG with a planning loop.",
+                    }
+                ]
             )
         ]
     )
@@ -194,7 +200,9 @@ def test_canon6_candidate_pool_is_bounded_in_prompt(store, embedder, monkeypatch
                 concept_id=f"concept-{i}",
                 title=f"Concept {i}",
                 description="d",
-                members=[ConceptMember(entry_id=f"e_c{i}", item_id="k_01", quote="q", timestamp=None)],
+                members=[
+                    ConceptMember(entry_id=f"e_c{i}", item_id="k_01", quote="q", timestamp=None)
+                ],
                 created_at="t",
                 updated_at="t",
             )
@@ -231,8 +239,18 @@ def test_canon7_same_batch_new_title_collision_merges(store, embedder):
         responses=[
             json.dumps(
                 [
-                    {"item_id": "k_01", "decision": "new", "title": "Agentic RAG", "description": "d1"},
-                    {"item_id": "k_02", "decision": "new", "title": "agentic rag!", "description": "d2"},
+                    {
+                        "item_id": "k_01",
+                        "decision": "new",
+                        "title": "Agentic RAG",
+                        "description": "d1",
+                    },
+                    {
+                        "item_id": "k_02",
+                        "decision": "new",
+                        "title": "agentic rag!",
+                        "description": "d2",
+                    },
                 ]
             )
         ]
@@ -258,7 +276,16 @@ def test_canon9_delete_entry_cascades_concept_retraction(store, embedder):
         store,
         FakeClient(
             responses=[
-                json.dumps([{"item_id": "k_01", "decision": "new", "title": "Agentic RAG", "description": "d"}])
+                json.dumps(
+                    [
+                        {
+                            "item_id": "k_01",
+                            "decision": "new",
+                            "title": "Agentic RAG",
+                            "description": "d",
+                        }
+                    ]
+                )
             ]
         ),
     )
@@ -277,7 +304,16 @@ def test_canon9_delete_entry_cascades_concept_retraction(store, embedder):
         store,
         FakeClient(
             responses=[
-                json.dumps([{"item_id": "k_01", "decision": "new", "title": "Agentic RAG", "description": "d"}])
+                json.dumps(
+                    [
+                        {
+                            "item_id": "k_01",
+                            "decision": "new",
+                            "title": "Agentic RAG",
+                            "description": "d",
+                        }
+                    ]
+                )
             ]
         ),
     )

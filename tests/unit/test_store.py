@@ -337,7 +337,9 @@ def test_concept_centroid_is_mean_of_member_vectors_and_drives_candidates(store)
     store.file_entry(_entry(), embedder=FakeEmbedder(dim=8))
     vec = next(v for _iid, eid, v in store.iter_item_vectors() if eid == "e_01")
     store.save_concept(
-        _concept(members=[ConceptMember(entry_id="e_01", item_id="k_01", quote="q", timestamp=None)])
+        _concept(
+            members=[ConceptMember(entry_id="e_01", item_id="k_01", quote="q", timestamp=None)]
+        )
     )
     candidates = store.find_concept_candidates(vec, [], "")
     assert candidates and candidates[0].concept_id == "c1"
@@ -370,7 +372,9 @@ def test_find_concept_candidates_respects_max_candidates_env(store, monkeypatch)
 def test_retract_entry_concept_memberships_deletes_zero_member_concept(store):
     store.file_entry(_entry(), embedder=FakeEmbedder(dim=8))
     store.save_concept(
-        _concept(members=[ConceptMember(entry_id="e_01", item_id="k_01", quote="q", timestamp=None)])
+        _concept(
+            members=[ConceptMember(entry_id="e_01", item_id="k_01", quote="q", timestamp=None)]
+        )
     )
     store.retract_entry_concept_memberships("e_01")
     assert store.load_concept("c1") is None
@@ -398,7 +402,9 @@ def test_retract_entry_concept_memberships_keeps_other_entries_members(store):
 def test_delete_entry_retracts_concept_membership(store):
     store.file_entry(_entry(), embedder=FakeEmbedder(dim=8))
     store.save_concept(
-        _concept(members=[ConceptMember(entry_id="e_01", item_id="k_01", quote="q", timestamp=None)])
+        _concept(
+            members=[ConceptMember(entry_id="e_01", item_id="k_01", quote="q", timestamp=None)]
+        )
     )
     store.delete_entry("e_01")
     assert store.load_concept("c1") is None
