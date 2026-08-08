@@ -20,8 +20,10 @@ stay easy to find together without one nesting inside the other)::
       raw/
         <slug>.md          # immutable timestamped transcript
 
-Concepts/entities layers (Phase 3/5), the canonicalize engine, and OpenKnowledge wiring are
-explicitly out of scope here — see the Phase 2 task brief.
+This module now also exports ``concepts/`` (Phase 15, cross-video idea synthesis) and
+``entities/`` (Phase D, cross-video tool/person/organization synthesis) alongside the ``sources/``
++ ``raw/`` layer above — see ``export_concept``/``export_entity``. OpenKnowledge wiring proper
+remains out of scope.
 
 Slug derivation (stable identity — SCHEMA.md §2 "the path is the identity"): the video's
 ``source.title`` is slugified (lowercased, non-alnum runs collapsed to single hyphens,
@@ -51,7 +53,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from .ingest import Transcript
-from .models import Concept, ConceptEdge, KBEntry
+from .models import Concept, ConceptEdge, Entity, KBEntry
 from .source import _youtube_video_id, display_title
 from .synthesize_concept import find_claim_contradictions, render_claim
 
@@ -189,10 +191,10 @@ def frontmatter_field(text: str, key: str) -> str | None:
 def render_source_with_concepts(entry: KBEntry, store: Store, okf_root: str | Path) -> None:
     """Re-render ``sources/<slug>.md`` for ``entry``, adding a "## Concepts covered" section
     listing every concept with a member from this entry (SCHEMA §5 "bidirectional"; design
-    report §3, §5). A post-canonicalize step: Stage 7 (File) already wrote this page without
-    concept knowledge, so this re-touches it once membership is known. Full deterministic
-    regeneration like the rest of this module — re-rendering the same concept set is
-    byte-identical.
+    report §3, §5), and — Phase D — a "## Entities mentioned" section the same way. A
+    post-canonicalize step: Stage 7 (File) already wrote this page without concept/entity
+    knowledge, so this re-touches it once membership is known. Full deterministic regeneration
+    like the rest of this module — re-rendering the same concept/entity set is byte-identical.
     """
     root = Path(okf_root)
     slug = slug_for_entry(entry, root)
@@ -200,7 +202,13 @@ def render_source_with_concepts(entry: KBEntry, store: Store, okf_root: str | Pa
         (c for c in store.list_concepts() if any(m.entry_id == entry.entry_id for m in c.members)),
         key=lambda c: c.title.lower(),
     )
-    text = _render_source(entry, slug, covering_concepts=covering)
+    covering_entities = sorted(
+        (e for e in store.list_entities() if any(m.entry_id == entry.entry_id for m in e.members)),
+        key=lambda e: e.title.lower(),
+    )
+    text = _render_source(
+        entry, slug, covering_concepts=covering, covering_entities=covering_entities
+    )
     (root / "sources" / f"{slug}.md").write_text(text, encoding="utf-8")
 
 
@@ -232,11 +240,34 @@ def remove_concept(concept_id: str, okf_root: str | Path) -> None:
     _rebuild_indexes(root)
 
 
+def export_entity(entity: Entity, store: Store, okf_root: str | Path) -> None:
+    """Write/refresh ``entities/<entity_id>.md`` and regenerate all indexes — the exact
+    ``export_concept`` shape, one granularity down (Phase D)."""
+    root = Path(okf_root)
+    entities_dir = root / "entities"
+    entities_dir.mkdir(parents=True, exist_ok=True)
+    (entities_dir / f"{entity.entity_id}.md").write_text(
+        _render_entity(entity, store, root), encoding="utf-8"
+    )
+    _rebuild_indexes(root)
+
+
+def remove_entity(entity_id: str, okf_root: str | Path) -> None:
+    """Delete an entity's OKF page (if present) and regenerate all indexes — the exact
+    ``remove_concept`` shape, called whenever an entity drops to zero members."""
+    root = Path(okf_root)
+    (root / "entities" / f"{entity_id}.md").unlink(missing_ok=True)
+    _rebuild_indexes(root)
+
+
 # ---- page rendering ----------------------------------------------------------------------
 
 
 def _render_source(
-    entry: KBEntry, slug: str, covering_concepts: list[Concept] | None = None
+    entry: KBEntry,
+    slug: str,
+    covering_concepts: list[Concept] | None = None,
+    covering_entities: list[Entity] | None = None,
 ) -> str:
     title = display_title(
         entry.source.title,
@@ -290,6 +321,13 @@ def _render_source(
         lines.append("")
         for concept in covering_concepts:
             lines.append(f"- [{concept.title}](../concepts/{concept.concept_id}.md)")
+        lines.append("")
+
+    if covering_entities:
+        lines.append("## Entities mentioned")
+        lines.append("")
+        for entity in covering_entities:
+            lines.append(f"- [{entity.title}](../entities/{entity.entity_id}.md)")
         lines.append("")
     return "\n".join(lines)
 
@@ -395,6 +433,64 @@ def _append_edge_section(
     lines.append("")
 
 
+def _render_entity(entity: Entity, store: Store, root: Path) -> str:
+    """Render an entity's OKF page — the exact ``_render_concept`` shape, one granularity down,
+    minus the typed-edge section (Phase D has no entity<->entity edges) and plus a ``kind``
+    frontmatter field."""
+    member_entries: dict[str, KBEntry] = {}
+    for member in entity.members:
+        if member.entry_id in member_entries:
+            continue
+        try:
+            member_entries[member.entry_id] = store.load_entry(member.entry_id)
+        except Exception:
+            continue
+
+    videos = sorted({slug_for_entry(entry, root) for entry in member_entries.values()})
+
+    lines = [
+        "---",
+        "type: entity",
+        f"kind: {entity.kind}",
+        f"title: {_yaml_str(entity.title)}",
+        f"description: {_yaml_str(entity.description)}",
+        f"videos: {_yaml_flow_list(videos)}",
+        f"created: {_date_only(entity.created_at)}",
+        f"updated: {_date_only(entity.updated_at)}",
+        "---",
+        "",
+        f"# {entity.title}",
+        "",
+    ]
+
+    citations = _concept_citations(entity, member_entries, root)
+    if entity.claims:
+        lines.append("## Claims")
+        lines.append("")
+        for claim in entity.claims:
+            lines.append(render_claim(claim, citations))
+            lines.append("")
+    else:
+        lines.append(entity.description)
+        lines.append("")
+
+    lines.append("## Sources")
+    lines.append("")
+    seen_entries: set[str] = set()
+    for member in entity.members:
+        if member.entry_id in seen_entries:
+            continue
+        seen_entries.add(member.entry_id)
+        entry = member_entries.get(member.entry_id)
+        if entry is None:
+            continue
+        slug = slug_for_entry(entry, root)
+        quote = f"[{member.timestamp}] {member.quote}" if member.timestamp else member.quote
+        lines.append(f'- [{entry.source.title}](../sources/{slug}.md) - "{quote}"')
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _aggregate_concept_tags(entries) -> list[str]:
     """Union of member entries' ``tags.topics``, deduped, first-seen order, capped at
     ``_MAX_CONCEPT_TAGS`` (open question, design report: unbounded growth as a concept
@@ -408,10 +504,11 @@ def _aggregate_concept_tags(entries) -> list[str]:
 
 
 def _concept_citations(
-    concept: Concept, member_entries: dict[str, KBEntry], root: Path
+    concept: Concept | Entity, member_entries: dict[str, KBEntry], root: Path
 ) -> dict[str, tuple[str, str | None]]:
     """``item_id`` -> ``(okf_slug, timestamp)``, resolved from verified member/entry data —
-    never from model text (design report §4 step 4)."""
+    never from model text (design report §4 step 4). Works identically for a ``Concept`` or an
+    ``Entity`` — both share the same ``members[i].entry_id/item_id/timestamp`` shape."""
     citations: dict[str, tuple[str, str | None]] = {}
     for member in concept.members:
         entry = member_entries.get(member.entry_id)
@@ -449,6 +546,7 @@ def _render_raw(entry: KBEntry, transcript: Transcript, slug: str) -> str:
 def _rebuild_indexes(root: Path) -> None:
     sources_entries = _collect_pages(root / "sources")
     concepts_entries = sorted(_collect_pages(root / "concepts"), key=lambda e: e[1].lower())
+    entities_entries = sorted(_collect_pages(root / "entities"), key=lambda e: e[1].lower())
 
     sources_index = ["# Sources", ""]
     for slug, title, description in sources_entries:
@@ -464,6 +562,13 @@ def _rebuild_indexes(root: Path) -> None:
     (root / "concepts").mkdir(parents=True, exist_ok=True)
     (root / "concepts" / "index.md").write_text("\n".join(concepts_index), encoding="utf-8")
 
+    entities_index = ["# Entities", ""]
+    for slug, title, description in entities_entries:
+        entities_index.append(f"- [{title}]({slug}.md) - {description}")
+    entities_index.append("")
+    (root / "entities").mkdir(parents=True, exist_ok=True)
+    (root / "entities" / "index.md").write_text("\n".join(entities_index), encoding="utf-8")
+
     root_index = [
         "---",
         'okf_version: "0.1"',
@@ -472,10 +577,12 @@ def _rebuild_indexes(root: Path) -> None:
         "# Distil OKF Bundle",
         "",
         "Per-video OKF layer generated by Distil, alongside cross-video `concepts/` pages "
-        "synthesized from canonicalized knowledge items. Entities are not yet synthesized "
-        "(that begins in a later phase); this bundle currently covers `sources/` (neutral "
-        "per-video summaries), `raw/` (immutable transcripts), and `concepts/` (cross-video "
-        "synthesis).",
+        "synthesized from canonicalized knowledge items, and `entities/` pages — tools, people, "
+        "and organizations named across videos, canonicalized the same way. Entities are only "
+        "extracted for newly ingested videos (no backfill), so an older entry may contribute to "
+        "no entity pages; this bundle covers `sources/` (neutral per-video summaries), `raw/` "
+        "(immutable transcripts), `concepts/` (cross-video idea synthesis), and `entities/` "
+        "(cross-video tool/person/organization synthesis).",
         "",
         "## Sources",
         "",
@@ -491,6 +598,13 @@ def _rebuild_indexes(root: Path) -> None:
         root_index.append(f"- [{title}](concepts/{slug}.md)")
     root_index.append("")
     root_index.append("See [concepts/index.md](concepts/index.md) for one-line descriptions.")
+    root_index.append("")
+    root_index.append("## Entities")
+    root_index.append("")
+    for slug, title, _description in entities_entries:
+        root_index.append(f"- [{title}](entities/{slug}.md)")
+    root_index.append("")
+    root_index.append("See [entities/index.md](entities/index.md) for one-line descriptions.")
     root_index.append("")
     root.mkdir(parents=True, exist_ok=True)
     (root / "index.md").write_text("\n".join(root_index), encoding="utf-8")

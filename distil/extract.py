@@ -25,6 +25,15 @@ type before validating — see ``_repair_type``. A ``type`` that validates but d
 request is left alone (the model is allowed to say an item is a different valid type than the
 dominant one). An item that still fails validation after that repair is dropped rather than
 failing the whole batch — see ``_items_from_json``'s salvage floor.
+
+**Entities (Phase D)**: each item may carry a nested ``entities`` array (named tools/people/
+organizations mentioned in that item's sentence) — the same call, no second transcript read.
+``_clean_entity_mentions`` validates and drops malformed entries *before* the parent item is
+ever validated (mirroring ``_repair_type``'s "fix what's recoverable, drop what isn't" shape,
+but per-mention rather than per-field): an unparseable ``kind``, a missing ``name``, or an
+empty ``quote`` drops just that one mention. This makes it structurally impossible for a
+malformed entity to fail (and thereby drop) the knowledge item it rode in on — entity cleaning
+never raises and never participates in the item-level salvage floor.
 """
 
 from __future__ import annotations
@@ -39,7 +48,7 @@ from pydantic import ValidationError
 
 from .ingest import Transcript
 from .llm import LLMClient
-from .models import KnowledgeItem, KnowledgeType, Triage
+from .models import EntityKind, EntityMention, KnowledgeItem, KnowledgeType, Triage
 from .prompts.extract import SYSTEM, build_extract_prompt
 from .triage import ParseError
 
@@ -52,6 +61,7 @@ _MAX_RETRIES = 2
 _RETRY_SLEEP_SECONDS = 0.5
 
 _VALID_KNOWLEDGE_TYPES = frozenset(get_args(KnowledgeType))
+_VALID_ENTITY_KINDS = frozenset(get_args(EntityKind))
 
 # A wholesale-garbage response (wrong shape, hallucinated fields, etc.) should still fail loudly
 # rather than silently returning a near-empty result. Below half the items surviving validation
@@ -180,11 +190,16 @@ def _items_from_json(data: list, requested_type: str) -> list[KnowledgeItem]:
     """Validate already-parsed JSON array data into schema-conforming items.
 
     A ``type`` value is repaired first (see ``_repair_type``) since it is recoverable — the
-    caller always knows the type it asked for. An item that still fails validation after that
-    repair is a genuine semantic failure and is dropped rather than discarding every other item
-    in the batch (never retried by ``_complete_with_retry`` — this is not a parse failure). If
-    too few items survive, that signals a systemically broken response rather than one or two
-    isolated mistakes, so raise instead of silently returning near-nothing.
+    caller always knows the type it asked for. Any nested ``entities`` are cleaned next (see
+    ``_clean_entity_mentions``) into already-valid ``EntityMention`` instances *before* the item
+    itself is validated, so a malformed entity can never fail — and thereby drop — the item it
+    rode in on. An item that still fails validation after that repair is a genuine semantic
+    failure and is dropped rather than discarding every other item in the batch (never retried
+    by ``_complete_with_retry`` — this is not a parse failure). If too few items survive, that
+    signals a systemically broken response rather than one or two isolated mistakes, so raise
+    instead of silently returning near-nothing. (Entities have no equivalent salvage floor of
+    their own: they're optional per item, so a batch with zero recovered entities is normal, not
+    a sign of a broken response.)
     """
     items: list[KnowledgeItem] = []
     dropped = 0
@@ -195,6 +210,7 @@ def _items_from_json(data: list, requested_type: str) -> list[KnowledgeItem]:
             continue
         obj.setdefault("item_id", f"k_{i + 1:02d}")
         _repair_type(obj, requested_type)
+        obj["entity_mentions"] = _clean_entity_mentions(obj.pop("entities", None))
         try:
             items.append(KnowledgeItem.model_validate(obj))
         except ValidationError as exc:
@@ -210,6 +226,47 @@ def _items_from_json(data: list, requested_type: str) -> list[KnowledgeItem]:
     return items
 
 
+def _clean_entity_mentions(raw_entities: object) -> list[EntityMention]:
+    """Validate a raw ``entities`` payload into already-valid ``EntityMention`` instances.
+
+    Never raises: not-a-list input, a non-dict element, a missing/empty ``name`` or ``quote``,
+    or a ``kind`` outside the closed ``EntityKind`` set each drop just that one mention (logged),
+    with no repair-and-guess for ``kind`` — unlike ``_repair_type``, there is no single correct
+    answer to fall back to here, so an untrustworthy ``kind`` is dropped rather than coerced.
+    Overlong quotes are silently truncated, mirroring ``_truncate_overlong_quotes`` for items.
+    """
+    if not isinstance(raw_entities, list):
+        return []
+    mentions: list[EntityMention] = []
+    for i, obj in enumerate(raw_entities):
+        if not isinstance(obj, dict):
+            logger.warning("Entity mention %d dropped: not a JSON object.", i)
+            continue
+        obj = dict(obj)
+        if obj.get("kind") not in _VALID_ENTITY_KINDS:
+            logger.warning("Entity mention %d dropped: invalid kind %r.", i, obj.get("kind"))
+            continue
+        quote = obj.get("quote")
+        if isinstance(quote, str):
+            obj["quote"] = _truncate_quote(quote)
+        try:
+            mentions.append(EntityMention.model_validate(obj))
+        except ValidationError as exc:
+            logger.warning("Entity mention %d dropped: did not match the schema: %s", i, exc)
+    return mentions
+
+
+def _truncate_quote(quote: str) -> str:
+    """Trim ``quote`` to exactly ``_MAX_QUOTE_WORDS - 1`` words if it's at or over the limit,
+    else return it unchanged. Shared by ``_truncate_overlong_quotes`` (items) and
+    ``_clean_entity_mentions`` (entities) — the same faithfulness-preserving truncation either
+    way (a leading substring of a genuine verbatim quote is still verbatim)."""
+    words = quote.split()
+    if len(words) >= _MAX_QUOTE_WORDS:
+        return " ".join(words[: _MAX_QUOTE_WORDS - 1])
+    return quote
+
+
 def _truncate_overlong_quotes(items: list[KnowledgeItem]) -> None:
     """Silently trim quotes that exceed the word limit to exactly _MAX_QUOTE_WORDS-1 words.
 
@@ -219,9 +276,7 @@ def _truncate_overlong_quotes(items: list[KnowledgeItem]) -> None:
     so the hard guard only fires for genuinely fabricated / runaway quotes.
     """
     for item in items:
-        words = item.provenance.quote.split()
-        if len(words) >= _MAX_QUOTE_WORDS:
-            item.provenance.quote = " ".join(words[: _MAX_QUOTE_WORDS - 1])
+        item.provenance.quote = _truncate_quote(item.provenance.quote)
 
 
 def _enforce_quote_discipline(items: list[KnowledgeItem]) -> None:

@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}{{ entity.title }} - Distil{% endblock %}
+{% block content %}
+
+<a class="entry-back" href="/entities">Back to entities</a>
+
+<header class="entry-hero">
+  <div>
+    <h1>{{ entity.title }}</h1>
+    <p class="muted" style="margin:10px 0 16px;">{{ entity.description }}</p>
+    <span class="badge">{{ entity.kind }}</span>
+    <span class="badge info">{{ sources|length }} video{{ 's' if sources|length != 1 else '' }}</span>
+  </div>
+</header>
+
+<div class="reader-grid">
+  <main class="reader-main">
+    <section class="panel">
+      <div class="panel-head"><h2>Claims</h2></div>
+      <div class="panel-body">
+        {% if claims %}
+        {% for claim in claims %}
+        <div class="item">
+          <p class="stmt">{{ claim.text }}</p>
+          {% if claim.citations %}
+          <div class="row wrap" style="margin-top:8px;">
+            {% for c in claim.citations %}
+            <a class="badge" href="/entries/{{ c.entry_id }}#{{ c.item_id }}">{{ c.entry_title }}{% if c.timestamp %} @ {{ c.timestamp }}{% endif %}</a>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="muted" style="margin:0;">No synthesized claims yet.</p>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Sources</h2></div>
+      <div class="panel-body">
+        {% if sources %}
+        {% for s in sources %}
+        <div class="item">
+          <p class="stmt" style="margin:0;"><a href="/entries/{{ s.entry_id }}">{{ s.title }}</a></p>
+          <blockquote>"{{ s.quote }}"{% if s.timestamp %} <span class="muted">@ {{ s.timestamp }}</span>{% endif %}</blockquote>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="muted" style="margin:0;">No sources.</p>
+        {% endif %}
+      </div>
+    </section>
+  </main>
+</div>
+{% endblock %}

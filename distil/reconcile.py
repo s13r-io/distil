@@ -14,7 +14,8 @@ at. Dry run (report only, delete nothing) is the default; deleting requires ``ap
 never touches ``kb/`` or the database — ``kb/`` is the source of truth and only the derived,
 regenerable bundle is reconcile's to repair. Concept-page removal reuses ``okf.remove_concept``,
 and orphaned source/raw pairs reuse ``okf.remove_entry_pages``, so behaviour matches the delete
-cascade exactly rather than reimplementing file removal here.
+cascade exactly rather than reimplementing file removal here. Entities (Phase D) get the exact
+same orphan-removal treatment via ``okf.remove_entity``.
 """
 
 from __future__ import annotations
@@ -45,10 +46,12 @@ def reconcile_okf_bundle(store: Store, *, apply: bool = False) -> ReconcileRepor
 
     live_entry_ids = store.all_entry_ids()
     live_concept_ids = {c.concept_id for c in store.list_concepts()}
+    live_entity_ids = {e.entity_id for e in store.list_entities()}
 
     sources_dir = root / "sources"
     raw_dir = root / "raw"
     concepts_dir = root / "concepts"
+    entities_dir = root / "entities"
 
     orphan_slugs: list[str] = []
     live_slugs: set[str] = set()
@@ -85,11 +88,19 @@ def reconcile_okf_bundle(store: Store, *, apply: bool = False) -> ReconcileRepor
         if apply:
             okf.remove_concept(concept_id, root)
 
-    # A removed concept can leave a live source's "## Concepts covered" section pointing at a
-    # page that's now gone (the same stale-backlink shape Gap 2 closes for the delete path, at
-    # reconcile's bundle-wide scale) — refresh every live source from current DB truth so no
-    # dangling link survives.
-    if apply and orphan_concept_ids:
+    orphan_entity_ids = [
+        path.stem for path in _pages(entities_dir) if path.stem not in live_entity_ids
+    ]
+    for entity_id in orphan_entity_ids:
+        report.removed.append(_rel(entities_dir / f"{entity_id}.md", root))
+        if apply:
+            okf.remove_entity(entity_id, root)
+
+    # A removed concept/entity can leave a live source's "## Concepts covered"/"## Entities
+    # mentioned" section pointing at a page that's now gone (the same stale-backlink shape Gap 2
+    # closes for the delete path, at reconcile's bundle-wide scale) — refresh every live source
+    # from current DB truth so no dangling link survives. One render covers both sections.
+    if apply and (orphan_concept_ids or orphan_entity_ids):
         for entry_id in set(live_slug_owners.values()):
             try:
                 entry = store.load_entry(entry_id)

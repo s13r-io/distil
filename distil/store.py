@@ -29,7 +29,7 @@ from pathlib import Path
 from . import okf
 from .embed import Embedder
 from .ingest import Transcript
-from .models import Concept, KBEntry, Profile
+from .models import Concept, Entity, KBEntry, Profile
 from .source import display_title
 
 _FRONT_MATTER_DELIM = "---"
@@ -45,6 +45,12 @@ _TOKEN = re.compile(r"[a-z0-9]+")
 # 4) — reuses CONCEPT_SIM_FLOOR as the same "similar enough to be worth classifying" threshold,
 # mirroring graph.MAX_CANDIDATES=3 in spirit at concept granularity.
 MAX_CONCEPT_EDGE_CANDIDATES = 3
+
+# Entity candidate retrieval defaults (canonicalize.py, Phase D) — same shape/defaults as the
+# concept constants above, kept as separate tunables since only a real-data gate could justify
+# sharing a value.
+ENTITY_SIM_FLOOR = 0.55
+MAX_ENTITY_CANDIDATES = 5
 
 
 @dataclass
@@ -71,6 +77,18 @@ class ConceptCandidate:
     """One deterministically-gathered candidate offered to the canonicalize LLM call."""
 
     concept_id: str
+    title: str
+    description: str
+    similarity: float
+
+
+@dataclass
+class EntityCandidate:
+    """One deterministically-gathered entity candidate offered to the canonicalize LLM call —
+    the ``ConceptCandidate`` shape, plus ``kind`` since candidacy is pre-filtered by it."""
+
+    entity_id: str
+    kind: str
     title: str
     description: str
     similarity: float
@@ -137,6 +155,15 @@ class Store:
                 slug       TEXT NOT NULL,
                 data       TEXT NOT NULL,
                 centroid   TEXT NOT NULL
+            );
+            -- Canonicalized entities (Phase D). Same shape as `concepts`, plus a `kind` column
+            -- so candidate lookup can hard-filter by kind without deserializing `data` first.
+            CREATE TABLE IF NOT EXISTS entities (
+                entity_id TEXT PRIMARY KEY,
+                slug      TEXT NOT NULL,
+                kind      TEXT NOT NULL,
+                data      TEXT NOT NULL,
+                centroid  TEXT NOT NULL
             );
             """
         )
@@ -219,6 +246,7 @@ class Store:
             self._conn.execute("DELETE FROM item_vectors_meta WHERE entry_id = ?", (entry_id,))
             cur = self._conn.execute("DELETE FROM entries WHERE entry_id = ?", (entry_id,))
         self.retract_entry_concept_memberships(entry_id)
+        self.retract_entry_entity_memberships(entry_id)
         return file_existed or cur.rowcount > 0
 
     def all_entry_ids(self) -> set[str]:
@@ -584,7 +612,12 @@ class Store:
         return out
 
     def _compute_centroid(self, concept: Concept) -> list[float]:
-        member_keys = {(m.entry_id, m.item_id) for m in concept.members}
+        return self._centroid_from_members(
+            (m.entry_id, m.item_id) for m in concept.members
+        )
+
+    def _centroid_from_members(self, keys) -> list[float]:
+        member_keys = set(keys)
         if not member_keys:
             return []
         vectors = [
@@ -600,6 +633,131 @@ class Store:
             for i, v in enumerate(vec):
                 mean[i] += v
         return [v / len(vectors) for v in mean]
+
+    # ---- Entities (Phase D — canonicalize engine mirrors the Concept shape) -----------
+
+    def save_entity(self, entity: Entity) -> None:
+        """Upsert ``entity``, recomputing its centroid from current member item vectors —
+        the exact ``save_concept`` shape."""
+        centroid = self._centroid_from_members((m.entry_id, m.item_id) for m in entity.members)
+        self._conn.execute(
+            """
+            INSERT INTO entities (entity_id, slug, kind, data, centroid)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(entity_id) DO UPDATE SET
+                slug=excluded.slug,
+                kind=excluded.kind,
+                data=excluded.data,
+                centroid=excluded.centroid
+            """,
+            (
+                entity.entity_id,
+                entity.entity_id,
+                entity.kind,
+                entity.model_dump_json(),
+                json.dumps(centroid),
+            ),
+        )
+        self._conn.commit()
+
+    def load_entity(self, entity_id: str) -> Entity | None:
+        cur = self._conn.execute("SELECT data FROM entities WHERE entity_id = ?", (entity_id,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return Entity.model_validate_json(row["data"])
+
+    def list_entities(self) -> list[Entity]:
+        cur = self._conn.execute("SELECT data FROM entities ORDER BY entity_id")
+        return [Entity.model_validate_json(r["data"]) for r in cur.fetchall()]
+
+    def entity_centroid(self, entity_id: str) -> list[float]:
+        cur = self._conn.execute("SELECT centroid FROM entities WHERE entity_id = ?", (entity_id,))
+        row = cur.fetchone()
+        if row is None or not row["centroid"]:
+            return []
+        return json.loads(row["centroid"])
+
+    def delete_entity(self, entity_id: str) -> bool:
+        with self._conn:
+            cur = self._conn.execute("DELETE FROM entities WHERE entity_id = ?", (entity_id,))
+        return cur.rowcount > 0
+
+    def retract_entry_entity_memberships(self, entry_id: str) -> None:
+        """Remove ``entry_id``'s members from every entity (idempotency + delete cascade) — the
+        exact ``retract_entry_concept_memberships`` shape. An entity that drops to zero members
+        is deleted outright."""
+        for entity in self.list_entities():
+            remaining = [m for m in entity.members if m.entry_id != entry_id]
+            if len(remaining) == len(entity.members):
+                continue
+            if not remaining:
+                self.delete_entity(entity.entity_id)
+                continue
+            entity.members = remaining
+            entity.updated_at = datetime.now(timezone.utc).isoformat()
+            self.save_entity(entity)
+
+    def find_entity_candidates(
+        self,
+        item_vector: list[float],
+        kind: str,
+        mention_name: str,
+        mention_description: str = "",
+        *,
+        exclude_entity_ids: set[str] | None = None,
+    ) -> list[EntityCandidate]:
+        """Deterministic candidate pool for one entity mention — the ``find_concept_candidates``
+        shape, plus a hard ``kind`` pre-filter (an entity mention can only match an existing
+        entity of the same kind — a free, strong signal concepts don't have). Primary signal is
+        still embedding similarity (the covering knowledge item's own vector against each
+        candidate entity's centroid), unioned with a token-overlap backstop over the mention's
+        name/description against each candidate's title/description.
+        """
+        from .query import cosine  # local import: avoids a store<->query circular import
+
+        exclude = exclude_entity_ids or set()
+        sim_floor = float(os.environ.get("DISTIL_ENTITY_SIM_FLOOR", ENTITY_SIM_FLOOR))
+        max_candidates = int(os.environ.get("DISTIL_ENTITY_MAX_CANDIDATES", MAX_ENTITY_CANDIDATES))
+
+        same_kind = [
+            (entity, centroid)
+            for entity, centroid in self._entities_with_centroid()
+            if entity.kind == kind and entity.entity_id not in exclude
+        ]
+        scored = [(entity, cosine(item_vector, centroid)) for entity, centroid in same_kind]
+
+        embed_pool = sorted(
+            (pair for pair in scored if pair[1] >= sim_floor), key=lambda p: p[1], reverse=True
+        )[:_K_EMBED]
+        embed_ids = {e.entity_id for e, _ in embed_pool}
+
+        wanted_tokens = _normalize_tokens(f"{mention_name} {mention_description}")
+        backstop: list[tuple[Entity, float]] = []
+        if wanted_tokens:
+            for entity, sim in scored:
+                if entity.entity_id in embed_ids:
+                    continue
+                tokens = _normalize_tokens(f"{entity.title} {entity.description}")
+                if wanted_tokens & tokens:
+                    backstop.append((entity, sim))
+
+        pool = sorted(embed_pool + backstop, key=lambda p: p[1], reverse=True)[:max_candidates]
+        return [
+            EntityCandidate(
+                entity_id=e.entity_id, kind=e.kind, title=e.title,
+                description=e.description, similarity=sim,
+            )
+            for e, sim in pool
+        ]
+
+    def _entities_with_centroid(self) -> list[tuple[Entity, list[float]]]:
+        cur = self._conn.execute("SELECT data, centroid FROM entities ORDER BY entity_id")
+        out: list[tuple[Entity, list[float]]] = []
+        for r in cur.fetchall():
+            centroid = json.loads(r["centroid"]) if r["centroid"] else []
+            out.append((Entity.model_validate_json(r["data"]), centroid))
+        return out
 
     # ---- rendering / parsing ----------------------------------------------------------
 

@@ -23,11 +23,16 @@ from datetime import datetime, timezone
 
 from . import okf
 from .llm import LLMClient
-from .models import Concept, ConceptMember, KBEntry, KnowledgeItem
+from .models import Concept, ConceptMember, Entity, EntityMember, KBEntry, KnowledgeItem
 from .okf import slugify
-from .prompts.canonicalize import SYSTEM, build_canonicalize_prompt
-from .store import ConceptCandidate, Store
-from .synthesize_concept import synthesize_concept
+from .prompts.canonicalize import (
+    SYSTEM,
+    SYSTEM_ENTITIES,
+    build_canonicalize_prompt,
+    build_entity_canonicalize_prompt,
+)
+from .store import ConceptCandidate, EntityCandidate, Store
+from .synthesize_concept import synthesize_concept, synthesize_entity
 
 _ALLOWED_DECISIONS = {"match", "new", "reject"}
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
@@ -36,6 +41,10 @@ _TITLE_NORM = re.compile(r"[^a-z0-9]+")
 # Per-video synthesis capping (design report §6, Phase 15.2 / T-CANON8). Tunable via env
 # without a code change, mirroring CONCEPT_SIM_FLOOR/MAX_CONCEPT_CANDIDATES in store.py.
 MAX_CONCEPTS_TO_SYNTHESIZE_PER_VIDEO = 5
+
+# Entity per-video synthesis capping (Phase D) — the exact same discipline, kept as its own
+# tunable so entity-heavy videos can't blow the LLM-call budget any more than concept-heavy ones.
+MAX_ENTITIES_TO_SYNTHESIZE_PER_VIDEO = 5
 
 
 def canonicalize_entry(entry: KBEntry, store: Store, client: LLMClient) -> list[Concept]:
@@ -117,7 +126,9 @@ def synthesize_touched_concepts(
         store.save_concept(concept)
 
 
-def run_canonicalize_stage(entry: KBEntry, store: Store, client: LLMClient) -> list[Concept]:
+def run_canonicalize_stage(
+    entry: KBEntry, store: Store, client: LLMClient, *, enable_entities: bool = True
+) -> list[Concept]:
     """Pipeline Stage 8, one clean call (design report §5): canonicalize this entry's items,
     (re-)synthesize the concepts it touched (capped), and keep the OKF ``concepts/`` bundle plus
     this entry's ``sources/<slug>.md`` backlink in sync. This is the one place that talks to
@@ -134,15 +145,30 @@ def run_canonicalize_stage(entry: KBEntry, store: Store, client: LLMClient) -> l
 
     Idempotent: re-filing an unchanged entry retracts and reproduces the same membership (§5),
     so re-running this on the same entry re-renders byte-identical pages rather than drifting.
+
+    Entities (Phase D, ``enable_entities``) get the exact same treatment one level down, still
+    inside this one stage — no new pipeline stage, no new transcript read: this entry's mentions
+    (already extracted alongside its knowledge items) are canonicalized, touched entities are
+    (re-)synthesized (capped), and orphaned/surviving entity pages are kept in sync the same way.
     """
     prior_concept_ids = {
         c.concept_id
         for c in store.list_concepts()
         if any(m.entry_id == entry.entry_id for m in c.members)
     }
+    prior_entity_ids = {
+        e.entity_id
+        for e in store.list_entities()
+        if any(m.entry_id == entry.entry_id for m in e.members)
+    }
 
     touched = canonicalize_entry(entry, store, client)
     synthesize_touched_concepts(entry, touched, store, client)
+
+    touched_entities: list[Entity] = []
+    if enable_entities:
+        touched_entities = canonicalize_entry_entities(entry, store, client)
+        synthesize_touched_entities(entry, touched_entities, store, client)
 
     touched_ids = {c.concept_id for c in touched}
     for concept_id in prior_concept_ids - touched_ids:
@@ -154,6 +180,17 @@ def run_canonicalize_stage(entry: KBEntry, store: Store, client: LLMClient) -> l
 
     for concept in touched:
         okf.export_concept(concept, store, store.okf_root)
+
+    touched_entity_ids = {e.entity_id for e in touched_entities}
+    for entity_id in prior_entity_ids - touched_entity_ids:
+        survivor_entity = store.load_entity(entity_id)
+        if survivor_entity is None:
+            okf.remove_entity(entity_id, store.okf_root)
+        else:
+            okf.export_entity(survivor_entity, store, store.okf_root)
+
+    for entity in touched_entities:
+        okf.export_entity(entity, store, store.okf_root)
 
     okf.render_source_with_concepts(entry, store, store.okf_root)
     return touched
@@ -176,6 +213,9 @@ def run_delete_entry_stage(entry_id: str, store: Store) -> bool:
       ``sources/<slug>.md``'s own ``distil_entry_id`` frontmatter (:func:`okf.find_slug_for_entry_id`),
       the same identity ``okf.slug_for_entry`` already keys off when an entry *is* available.
 
+    Entities (Phase D) get the identical treatment: an orphaned entity page is removed, a
+    surviving entity's page is re-exported so it never keeps a stale backlink.
+
     Slug resolution must happen before ``store.delete_entry`` runs, since that call is what
     removes the ``kb/`` file a normal (non-degraded) slug lookup would otherwise use.
     """
@@ -194,6 +234,9 @@ def run_delete_entry_stage(entry_id: str, store: Store) -> bool:
     prior_concept_ids = {
         c.concept_id for c in store.list_concepts() if any(m.entry_id == entry_id for m in c.members)
     }
+    prior_entity_ids = {
+        e.entity_id for e in store.list_entities() if any(m.entry_id == entry_id for m in e.members)
+    }
 
     deleted = store.delete_entry(entry_id)
 
@@ -206,6 +249,13 @@ def run_delete_entry_stage(entry_id: str, store: Store) -> bool:
             okf.remove_concept(concept_id, store.okf_root)
         else:
             okf.export_concept(survivor, store, store.okf_root)
+
+    for entity_id in prior_entity_ids:
+        survivor_entity = store.load_entity(entity_id)
+        if survivor_entity is None:
+            okf.remove_entity(entity_id, store.okf_root)
+        else:
+            okf.export_entity(survivor_entity, store, store.okf_root)
 
     return deleted
 
@@ -318,10 +368,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _parse_decisions(raw: str, item_ids) -> dict[str, dict]:
+def _parse_decisions(raw: str, valid_ids, *, id_field: str = "item_id") -> dict[str, dict]:
     """Defensively-fenced JSON-array parse, mirroring ``graph._parse_relation`` /
     ``note._parse_object``: strip code fences, regex-recover an array from prose, and never
-    raise on malformed output. Decisions for unknown/duplicate ``item_id``s are dropped."""
+    raise on malformed output. Decisions for unknown/duplicate ids (keyed by ``id_field`` —
+    ``item_id`` for concepts, ``mention_key`` for entities) are dropped."""
     text = raw.strip()
     if text.startswith("```"):
         text = _FENCE.sub("", text).strip()
@@ -336,16 +387,215 @@ def _parse_decisions(raw: str, item_ids) -> dict[str, dict]:
     if not isinstance(data, list):
         data = []
 
-    valid_ids = set(item_ids)
+    valid_ids = set(valid_ids)
     out: dict[str, dict] = {}
     for raw_decision in data:
         if not isinstance(raw_decision, dict):
             continue
-        item_id = raw_decision.get("item_id")
-        if item_id not in valid_ids or item_id in out:
+        ident = raw_decision.get(id_field)
+        if ident not in valid_ids or ident in out:
             continue
         decision = raw_decision.get("decision")
         if decision not in _ALLOWED_DECISIONS:
             decision = "reject"
-        out[item_id] = {**raw_decision, "decision": decision}
+        out[ident] = {**raw_decision, "decision": decision}
     return out
+
+
+# ---- Entities (Phase D — same shape as the Concept functions above, one granularity down) --
+
+
+def canonicalize_entry_entities(entry: KBEntry, store: Store, client: LLMClient) -> list[Entity]:
+    """Decide match/new/reject for every entity mention riding along on ``entry``'s knowledge
+    items, and materialize the result — the exact ``canonicalize_entry`` shape, applied to
+    ``KnowledgeItem.entity_mentions`` instead of the items themselves. No transcript is re-read:
+    mentions were already extracted in the same call as the knowledge items (Phase D).
+
+    Idempotent, same as ``canonicalize_entry``: this entry's existing entity memberships are
+    retracted first.
+    """
+    store.retract_entry_entity_memberships(entry.entry_id)
+
+    mentions = [
+        (item, mention, f"{item.item_id}#{idx}")
+        for item in entry.knowledge_items
+        for idx, mention in enumerate(item.entity_mentions)
+    ]
+    if not mentions:
+        return []
+
+    item_vectors = {
+        item_id: vec for item_id, e_id, vec in store.iter_item_vectors() if e_id == entry.entry_id
+    }
+    candidates_by_key: dict[str, list[EntityCandidate]] = {}
+    for item, mention, key in mentions:
+        vec = item_vectors.get(item.item_id)
+        candidates_by_key[key] = (
+            store.find_entity_candidates(vec, mention.kind, mention.name, mention.description)
+            if vec is not None
+            else []
+        )
+
+    raw = client.complete(
+        build_entity_canonicalize_prompt(
+            entry.source.title, _build_entity_payloads(mentions, candidates_by_key)
+        ),
+        system=SYSTEM_ENTITIES,
+    )
+    decisions = _parse_decisions(
+        raw, {key for _item, _mention, key in mentions}, id_field="mention_key"
+    )
+
+    touched: dict[str, Entity] = {}
+    new_groups: dict[tuple[str, str], dict] = {}
+    for item, mention, key in mentions:
+        decision = decisions.get(key, {"decision": "reject"})
+        kind = decision.get("decision")
+        if kind == "match":
+            _apply_entity_match(entry, item, mention, decision, candidates_by_key[key], store, touched)
+        elif kind == "new":
+            _collect_new_entity(item, mention, decision, new_groups)
+        # "reject" (or anything defaulted to it) produces no record at all.
+
+    for group in new_groups.values():
+        entity = _materialize_new_entity(entry, group, store)
+        touched[entity.entity_id] = entity
+
+    for entity in touched.values():
+        store.save_entity(entity)
+    return list(touched.values())
+
+
+def synthesize_touched_entities(
+    entry: KBEntry, touched: list[Entity], store: Store, client: LLMClient
+) -> None:
+    """Per-video synthesis capping for entities (the exact ``synthesize_touched_concepts``
+    shape): (re-)synthesizes at most ``MAX_ENTITIES_TO_SYNTHESIZE_PER_VIDEO`` (env override
+    ``DISTIL_ENTITIES_SYNTH_PER_VIDEO``) of ``touched``, highest-similarity-first; any excess is
+    marked ``pending_synthesis=True`` for a later catch-up pass.
+    """
+    if not touched:
+        return
+    cap = int(
+        os.environ.get("DISTIL_ENTITIES_SYNTH_PER_VIDEO", MAX_ENTITIES_TO_SYNTHESIZE_PER_VIDEO)
+    )
+    ranked = _rank_entities_by_similarity(entry, touched, store)
+    for entity in ranked[:cap]:
+        store.save_entity(synthesize_entity(entity, store, client))
+    for entity in ranked[cap:]:
+        entity.pending_synthesis = True
+        entity.updated_at = _now()
+        store.save_entity(entity)
+
+
+def _rank_entities_by_similarity(entry: KBEntry, touched: list[Entity], store: Store) -> list[Entity]:
+    """``touched``, highest-similarity-to-this-video's-items first — the exact
+    ``_rank_by_similarity`` shape."""
+    from .query import cosine  # local import: avoids a canonicalize<->query circular import
+
+    item_vectors = [vec for _iid, e_id, vec in store.iter_item_vectors() if e_id == entry.entry_id]
+    if not item_vectors:
+        return list(touched)
+
+    def score(entity: Entity) -> float:
+        centroid = store.entity_centroid(entity.entity_id)
+        if not centroid:
+            return 0.0
+        return max(cosine(vec, centroid) for vec in item_vectors)
+
+    return sorted(touched, key=score, reverse=True)
+
+
+def _build_entity_payloads(
+    mentions: list[tuple[KnowledgeItem, object, str]],
+    candidates_by_key: dict[str, list[EntityCandidate]],
+) -> list[dict]:
+    return [
+        {
+            "mention_key": key,
+            "name": mention.name,
+            "kind": mention.kind,
+            "description": mention.description,
+            "quote": mention.quote,
+            "candidates": [
+                {"entity_id": c.entity_id, "title": c.title, "description": c.description}
+                for c in candidates_by_key[key]
+            ],
+        }
+        for _item, mention, key in mentions
+    ]
+
+
+def _apply_entity_match(
+    entry: KBEntry,
+    item: KnowledgeItem,
+    mention,
+    decision: dict,
+    candidates: list[EntityCandidate],
+    store: Store,
+    touched: dict[str, Entity],
+) -> None:
+    entity_id = str(decision.get("entity_id", ""))
+    offered = {c.entity_id for c in candidates}
+    if entity_id not in offered:
+        return  # untrusted entity_id: no honest signal either way, so treat as reject
+    entity = touched.get(entity_id)
+    if entity is None:
+        entity = store.load_entity(entity_id)
+        if entity is None:
+            return
+    entity.members.append(_entity_member(entry, item, mention))
+    entity.updated_at = _now()
+    touched[entity_id] = entity
+
+
+def _collect_new_entity(
+    item: KnowledgeItem, mention, decision: dict, new_groups: dict[tuple[str, str], dict]
+) -> None:
+    title = str(decision.get("title", "")).strip() or mention.name.strip()
+    if not title:
+        return  # nothing to slug
+    key = (mention.kind, _normalize_title(title))
+    group = new_groups.setdefault(
+        key,
+        {
+            "kind": mention.kind,
+            "title": title,
+            "description": str(decision.get("description", "")).strip() or mention.description,
+            "mentions": [],
+        },
+    )
+    group["mentions"].append((item, mention))
+
+
+def _materialize_new_entity(entry: KBEntry, group: dict, store: Store) -> Entity:
+    entity_id = _slug_for_entity(group["title"], store)
+    now = _now()
+    return Entity(
+        entity_id=entity_id,
+        kind=group["kind"],
+        title=group["title"],
+        description=group["description"],
+        members=[_entity_member(entry, item, mention) for item, mention in group["mentions"]],
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _entity_member(entry: KBEntry, item: KnowledgeItem, mention) -> EntityMember:
+    return EntityMember(
+        entry_id=entry.entry_id,
+        item_id=item.item_id,
+        quote=mention.quote,
+        timestamp=mention.timestamp,
+    )
+
+
+def _slug_for_entity(title: str, store: Store) -> str:
+    base = slugify(title) or "entity"
+    if store.load_entity(base) is None:
+        return base
+    suffix = 2
+    while store.load_entity(f"{base}-{suffix}") is not None:
+        suffix += 1
+    return f"{base}-{suffix}"
