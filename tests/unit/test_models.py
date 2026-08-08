@@ -8,6 +8,10 @@ from distil.models import (
     Concept,
     ConceptClaim,
     ConceptMember,
+    Entity,
+    EntityClaim,
+    EntityMember,
+    EntityMention,
     Feedback,
     KBEntry,
     KnowledgeItem,
@@ -281,3 +285,100 @@ def test_concept_has_claims_and_pending_synthesis_fields():
     )
     assert concept.claims[0].text == "Retrieve then generate."
     assert concept.pending_synthesis is False
+
+
+# ---- Entity / EntityMember / EntityMention (Phase D — entities layer) --------------------
+
+
+@pytest.mark.unit
+def test_entity_kind_enum_enforced():
+    with pytest.raises(ValidationError):
+        EntityMention(name="React", kind="framework", quote="q")
+
+
+@pytest.mark.unit
+def test_entity_mention_valid_kinds_accepted():
+    for kind in ("tool", "person", "organization"):
+        mention = EntityMention(name="X", kind=kind, quote="q")
+        assert mention.kind == kind
+
+
+@pytest.mark.unit
+def test_knowledge_item_entity_mentions_default_empty():
+    item = KnowledgeItem(
+        item_id="k_01", type="conceptual", statement="s", stance="fact",
+        provenance=Provenance(quote="q"),
+    )
+    assert item.entity_mentions == []
+
+
+@pytest.mark.unit
+def test_knowledge_item_carries_entity_mentions():
+    item = KnowledgeItem(
+        item_id="k_01", type="conceptual", statement="s", stance="fact",
+        provenance=Provenance(quote="q"),
+        entity_mentions=[EntityMention(name="React", kind="tool", quote="react")],
+    )
+    assert item.entity_mentions[0].name == "React"
+
+
+@pytest.mark.unit
+def test_entity_member_requires_quote():
+    with pytest.raises(ValidationError):
+        EntityMember(entry_id="e_01", item_id="k_01")
+
+
+@pytest.mark.unit
+def test_entity_member_timestamp_optional():
+    member = EntityMember(entry_id="e_01", item_id="k_01", quote="q")
+    assert member.timestamp is None
+
+
+@pytest.mark.unit
+def test_entity_round_trip_lossless():
+    entity = Entity(
+        entity_id="react",
+        kind="tool",
+        title="React",
+        description="A JS UI library.",
+        members=[EntityMember(entry_id="e_01", item_id="k_01", quote="q", timestamp="00:01:00")],
+        created_at="2026-06-15T00:00:00",
+        updated_at="2026-06-15T00:00:00",
+    )
+    restored = Entity.model_validate_json(entity.model_dump_json())
+    assert restored == entity
+
+
+@pytest.mark.unit
+def test_entity_kind_enum_enforced_at_entity_level():
+    with pytest.raises(ValidationError):
+        Entity(
+            entity_id="react", kind="framework", title="React", description="d",
+            created_at="t", updated_at="t",
+        )
+
+
+@pytest.mark.unit
+def test_entity_claim_validates_like_concept_claim():
+    claim = EntityClaim(text="React uses a virtual DOM.", item_ids=["k_01"])
+    assert claim.text == "React uses a virtual DOM."
+    assert claim.item_ids == ["k_01"]
+
+
+@pytest.mark.unit
+def test_entity_claim_item_ids_default_empty():
+    assert EntityClaim(text="x").item_ids == []
+
+
+@pytest.mark.unit
+def test_entity_has_claims_and_pending_synthesis_fields():
+    assert "claims" in Entity.model_fields
+    assert "pending_synthesis" in Entity.model_fields
+    entity = Entity(
+        entity_id="react", kind="tool", title="React", description="d",
+        members=[EntityMember(entry_id="e_01", item_id="k_01", quote="q")],
+        claims=[EntityClaim(text="React uses a virtual DOM.", item_ids=["k_01"])],
+        created_at="2026-06-15T00:00:00", updated_at="2026-06-15T00:00:00",
+    )
+    assert entity.claims[0].text == "React uses a virtual DOM."
+    assert entity.pending_synthesis is False

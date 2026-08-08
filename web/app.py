@@ -460,6 +460,62 @@ def _concepts_for_entry(store: Store, entry_id: str) -> list[dict]:
     ]
 
 
+def _entity_detail_context(store: Store, entity) -> dict:
+    """Template context for an entity detail page — the exact ``_concept_detail_context``
+    shape, one granularity down (Phase D), minus typed edges (entities have none)."""
+    member_entries: dict[str, object] = {}
+    for member in entity.members:
+        if member.entry_id in member_entries:
+            continue
+        try:
+            member_entries[member.entry_id] = store.load_entry(member.entry_id)
+        except Exception:
+            continue
+
+    members_by_item = {m.item_id: m for m in entity.members}
+    claims = []
+    for claim in entity.claims:
+        citations = []
+        for item_id in claim.item_ids:
+            member = members_by_item.get(item_id)
+            if member is None:
+                continue
+            entry = member_entries.get(member.entry_id)
+            citations.append({
+                "entry_id": member.entry_id,
+                "entry_title": entry.source.title if entry is not None else member.entry_id,
+                "item_id": item_id,
+                "timestamp": member.timestamp,
+            })
+        claims.append({"text": claim.text, "citations": citations})
+
+    sources = []
+    seen_entries: set[str] = set()
+    for member in entity.members:
+        if member.entry_id in seen_entries:
+            continue
+        seen_entries.add(member.entry_id)
+        entry = member_entries.get(member.entry_id)
+        if entry is None:
+            continue
+        sources.append({
+            "entry_id": member.entry_id,
+            "title": entry.source.title,
+            "quote": member.quote,
+            "timestamp": member.timestamp,
+        })
+
+    return {"entity": entity, "claims": claims, "sources": sources}
+
+
+def _entities_for_entry(store: Store, entry_id: str) -> list[dict]:
+    return [
+        {"entity_id": e.entity_id, "title": e.title}
+        for e in store.list_entities()
+        if any(m.entry_id == entry_id for m in e.members)
+    ]
+
+
 class _ZipChunkBuffer(io.RawIOBase):
     """A write-only, non-seekable buffer ``zipfile.ZipFile`` can write into; ``get()`` drains
     whatever has accumulated so a caller can yield it as one chunk of a streamed response,
@@ -570,6 +626,19 @@ def create_app() -> FastAPI:
         ]
         return {"concepts": concepts, "concept_count": len(concepts)}
 
+    def _entities_template_context() -> dict:
+        entities = [
+            {
+                "entity_id": e.entity_id,
+                "kind": e.kind,
+                "title": e.title,
+                "description": e.description,
+                "video_count": len({m.entry_id for m in e.members}),
+            }
+            for e in _store().list_entities()
+        ]
+        return {"entities": entities, "entity_count": len(entities)}
+
     # ---- home / ask ----
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
@@ -603,6 +672,25 @@ def create_app() -> FastAPI:
         return _TEMPLATES.TemplateResponse(
             request, "concept.html",
             {**_concept_detail_context(store, concept), "active_page": "concepts"},
+        )
+
+    # ---- entities ----
+    @app.get("/entities", response_class=HTMLResponse)
+    def entities_list(request: Request):
+        return _TEMPLATES.TemplateResponse(
+            request, "entities.html",
+            {**_entities_template_context(), "active_page": "entities"},
+        )
+
+    @app.get("/entities/{entity_id}", response_class=HTMLResponse)
+    def entity_page(request: Request, entity_id: str):
+        store = _store()
+        entity = store.load_entity(entity_id)
+        if entity is None:
+            return HTMLResponse("<p>Entity not found.</p>", status_code=404)
+        return _TEMPLATES.TemplateResponse(
+            request, "entity.html",
+            {**_entity_detail_context(store, entity), "active_page": "entities"},
         )
 
     # ---- ingest (non-blocking) ----
@@ -692,6 +780,7 @@ def create_app() -> FastAPI:
             {"e": e, "mix": mix,
              "has_transcript": has_transcript,
              "concepts_for_entry": _concepts_for_entry(store, entry_id),
+             "entities_for_entry": _entities_for_entry(store, entry_id),
              "reasons": ["relevant", "already_knew", "bad_source", "wrong_for_me",
                          "irrelevant_now"],
              "active_page": "library",

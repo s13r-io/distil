@@ -136,6 +136,23 @@ class Provenance(_Model):
     locator: str | None = None
 
 
+EntityKind = Literal["tool", "person", "organization"]
+
+
+class EntityMention(_Model):
+    """One named tool/person/organization mentioned in the same sentence a knowledge item was
+    extracted from (Phase D). Rides along on the ``KnowledgeItem`` it was extracted alongside —
+    the same extraction call, not a second transcript pass. ``kind`` is a THIRD, separate closed
+    vocabulary from ``KnowledgeType``/``Stance`` — never conflate them (see prompts/extract.py).
+    ``quote`` is the same short verbatim faithfulness anchor ``Provenance.quote`` enforces."""
+
+    name: str
+    kind: EntityKind
+    description: str = ""
+    quote: str
+    timestamp: str | None = None
+
+
 class KnowledgeItem(_Model):
     item_id: str
     type: KnowledgeType
@@ -148,6 +165,7 @@ class KnowledgeItem(_Model):
     stance: Stance
     speaker_confidence: Confidence = "medium"
     provenance: Provenance
+    entity_mentions: list[EntityMention] = Field(default_factory=list)
 
 
 class ApplicationLink(_Model):
@@ -271,6 +289,45 @@ class Concept(_Model):
     members: list[ConceptMember] = Field(default_factory=list)
     claims: list[ConceptClaim] = Field(default_factory=list)
     edges: list[ConceptEdge] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+    body_model_version: str = ""
+    pending_synthesis: bool = False
+
+
+# ---- Entity (Phase D — entities layer; canonicalize.py mirrors the Concept shape) -------
+
+
+class EntityMember(_Model):
+    """One knowledge item's mention of an entity, copied at match/new-creation time — the exact
+    shape of ``ConceptMember`` (design intentionally reused, see canonicalize.py)."""
+
+    entry_id: str
+    item_id: str
+    quote: str
+    timestamp: str | None = None
+
+
+class EntityClaim(_Model):
+    """A synthesized sentence/paragraph about an entity and the members it's grounded in — same
+    shape as ``ConceptClaim``, reused at entity scope."""
+
+    text: str
+    item_ids: list[str] = Field(default_factory=list)
+
+
+class Entity(_Model):
+    """A canonical tool/person/organization spanning one or more videos. ``entity_id`` == the
+    slug (OKF's "path is identity"), mirroring ``Concept``. ``kind`` is fixed at creation from
+    the first mention's ``EntityMention.kind`` and never changes — canonicalize only merges
+    mentions of the same ``kind`` into an existing entity (see ``Store.find_entity_candidates``)."""
+
+    entity_id: str
+    kind: EntityKind
+    title: str
+    description: str
+    members: list[EntityMember] = Field(default_factory=list)
+    claims: list[EntityClaim] = Field(default_factory=list)
     created_at: str
     updated_at: str
     body_model_version: str = ""

@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from .embed import Embedder
 from .llm import LLMClient
-from .models import ConceptClaim
+from .models import ConceptClaim, EntityClaim
 from .prompts.synthesize import SYSTEM, build_synthesis_prompt
 from .store import Store
 
@@ -69,6 +69,16 @@ class RetrievedConcept:
     description: str
     similarity: float
     claims: list[ConceptClaim] = field(default_factory=list)
+
+
+@dataclass
+class RetrievedEntity:
+    entity_id: str
+    kind: str
+    title: str
+    description: str
+    similarity: float
+    claims: list[EntityClaim] = field(default_factory=list)
 
 
 @dataclass
@@ -164,6 +174,35 @@ def retrieve_concepts(
     return scored[:top_k]
 
 
+def retrieve_entities(
+    question: str, store: Store, embedder: Embedder, *, top_k: int = 3
+) -> list[RetrievedEntity]:
+    """Rank synthesized OKF entity pages against ``question`` — the exact ``retrieve_concepts``
+    shape, one granularity down (Phase D). Entities are a *consumer* of the item-level retrieval
+    substrate, never a replacement for it, same as concepts. No backfill means an older entry
+    contributes no entities and simply never appears here — this degrades gracefully, it is not
+    an error.
+    """
+    qvec = embedder.embed(question)
+    vectors_by_key = {
+        (entry_id, item_id): vec for item_id, entry_id, vec in store.iter_item_vectors()
+    }
+    scored: list[RetrievedEntity] = []
+    for entity in store.list_entities():
+        centroid = store.entity_centroid(entity.entity_id)
+        sim = cosine(qvec, centroid) if centroid else 0.0
+        for member in entity.members:
+            vec = vectors_by_key.get((member.entry_id, member.item_id))
+            if vec is not None:
+                sim = max(sim, cosine(qvec, vec))
+        scored.append(RetrievedEntity(
+            entity_id=entity.entity_id, kind=entity.kind, title=entity.title,
+            description=entity.description, similarity=sim, claims=entity.claims,
+        ))
+    scored.sort(key=lambda e: e.similarity, reverse=True)
+    return scored[:top_k]
+
+
 def ask(
     question: str,
     store: Store,
@@ -173,17 +212,21 @@ def ask(
     threshold: float = 0.35,
     top_k: int = 6,
     concept_top_k: int = 3,
+    entity_top_k: int = 3,
     lookup_only: bool = False,
     concept_note_depth: str | None = None,
 ) -> AskResult:
     results = retrieve(question, store, embedder, top_k=top_k)
     concepts = retrieve_concepts(question, store, embedder, top_k=concept_top_k)
+    entities = retrieve_entities(question, store, embedder, top_k=entity_top_k)
 
-    # ---- THE GATE: abstain unless an item OR a concept clears the SAME threshold, with ZERO
-    # synthesis calls either way. Concepts never get a lower bar than raw items (Phase 18).
+    # ---- THE GATE: abstain unless an item, a concept, OR an entity clears the SAME threshold,
+    # with ZERO synthesis calls either way. Entities never get a lower bar than raw items or
+    # concepts (Phase D mirrors Phase 18's rule exactly).
     cleared = [r for r in results if r.similarity >= threshold]
     cleared_concepts = [c for c in concepts if c.similarity >= threshold]
-    if not cleared and not cleared_concepts:
+    cleared_entities = [e for e in entities if e.similarity >= threshold]
+    if not cleared and not cleared_concepts and not cleared_entities:
         return AskResult(
             abstained=True,
             message="No relevant notes found. Distil answers only from your knowledge base, "
@@ -194,10 +237,13 @@ def ask(
     # for free from the gate above, no extra retrieval or model call.
     concept_refs = [ConceptRef(c.concept_id, c.title) for c in cleared_concepts]
 
-    # Blend in each cleared concept's member items — findable by the concept even when raw
-    # per-item similarity alone would have missed them (design report §9 item 6).
+    # Blend in each cleared concept's/entity's member items — findable even when raw per-item
+    # similarity alone would have missed them (design report §9 item 6; Phase D mirrors it).
     all_items = cleared + _recruit_concept_members(
         cleared_concepts, store, exclude={r.item_id for r in cleared}
+    )
+    all_items += _recruit_entity_members(
+        cleared_entities, store, exclude={r.item_id for r in all_items}
     )
     sources = [
         Source(r.item_id, r.entry_id, r.quote, r.timestamp, r.entry_title) for r in all_items
@@ -207,8 +253,8 @@ def ask(
     if lookup_only:
         return AskResult(abstained=False, sources=sources, concepts=concept_refs)
 
-    # Grounded synthesis over the cleared items plus any synthesized concept prose — the prose
-    # is already grounded (every ConceptClaim.item_ids resolves to a real member, T-SYN2), so
+    # Grounded synthesis over the cleared items plus any synthesized concept/entity prose — the
+    # prose is already grounded (every claim's item_ids resolve to a real member, T-SYN2), so
     # citing it is exactly as trustworthy as citing a directly-retrieved item.
     notes_block = _render_notes(all_items)
     concepts_block = _render_concept_notes(
@@ -216,6 +262,9 @@ def ask(
     )
     if concepts_block:
         notes_block = f"{notes_block}\n\n{concepts_block}" if notes_block else concepts_block
+    entities_block = _render_entity_notes(cleared_entities)
+    if entities_block:
+        notes_block = f"{notes_block}\n\n{entities_block}" if notes_block else entities_block
     raw = client.complete(build_synthesis_prompt(question, notes_block), system=SYSTEM)
     answer, cited, conflict = _parse_synthesis(raw)
 
@@ -257,6 +306,7 @@ def stream_ask(
     threshold: float = 0.35,
     top_k: int = 6,
     concept_top_k: int = 3,
+    entity_top_k: int = 3,
     concept_note_depth: str | None = None,
 ):
     """Streaming sibling of :func:`ask` (WEB_UI_SPEC §9).
@@ -274,9 +324,11 @@ def stream_ask(
     """
     results = retrieve(question, store, embedder, top_k=top_k)
     concepts = retrieve_concepts(question, store, embedder, top_k=concept_top_k)
+    entities = retrieve_entities(question, store, embedder, top_k=entity_top_k)
     cleared = [r for r in results if r.similarity >= threshold]
     cleared_concepts = [c for c in concepts if c.similarity >= threshold]
-    if not cleared and not cleared_concepts:
+    cleared_entities = [e for e in entities if e.similarity >= threshold]
+    if not cleared and not cleared_concepts and not cleared_entities:
         abstain = AskResult(
             abstained=True,
             message="No relevant notes found. Distil answers only from your knowledge base, "
@@ -290,6 +342,9 @@ def stream_ask(
     all_items = cleared + _recruit_concept_members(
         cleared_concepts, store, exclude={r.item_id for r in cleared}
     )
+    all_items += _recruit_entity_members(
+        cleared_entities, store, exclude={r.item_id for r in all_items}
+    )
     sources = [
         Source(r.item_id, r.entry_id, r.quote, r.timestamp, r.entry_title) for r in all_items
     ]
@@ -299,6 +354,9 @@ def stream_ask(
     )
     if concepts_block:
         notes_block = f"{notes_block}\n\n{concepts_block}" if notes_block else concepts_block
+    entities_block = _render_entity_notes(cleared_entities)
+    if entities_block:
+        notes_block = f"{notes_block}\n\n{entities_block}" if notes_block else entities_block
     prompt = build_synthesis_prompt(question, notes_block)
 
     chunks: list[str] = []
@@ -413,6 +471,52 @@ def _resolve_concept_note_depth(override: str | None) -> str:
     depth = (override or os.environ.get("DISTIL_CONCEPT_NOTE_DEPTH", CONCEPT_NOTE_DEPTH_DEFAULT))
     depth = depth.strip().lower()
     return depth if depth in _CONCEPT_NOTE_DEPTHS else CONCEPT_NOTE_DEPTH_DEFAULT
+
+
+def _recruit_entity_members(
+    entities: list[RetrievedEntity], store: Store, *, exclude: set[str]
+) -> list[RetrievedItem]:
+    """Pull each cleared entity's member items into the evidence pool — the exact
+    ``_recruit_concept_members`` shape, one granularity down (Phase D)."""
+    if not entities:
+        return []
+    entry_meta = {r.entry_id: r for r in store.list_entries()}
+    seen = set(exclude)
+    out: list[RetrievedItem] = []
+    for entity in entities:
+        full = store.load_entity(entity.entity_id)
+        if full is None:
+            continue
+        for member in full.members:
+            if member.item_id in seen:
+                continue
+            seen.add(member.item_id)
+            loaded = _load_item(store, member.entry_id, member.item_id)
+            if loaded is None:
+                continue
+            item, context = loaded
+            meta = entry_meta.get(member.entry_id)
+            out.append(RetrievedItem(
+                item_id=member.item_id, entry_id=member.entry_id, statement=item.statement,
+                quote=item.provenance.quote, timestamp=item.provenance.timestamp,
+                similarity=entity.similarity, score=entity.similarity,
+                entry_title=meta.title if meta else member.entry_id, context=context,
+            ))
+    return out
+
+
+def _render_entity_notes(entities: list[RetrievedEntity]) -> str:
+    """Pre-synthesized entity-page prose as extra evidence — the exact ``_render_concept_notes``
+    shape, one granularity down (Phase D)."""
+    lines: list[str] = []
+    for e in entities:
+        if not e.claims:
+            continue
+        lines.append(f'Entity "{e.title}" ({e.kind}): {e.description}')
+        for claim in e.claims:
+            markers = "".join(f"[{item_id}]" for item_id in claim.item_ids)
+            lines.append(f"  {claim.text} {markers}".rstrip())
+    return "\n".join(lines)
 
 
 def _render_concept_notes(

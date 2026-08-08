@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Entities - Distil{% endblock %}
+{% block content %}
+
+<header class="hero-strip">
+  <div>
+    <h1>Entities</h1>
+    <p>Tools, people, and organizations named across the videos you've saved.</p>
+  </div>
+  <div class="row wrap" style="gap:10px;">
+    <span class="badge info" id="entity-count">{{ entity_count }} entit{{ 'y' if entity_count == 1 else 'ies' }}</span>
+    <a class="btn" href="/bundle.zip">Download bundle</a>
+  </div>
+</header>
+
+<main class="library-page">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>All entities</h2>
+      <span class="muted" id="entity-showing"></span>
+    </div>
+
+    <div class="library-tools">
+      <div class="search">
+        <input type="search" id="search" placeholder="Filter by title or description">
+      </div>
+      <select id="kind-filter" aria-label="Filter by kind">
+        <option value="">All kinds</option>
+        <option value="tool">Tool</option>
+        <option value="person">Person</option>
+        <option value="organization">Organization</option>
+      </select>
+      <select id="sort" aria-label="Sort entities">
+        <option value="videos">Most videos first</option>
+        <option value="alpha">Alphabetical</option>
+      </select>
+      <a href="#" id="clear-filters" class="btn hide">Clear</a>
+    </div>
+
+    <div id="entity-list" class="library-list"></div>
+    <div class="empty" id="entity-empty">
+      <p id="entity-empty-title" style="margin:0 0 4px;">No entities yet</p>
+      <p class="muted" id="entity-empty-copy" style="margin:0;">Entities are synthesized automatically from newly added videos.</p>
+    </div>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script id="entity-data" type="application/json">{{ entities|tojson }}</script>
+<script>
+const ENTITIES = JSON.parse(document.getElementById('entity-data').textContent);
+function esc(s){const d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML;}
+function matches(e){
+  const term=document.getElementById('search').value.trim().toLowerCase();
+  const kind=document.getElementById('kind-filter').value;
+  if(kind && e.kind!==kind) return false;
+  if(!term) return true;
+  return (e.title+' '+e.description).toLowerCase().includes(term);
+}
+function renderEntities(){
+  const sort=document.getElementById('sort').value;
+  let list=ENTITIES.filter(matches);
+  list.sort((a,b)=>{
+    if(sort==='alpha') return a.title.localeCompare(b.title);
+    return b.video_count-a.video_count || a.title.localeCompare(b.title);
+  });
+  document.getElementById('entity-list').innerHTML=list.map(e=>{
+    return '<a class="entryrow" href="/entities/'+encodeURIComponent(e.entity_id)+'">'
+      +'<div class="top"><span class="entry-title">'+esc(e.title)+'</span>'
+      +'<span class="badge">'+esc(e.kind)+'</span>'
+      +'<span class="badge">'+e.video_count+' video'+(e.video_count===1?'':'s')+'</span></div>'
+      +'<div class="meta-line"><span class="muted">'+esc(e.description)+'</span></div></a>';
+  }).join('');
+  const hasFilter=document.getElementById('search').value.trim().length>0 || document.getElementById('kind-filter').value.length>0;
+  document.getElementById('entity-showing').textContent = hasFilter ? ('showing '+list.length+' of '+ENTITIES.length) : '';
+  document.getElementById('clear-filters').classList.toggle('hide', !hasFilter);
+  const empty=document.getElementById('entity-empty');
+  empty.classList.toggle('hide', list.length>0);
+  if(list.length===0 && ENTITIES.length>0){
+    document.getElementById('entity-empty-title').textContent='No matching entities';
+    document.getElementById('entity-empty-copy').textContent='Clear the filter to see all entities.';
+  } else {
+    document.getElementById('entity-empty-title').textContent='No entities yet';
+    document.getElementById('entity-empty-copy').textContent='Entities are synthesized automatically from newly added videos.';
+  }
+}
+document.getElementById('sort').onchange=renderEntities;
+document.getElementById('search').oninput=renderEntities;
+document.getElementById('kind-filter').onchange=renderEntities;
+document.getElementById('clear-filters').onclick=e=>{e.preventDefault();document.getElementById('search').value='';document.getElementById('kind-filter').value='';renderEntities();};
+renderEntities();
+</script>
+{% endblock %}

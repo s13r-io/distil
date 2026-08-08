@@ -46,3 +46,42 @@ def build_canonicalize_prompt(source_title: str, item_payloads: list[dict]) -> s
         source_title=source_title,
         items_block=json.dumps(item_payloads, ensure_ascii=False, indent=2),
     )
+
+
+# ---- Entity match/new/reject (Phase D — reuses this exact shape one granularity down) -----
+
+SYSTEM_ENTITIES = (
+    "You decide whether each mentioned entity (a tool, person, or organization) is the same "
+    "real-world thing as an existing entity, a brand-new entity, or not worth keeping. Use ONLY "
+    "the candidates provided for each mention — never invent an entity_id that isn't listed. "
+    "The entity's kind (tool/person/organization) is already fixed and is not yours to decide. "
+    "Respond with a single JSON array and nothing else."
+)
+
+_ENTITY_TEMPLATE = """\
+VIDEO: {source_title}
+
+MENTIONS AND THEIR CANDIDATE ENTITIES:
+{mentions_block}
+
+For each mention, return exactly one decision:
+- {{"mention_key": "...", "decision": "match", "entity_id": "<one of its listed candidates>"}}
+- {{"mention_key": "...", "decision": "new", "title": "<canonical display name>", "description": "<one sentence>"}}
+- {{"mention_key": "...", "decision": "reject"}}
+
+Rules:
+- "match" only to an entity_id that was listed as a candidate for that mention.
+- "new" only when no candidate is really the same tool/person/organization.
+- "reject" for a mention that's too vague or generic to be worth keeping as its own page.
+Return a JSON array with exactly one decision object per mention_key, in the order given.
+"""
+
+
+def build_entity_canonicalize_prompt(source_title: str, mention_payloads: list[dict]) -> str:
+    """``mention_payloads``: one dict per entity mention with ``mention_key``, ``name``,
+    ``kind``, ``description``, ``quote``, and a ``candidates`` list of
+    ``{entity_id, title, description}`` (already pre-filtered to the same ``kind``)."""
+    return _ENTITY_TEMPLATE.format(
+        source_title=source_title,
+        mentions_block=json.dumps(mention_payloads, ensure_ascii=False, indent=2),
+    )

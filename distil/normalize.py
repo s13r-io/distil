@@ -66,3 +66,8 @@ def _merge_into(target: KnowledgeItem, dup: KnowledgeItem) -> None:
     for g in dup.gotchas:
         if g not in target.gotchas:
             target.gotchas.append(g)
+    for mention in dup.entity_mentions:
+        if not any(
+            m.name == mention.name and m.kind == mention.kind for m in target.entity_mentions
+        ):
+            target.entity_mentions.append(mention)

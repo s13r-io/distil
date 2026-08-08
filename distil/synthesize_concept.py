@@ -21,8 +21,13 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from .llm import LLMClient
-from .models import Concept, ConceptClaim
-from .prompts.synthesize_concept import SYSTEM, build_synthesize_prompt
+from .models import Concept, ConceptClaim, Entity, EntityClaim
+from .prompts.synthesize_concept import (
+    SYSTEM,
+    SYSTEM_ENTITY,
+    build_synthesize_entity_prompt,
+    build_synthesize_prompt,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - avoids a store<->okf<->synthesize_concept import cycle
     from .store import Store
@@ -66,11 +71,51 @@ def synthesize_concept(concept: Concept, store: Store, client: LLMClient) -> Con
     return concept
 
 
-def render_claim(claim: ConceptClaim, citations: dict[str, tuple[str, str | None]]) -> str:
+def synthesize_entity(entity: Entity, store: Store, client: LLMClient) -> Entity:
+    """(Re-)synthesize ``entity.claims`` from its current ``members`` — the exact
+    ``synthesize_concept`` shape and fallback discipline, reusing the same private helpers
+    (``_load_member_statements``/``_build_member_payload``/``_clean_claims``/etc.) since
+    ``EntityMember`` carries the same ``entry_id``/``item_id`` identity ``ConceptMember`` does.
+    Never raises: malformed/empty model output falls back to a deterministic one-liner."""
+    member_statements = _load_member_statements(entity, store)
+    valid_item_ids = {member.item_id for member in entity.members}
+
+    claims: list[EntityClaim] = []
+    if entity.members:
+        try:
+            payload = _build_member_payload(entity, member_statements)
+            raw = client.complete(
+                build_synthesize_entity_prompt(entity.title, entity.description, payload),
+                system=SYSTEM_ENTITY,
+            )
+            claims = [
+                EntityClaim(text=c.text, item_ids=c.item_ids)
+                for c in _clean_claims(_parse_claims_json(raw), valid_item_ids)
+            ]
+        except Exception:
+            claims = []
+
+    if not claims:
+        claims = [
+            EntityClaim(text=c.text, item_ids=c.item_ids)
+            for c in _fallback_claims(entity, member_statements)
+        ]
+
+    entity.claims = claims
+    entity.body_model_version = _model_version(client)
+    entity.pending_synthesis = False
+    entity.updated_at = _now()
+    return entity
+
+
+def render_claim(
+    claim: ConceptClaim | EntityClaim, citations: dict[str, tuple[str, str | None]]
+) -> str:
     """Render one cleaned claim's prose with a citation appended by CODE, never by the model
     (design report §4 step 4). ``citations`` maps ``item_id`` -> ``(okf_slug, timestamp)``,
     resolved by the caller from verified member/entry data. Multiple ``item_ids`` render as
-    multiple citations in one trailing parenthetical, comma-separated."""
+    multiple citations in one trailing parenthetical, comma-separated. Works identically for a
+    ``ConceptClaim`` or an ``EntityClaim`` — both share the same ``{text, item_ids}`` shape."""
     parts: list[str] = []
     for item_id in claim.item_ids:
         resolved = citations.get(item_id)
@@ -83,7 +128,7 @@ def render_claim(claim: ConceptClaim, citations: dict[str, tuple[str, str | None
     return f"{claim.text} ({', '.join(parts)})."
 
 
-def _load_member_items(concept: Concept, store: Store) -> dict[str, Any]:
+def _load_member_items(concept: Concept | Entity, store: Store) -> dict[str, Any]:
     """``item_id`` -> the real ``KnowledgeItem`` for every member whose owning entry still
     resolves. ``ConceptMember`` doesn't carry the full item (only ``quote``/``timestamp``,
     copied at match time), so it's looked up from the owning ``KBEntry`` via
@@ -109,7 +154,7 @@ def _load_member_items(concept: Concept, store: Store) -> dict[str, Any]:
     return items
 
 
-def _load_member_statements(concept: Concept, store: Store) -> dict[str, str]:
+def _load_member_statements(concept: Concept | Entity, store: Store) -> dict[str, str]:
     return {item_id: item.statement for item_id, item in _load_member_items(concept, store).items()}
 
 
@@ -143,7 +188,7 @@ def find_claim_contradictions(
 _MISSING = object()
 
 
-def _build_member_payload(concept: Concept, statements: dict[str, str]) -> list[dict]:
+def _build_member_payload(concept: Concept | Entity, statements: dict[str, str]) -> list[dict]:
     return [
         {
             "item_id": member.item_id,
@@ -200,7 +245,7 @@ def _clean_claims(raw_claims: list[Any], valid_item_ids: set[str]) -> list[Conce
     return cleaned
 
 
-def _fallback_claims(concept: Concept, statements: dict[str, str]) -> list[ConceptClaim]:
+def _fallback_claims(concept: Concept | Entity, statements: dict[str, str]) -> list[ConceptClaim]:
     item_ids = [member.item_id for member in concept.members if member.item_id in statements]
     parts = [concept.description.strip()] if concept.description.strip() else []
     parts.extend(statements[item_id].strip() for item_id in item_ids if statements[item_id].strip())

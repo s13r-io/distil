@@ -245,6 +245,17 @@
     </section>
     {% endif %}
 
+    {% if entities_for_entry %}
+    <section class="action-card">
+      <p class="small-title">Entities</p>
+      <div class="row wrap">
+        {% for ent in entities_for_entry %}
+        <a class="badge" href="/entities/{{ ent.entity_id }}">{{ ent.title }}</a>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
     <section class="score-panel">
       <p class="label" style="margin:0 0 2px; font-size:13px;">How useful was this?</p>
       <p class="muted" id="score-state" style="margin:0;">

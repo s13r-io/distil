@@ -3,8 +3,8 @@
 
     python -m distil.okf_lint <okf_root>
 
-Covers ``sources/`` + ``raw/`` (Phase 2) and ``concepts/`` (Phase 15, OKF Phase 3a design
-report §7). ``entities/`` is still out of scope (Phase 5) and has no checks here yet.
+Covers ``sources/`` + ``raw/`` (Phase 2), ``concepts/`` (Phase 15, OKF Phase 3a design report
+§7), and ``entities/`` (Phase D — the E9-E12 checks, the same shape as concepts' E5-E8).
 
 Checks (all ERROR; exit non-zero if any fire):
   E1  every non-reserved .md has YAML frontmatter with a non-empty `type`
@@ -22,10 +22,19 @@ Checks (all ERROR; exit non-zero if any fire):
       `## Concepts covered` or another concept's typed-edge section (`## Contrasts with` /
       `## Builds on` / `## Related`, Phase 16) — the concepts/index.md listing does not count.
       sources/<slug>.md pages remain exempt — they're provenance leaves by design.
+  E9  every entities/<slug>.md has `type: entity` frontmatter and is listed in entities/index.md
+      (Phase D — the E5 checks, one directory down)
+  E10 entity<->source citation integrity: the E6 check, applied to entities/`videos:`/
+      `## Sources` instead of concepts'
+  E11 bidirectional entity<->source links: the E7 check, applied to a source's
+      `## Entities mentioned` section instead of `## Concepts covered`
+  E12 no orphan entities: the E8 check (minus typed edges — entities have none), applied to
+      entities/<slug>.md instead of concepts/<slug>.md
 
 Concept-to-concept typed-edge links (Phase 16) are same-directory (`concepts/x.md` ->
 `concepts/y.md`), so E2's generic link-resolution check already covers broken links there with
 no extra code; only E8's orphan check needed extending to recognize them as valid inbound links.
+Entities (Phase D) have no typed edges, so E12 doesn't need that extension.
 """
 
 from __future__ import annotations
@@ -286,6 +295,116 @@ def _check_no_orphan_concepts(root: Path, errors: list[str]) -> None:
             )
 
 
+def _check_entity_type(root: Path, errors: list[str]) -> None:
+    """E9's frontmatter half: every non-reserved ``entities/*.md`` declares ``type: entity``
+    specifically — the exact ``_check_concept_type`` shape, one directory down."""
+    entities_dir = root / "entities"
+    if not entities_dir.exists():
+        return
+    for p in sorted(entities_dir.glob("*.md")):
+        if p.name in RESERVED:
+            continue
+        if _get_type(p.read_text(encoding="utf-8")) != "entity":
+            errors.append(f"E9 missing/wrong `type: entity` frontmatter: {p.relative_to(root)}")
+
+
+def _check_entity_source_citations(root: Path, errors: list[str]) -> None:
+    """E10 — entity<->source citation integrity: the exact ``_check_concept_source_citations``
+    shape, applied to ``entities/`` instead of ``concepts/``."""
+    entities_dir = root / "entities"
+    sources_dir = root / "sources"
+    if not entities_dir.exists():
+        return
+    existing_sources = (
+        {p.stem for p in sources_dir.glob("*.md") if p.name not in RESERVED}
+        if sources_dir.exists()
+        else set()
+    )
+    for p in sorted(entities_dir.glob("*.md")):
+        if p.name in RESERVED:
+            continue
+        text = p.read_text(encoding="utf-8")
+        videos = _frontmatter_flow_list(text, "videos") or []
+        for slug in videos:
+            if slug and slug not in existing_sources:
+                errors.append(
+                    f"E10 videos: lists `{slug}` but sources/{slug}.md does not exist: "
+                    f"{p.relative_to(root)}"
+                )
+        video_set = set(videos)
+        for slug in _section_link_slugs(text, "## Sources", "../sources"):
+            if slug not in video_set:
+                errors.append(
+                    f"E10 ## Sources cites `{slug}`, not listed in videos: frontmatter: "
+                    f"{p.relative_to(root)}"
+                )
+
+
+def _check_bidirectional_entity_links(root: Path, errors: list[str]) -> None:
+    """E11 — a source's ``## Entities mentioned`` link to an entity implies that entity's
+    ``## Sources`` links back, and vice versa. The exact ``_check_bidirectional_concept_links``
+    shape, applied to ``entities/`` + ``## Entities mentioned`` instead of ``concepts/`` +
+    ``## Concepts covered``."""
+    entities_dir = root / "entities"
+    sources_dir = root / "sources"
+    if not entities_dir.exists() or not sources_dir.exists():
+        return
+
+    source_backlinks = {
+        p.stem: set(
+            _section_link_slugs(p.read_text(encoding="utf-8"), "## Entities mentioned", "../entities")
+        )
+        for p in sources_dir.glob("*.md")
+        if p.name not in RESERVED
+    }
+    entity_citations = {
+        p.stem: set(_section_link_slugs(p.read_text(encoding="utf-8"), "## Sources", "../sources"))
+        for p in entities_dir.glob("*.md")
+        if p.name not in RESERVED
+    }
+
+    for entity_slug, cited_sources in sorted(entity_citations.items()):
+        for source_slug in sorted(cited_sources):
+            if entity_slug not in source_backlinks.get(source_slug, set()):
+                errors.append(
+                    f"E11 entities/{entity_slug}.md links to sources/{source_slug}.md but "
+                    f"sources/{source_slug}.md has no backlink under ## Entities mentioned"
+                )
+    for source_slug, linked_entities in sorted(source_backlinks.items()):
+        for entity_slug in sorted(linked_entities):
+            if source_slug not in entity_citations.get(entity_slug, set()):
+                errors.append(
+                    f"E11 sources/{source_slug}.md links to entities/{entity_slug}.md but "
+                    f"entities/{entity_slug}.md's ## Sources does not cite it back"
+                )
+
+
+def _check_no_orphan_entities(root: Path, errors: list[str]) -> None:
+    """E12 — every ``entities/<slug>.md`` must have >=1 inbound link from a source's
+    ``## Entities mentioned`` section; the ``entities/index.md`` listing does not count. The
+    exact ``_check_no_orphan_concepts`` shape, minus the typed-edge extension (entities have no
+    entity<->entity edges, Phase D)."""
+    entities_dir = root / "entities"
+    sources_dir = root / "sources"
+    if not entities_dir.exists():
+        return
+    inbound: set[str] = set()
+    if sources_dir.exists():
+        for p in sources_dir.glob("*.md"):
+            if p.name in RESERVED:
+                continue
+            inbound.update(
+                _section_link_slugs(p.read_text(encoding="utf-8"), "## Entities mentioned", "../entities")
+            )
+    for p in sorted(entities_dir.glob("*.md")):
+        if p.name in RESERVED:
+            continue
+        if p.stem not in inbound:
+            errors.append(
+                f"E12 orphan entity page (no inbound link from any source): {p.relative_to(root)}"
+            )
+
+
 def _check_source_raw_parity(root: Path, errors: list[str]) -> None:
     src = {p.stem for p in (root / "sources").glob("*.md") if p.name not in RESERVED}
     raw = {p.stem for p in (root / "raw").glob("*.md") if p.name not in RESERVED}
@@ -308,6 +427,11 @@ def lint(root: Path) -> list[str]:
     _check_concept_source_citations(root, errors)
     _check_bidirectional_concept_links(root, errors)
     _check_no_orphan_concepts(root, errors)
+    _check_dir_index(root, "entities", "E9", errors)
+    _check_entity_type(root, errors)
+    _check_entity_source_citations(root, errors)
+    _check_bidirectional_entity_links(root, errors)
+    _check_no_orphan_entities(root, errors)
     return errors
 
 

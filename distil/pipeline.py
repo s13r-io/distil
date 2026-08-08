@@ -41,6 +41,7 @@ class PipelineConfig:
     enable_graph: bool = True
     enable_canonicalize: bool = True
     enable_concept_edges: bool = True
+    enable_entities: bool = True
     model_version: str = ""
     timing_callback: Callable[[str, float], None] | None = None
     # Reports stage start/finish (and the little_to_extract short-circuit) for live progress
@@ -134,7 +135,11 @@ def run_pipeline(
     # then synthesize/export the touched concept pages (design report §5).
     if config.enable_canonicalize:
         touched = _timed(
-            "canonicalize", config, lambda: run_canonicalize_stage(entry, store, client)
+            "canonicalize",
+            config,
+            lambda: run_canonicalize_stage(
+                entry, store, client, enable_entities=config.enable_entities
+            ),
         )
         # Stage 9 — concept<->concept typed edges for the concepts just synthesized (capped;
         # centroid-similarity candidates first, Phase 16 design report §9 item 4).
