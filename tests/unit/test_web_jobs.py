@@ -852,11 +852,19 @@ def test_upload_dir_is_derived_from_db_path_not_ephemeral_tmp(tmp_path, monkeypa
     """Regression: on main, uploads are staged under tempfile.gettempdir(), which a container
     restart/redeploy wipes even though the job row (in sqlite, on the volume) survives — the job
     then fails with "file not found" and nothing to recover. Staging must live alongside the
-    configured db (the persistent volume), not the ephemeral system temp dir."""
+    configured db (the persistent volume), not the ephemeral system temp dir.
+
+    ``tempfile.gettempdir`` is monkeypatched to a sentinel directory distinct from ``tmp_path``:
+    pytest's own ``tmp_path`` fixture is itself carved out of the system temp dir, so asserting
+    against the real ``tempfile.gettempdir()`` would make this test depend on incidental path
+    resolution (e.g. macOS's ``/tmp`` -> ``/private/tmp`` symlink masking the match while Linux's
+    literal ``/tmp`` doesn't) rather than on the behavior actually being regression-tested."""
+    system_tmp = tmp_path / "system_tmp"
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(system_tmp))
     monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
     upload_dir = webapp._upload_dir()
     assert tmp_path == upload_dir.parent.parent
-    assert not str(upload_dir).startswith(tempfile.gettempdir())
+    assert not str(upload_dir).startswith(str(system_tmp))
 
 
 @pytest.mark.unit
