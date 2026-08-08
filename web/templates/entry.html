@@ -16,6 +16,16 @@
     {% if mix %}
     <p class="muted" style="margin:0;">Mix: {% for t, pct in mix %}{{ t }} {{ pct }}%{% if not loop.last %} / {% endif %}{% endfor %}</p>
     {% endif %}
+    {% if stage_timings %}
+    <details class="stage-timings" style="margin-top:10px;">
+      <summary class="muted">Processed in {{ total_processing_seconds }}s</summary>
+      <ul class="muted" style="margin:6px 0 0; padding-left:18px;">
+        {% for label, seconds in stage_timings %}
+        <li>{{ label }} &middot; {{ "%.1f"|format(seconds) }}s</li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
   </div>
   {% if e.source.thumbnail_url %}
   <div class="entry-hero-media">

@@ -86,11 +86,17 @@ state ("terminated" = failed).
 **Per-row content & actions:**
 - *Queued* — title, position in line, **Remove** (deletes the job from the queue before the
   worker picks it up; not available once distilling). This is removal, not cancellation.
-- *Distilling* — staged hint ("triaging…", "extracting items…"), elapsed time.
-- *Done* — "kept N items · verdict rich" + **View entry** link.
+- *Distilling* — real per-stage progress: "Step N of M · <phase in plain words> · elapsed s",
+  driven by the job's persisted `current_phase`/`phase_index`/`phase_total`/`phase_started_at`
+  (see `AGENTS.md`'s "Visible per-stage progress" entry for the plumbing). `M` reflects only the
+  phases this job will actually run (kind + enabled stages), and shrinks honestly if the
+  low-value short-circuit ends the run early instead of continuing to claim an unreached total.
+- *Done* — "kept N items · verdict rich" + **View entry** link. The entry page also shows a
+  collapsed per-stage timing breakdown for the finished run.
 - *Low-value* — honest neutral notice: "Not much to extract — verdict little_to_extract.
   Nothing filed." (FR12). Not error-styled.
-- *Failed* — error reason + **Retry** (re-queues the same transcript).
+- *Failed* — error reason, which phase it failed during, + **Retry** (re-queues the same
+  transcript).
 
 **Row lifetime:**
 - Done, Low-value, and Removed rows **auto-clear after 24h** (the entry already lives in

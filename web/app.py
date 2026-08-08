@@ -92,6 +92,74 @@ def _humanize_tag(tag: str) -> str:
 
 _TEMPLATES.env.filters["humanize_tag"] = _humanize_tag
 
+# Human-readable labels for progress display (web/templates/index.html); order here has no
+# effect on the declared phase plan, which _build_phase_plan computes per job.
+PHASE_LABELS: dict[str, str] = {
+    "transcript_fetch": "Fetching transcript",
+    "caption_parse": "Parsing captions",
+    "ingest": "Reading transcript",
+    "metadata": "Fetching video info",
+    "triage": "Checking value",
+    "extract": "Extracting knowledge",
+    "normalize": "Normalizing items",
+    "link": "Linking to profile",
+    "note": "Writing teaching note",
+    "graph": "Linking related entries",
+    "file": "Filing entry",
+    "canonicalize": "Matching concepts",
+    "concept_edges": "Linking concepts",
+}
+
+
+def _build_phase_plan(
+    job: jobsmod.Job, *, enable_graph: bool, enable_canonicalize: bool, enable_concept_edges: bool,
+) -> list[str]:
+    """The ordered phases *this* job will actually run, given its kind and the pipeline flags.
+
+    Declaring the total from these flags up front (rather than a fixed 9) is what keeps the
+    step count honest for jobs where graph/canonicalize/concept_edges are disabled.
+    """
+    pre = ["transcript_fetch", "caption_parse"] if job.kind == "youtube" else ["ingest"]
+    plan = [*pre, "metadata", "triage", "extract", "normalize", "link", "note"]
+    if enable_graph:
+        plan.append("graph")
+    plan.append("file")
+    if enable_canonicalize:
+        plan.append("canonicalize")
+        if enable_concept_edges:
+            plan.append("concept_edges")
+    return plan
+
+
+class _PhaseReporter:
+    """Turns stage start/finish events into job-table progress + persisted durations.
+
+    Used both for the pre-pipeline web-layer steps (ingest/transcript_fetch/caption_parse/
+    metadata) and, via ``on_pipeline_event``, as ``PipelineConfig.phase_callback`` — one
+    reporter instance covers a job's whole run so phase indices stay consistent across both.
+    """
+
+    def __init__(self, jobs_store: jobsmod.JobStore, job_id: str, plan: list[str]):
+        self._store = jobs_store
+        self._job_id = job_id
+        self._plan = plan
+        self._total = len(plan)
+        self._starts: dict[str, float] = {}
+
+    def on_phase(self, phase: str, event: str) -> None:
+        if event == "start":
+            self._starts[phase] = perf_counter()
+            index = self._plan.index(phase) + 1 if phase in self._plan else self._total
+            self._store.start_phase(self._job_id, phase=phase, index=index, total=self._total)
+        elif event == "finish":
+            elapsed = perf_counter() - self._starts.get(phase, perf_counter())
+            self._store.record_phase_duration(self._job_id, phase=phase, seconds=elapsed)
+        elif event == "short_circuit":
+            self._store.collapse_total(self._job_id)
+
+    def on_pipeline_event(self, stage: str, event: str) -> None:
+        self.on_phase(stage, event)
+
 
 def _distill_job(job: jobsmod.Job) -> dict:
     """Worker callback: run the pipeline for one job, return a small result dict.
@@ -101,11 +169,24 @@ def _distill_job(job: jobsmod.Job) -> dict:
     timings: dict[str, float] = {}
     total_start = perf_counter()
     store = _store()
+    jobs_store = jobsmod.JobStore(_db_path())
+    enable_graph = False
+    enable_canonicalize = True
+    enable_concept_edges = True
+    plan = _build_phase_plan(
+        job, enable_graph=enable_graph, enable_canonicalize=enable_canonicalize,
+        enable_concept_edges=enable_concept_edges,
+    )
+    reporter = _PhaseReporter(jobs_store, job.job_id, plan)
     profile = store.load_profile(_USER_ID) or _default_profile()
-    transcript = _time_block(timings, "ingest", lambda: _load_job_transcript(job))
+    transcript = _time_block(
+        timings, "ingest", lambda: _load_job_transcript(job, on_phase=reporter.on_phase)
+    )
     client = _make_client()
     embedder = _time_block(timings, "embedder", _cached_safe_embedder)
+    reporter.on_phase("metadata", "start")
     source_meta = _time_block(timings, "metadata", lambda: _fetch_source_metadata(job.source_url))
+    reporter.on_phase("metadata", "finish")
     entry = run_pipeline(
         transcript, profile, store, client,
         source_title=source_meta.title or job.title,
@@ -117,8 +198,11 @@ def _distill_job(job: jobsmod.Job) -> dict:
         source_metadata_fetched_at=source_meta.metadata_fetched_at,
         config=PipelineConfig(
             model_version=os.environ.get("DISTIL_MODEL", ""),
-            enable_graph=False,
+            enable_graph=enable_graph,
+            enable_canonicalize=enable_canonicalize,
+            enable_concept_edges=enable_concept_edges,
             timing_callback=lambda stage, seconds: timings.__setitem__(stage, seconds),
+            phase_callback=reporter.on_pipeline_event,
         ),
         embedder=embedder,
     )
@@ -139,16 +223,24 @@ def _distill_job(job: jobsmod.Job) -> dict:
                        f"· {_format_timings(timings, total)}{graph_note}"}
 
 
-def _load_job_transcript(job: jobsmod.Job):
+def _load_job_transcript(job: jobsmod.Job, *, on_phase=None):
+    if job.kind == "youtube":
+        # youtube.fetch_video_transcript reports its own transcript_fetch/caption_parse
+        # start/finish pair around the yt-dlp call and the srt parse respectively.
+        return youtube.fetch_video_transcript(job.payload, on_phase=on_phase)
+    if on_phase is not None:
+        on_phase("ingest", "start")
     if job.kind == "file":
         p = Path(job.payload)
         try:
-            return ingest_file(str(p))
+            result = ingest_file(str(p))
         finally:
             p.unlink(missing_ok=True)
-    if job.kind == "youtube":
-        return youtube.fetch_video_transcript(job.payload)
-    return ingest_text(job.payload)
+    else:
+        result = ingest_text(job.payload)
+    if on_phase is not None:
+        on_phase("ingest", "finish")
+    return result
 
 
 def _cached_embedder():
@@ -589,6 +681,12 @@ def create_app() -> FastAPI:
         mix = [(s.type, round(s.share * 100)) for s in e.triage.knowledge_types_present]
         slug = okf.slug_for_entry(e, store.okf_root)
         has_transcript = (store.okf_root / "raw" / f"{slug}.md").exists()
+        job = jobsmod.JobStore(_db_path()).find_by_entry_id(entry_id)
+        phase_durations = job.phase_durations if job else {}
+        stage_timings = [
+            (PHASE_LABELS.get(stage, stage), seconds)
+            for stage, seconds in sorted(phase_durations.items(), key=lambda kv: -kv[1])
+        ]
         return _TEMPLATES.TemplateResponse(
             request, "entry.html",
             {"e": e, "mix": mix,
@@ -596,7 +694,10 @@ def create_app() -> FastAPI:
              "concepts_for_entry": _concepts_for_entry(store, entry_id),
              "reasons": ["relevant", "already_knew", "bad_source", "wrong_for_me",
                          "irrelevant_now"],
-             "active_page": "library"},
+             "active_page": "library",
+             "stage_timings": stage_timings,
+             "total_processing_seconds": round(sum(phase_durations.values()), 1),
+             },
         )
 
     @app.get("/entries/{entry_id}/transcript.md")

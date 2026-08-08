@@ -14,12 +14,13 @@ sharing the web app's connection across threads.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,6 +53,16 @@ class Job:
     error: str | None
     created_at: str
     updated_at: str
+    # Live progress (WEB_UI_SPEC progress phases): the stage currently running (or, once the
+    # job finishes, the last stage that ran — including the one a failure happened during,
+    # since failure never advances current_phase past it), its 1-based position, the declared
+    # total for *this* job (accounts for enabled-flag stages and collapses honestly on the
+    # low-value short-circuit — see PhaseReporter in web/app.py), and when that phase started.
+    current_phase: str | None = None
+    phase_index: int | None = None
+    phase_total: int | None = None
+    phase_started_at: str | None = None
+    phase_durations: dict[str, float] = field(default_factory=dict)
 
     def age_seconds(self) -> float:
         try:
@@ -72,6 +83,11 @@ class Job:
             "error": self.error,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "current_phase": self.current_phase,
+            "phase_index": self.phase_index,
+            "phase_total": self.phase_total,
+            "phase_started_at": self.phase_started_at,
+            "phase_durations": self.phase_durations,
         }
 
 
@@ -115,14 +131,30 @@ class JobStore:
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(jobs)").fetchall()}
         if "source_url" not in cols:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN source_url TEXT")
+        if "current_phase" not in cols:
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN current_phase TEXT")
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN phase_index INTEGER")
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN phase_total INTEGER")
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN phase_started_at TEXT")
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN phase_durations TEXT")
         self._conn.commit()
 
     def _row(self, r: sqlite3.Row) -> Job:
+        raw_durations = r["phase_durations"] if "phase_durations" in r.keys() else None
+        try:
+            durations = json.loads(raw_durations) if raw_durations else {}
+        except json.JSONDecodeError:
+            durations = {}
         return Job(
             job_id=r["job_id"], kind=r["kind"], title=r["title"], payload=r["payload"],
             source_url=r["source_url"],
             status=r["status"], entry_id=r["entry_id"], summary=r["summary"],
             error=r["error"], created_at=r["created_at"], updated_at=r["updated_at"],
+            current_phase=r["current_phase"] if "current_phase" in r.keys() else None,
+            phase_index=r["phase_index"] if "phase_index" in r.keys() else None,
+            phase_total=r["phase_total"] if "phase_total" in r.keys() else None,
+            phase_started_at=r["phase_started_at"] if "phase_started_at" in r.keys() else None,
+            phase_durations=durations,
         )
 
     def enqueue(
@@ -175,6 +207,46 @@ class JobStore:
             )
         job.status = STATUS_RUNNING
         return job
+
+    def start_phase(self, job_id: str, *, phase: str, index: int, total: int) -> None:
+        """Record that ``phase`` has just started — the entry/exit signal (WEB_UI_SPEC)."""
+        self._conn.execute(
+            "UPDATE jobs SET current_phase=?, phase_index=?, phase_total=?, "
+            "phase_started_at=? WHERE job_id=?",
+            (phase, index, total, _now(), job_id),
+        )
+        self._conn.commit()
+
+    def record_phase_duration(self, job_id: str, *, phase: str, seconds: float) -> None:
+        """Persist one stage's duration, merging into whatever's already stored."""
+        r = self._conn.execute(
+            "SELECT phase_durations FROM jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
+        try:
+            durations = json.loads(r["phase_durations"]) if r and r["phase_durations"] else {}
+        except json.JSONDecodeError:
+            durations = {}
+        durations[phase] = round(seconds, 3)
+        self._conn.execute(
+            "UPDATE jobs SET phase_durations=? WHERE job_id=?",
+            (json.dumps(durations), job_id),
+        )
+        self._conn.commit()
+
+    def collapse_total(self, job_id: str) -> None:
+        """Honesty short-circuit: the run is stopping now, so the declared total must shrink to
+        whatever actually ran instead of continuing to claim a total the run will never reach.
+        """
+        self._conn.execute(
+            "UPDATE jobs SET phase_total=phase_index WHERE job_id=?", (job_id,)
+        )
+        self._conn.commit()
+
+    def find_by_entry_id(self, entry_id: str) -> Job | None:
+        r = self._conn.execute(
+            "SELECT * FROM jobs WHERE entry_id=? ORDER BY updated_at DESC LIMIT 1", (entry_id,)
+        ).fetchone()
+        return self._row(r) if r else None
 
     def _set_status(self, job_id: str, status: str) -> None:
         self._conn.execute(

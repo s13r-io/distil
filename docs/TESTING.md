@@ -66,6 +66,8 @@ that must abstain.
 - T-Y10 (Phase 22; supersedes the removed Phase 20 `DISTIL_YOUTUBE_API_KEY` variant): with `DISTIL_POT_PROVIDER_URL` set (via `monkeypatch`), both `list_playlist_video_urls` and `_fetch_into` pass a *second* `--extractor-args` pair, `youtubepot-bgutilhttp:base_url=<value>`, alongside the unchanged `youtube:player_client=android_vr,web_safari` pair; with the env var unset, the command line is byte-identical to T-Y8 (single `--extractor-args` pair, no `DISTIL_YOUTUBE_API_KEY` handling survives anywhere in the module).
 - T-Y11 (Phase 21): a `yt-dlp` failure whose stderr is warning-heavy (SABR/staleness noise exceeding any head-truncation budget) still surfaces its `ERROR:`-prefixed line(s) in the raised `YoutubeFetchError`, not the leading warnings; the complete, untruncated stderr is always logged via `logging.getLogger("distil.youtube")` regardless of what the bounded exception message contains; stderr with no `ERROR:` line at all falls back to a genuine tail (the *last* N chars).
 - T-Y12 (Phase 21): `_fetch_into` requests `--sub-format srt/best` and never passes `--convert-subs` (the Dockerfile image has no ffmpeg, so any format needing conversion would fail in production).
+- T-Y13 (Phase A, visible progress): a successful fetch reports `("transcript_fetch", "start")`, `("transcript_fetch", "finish")`, `("caption_parse", "start")`, `("caption_parse", "finish")`, in that order, via the optional `on_phase` callback.
+- T-Y14 (Phase A): a `yt-dlp` failure reports only `("transcript_fetch", "start")` — it never advances to `caption_parse`, so a stalled/failed fetch reads as stuck on the right phase rather than silently progressing.
 
 ### models.py
 - T-M1: Profile validates; rejects bad `status` enum.
@@ -141,6 +143,9 @@ that must abstain.
 - T-PL6 (Phase 15.3): with `enable_canonicalize=False`, the canonicalize stage makes zero LLM calls and creates no concepts or concept pages.
 - T-PL7 (Phase 16): with `enable_concept_edges=True`, a second video whose concept centroid is similar to an existing concept's gets a classified typed edge, rendered under a `## Contrasts with`/`## Builds on`/`## Related` heading on its OKF page.
 - T-PL8 (Phase 16): with `enable_concept_edges=False`, the concept-edges stage makes zero LLM calls even when a candidate would otherwise exist, and no concept gains an edge.
+- T-PL9 (Phase A, visible progress): `phase_callback` fires `(stage, "start")` before and `(stage, "finish")` after each stage, in pipeline order, without changing `timing_callback`'s existing behaviour.
+- T-PL10 (Phase A): the `little_to_extract` short-circuit reports only `("triage", "start")`, `("triage", "finish")`, `("triage", "short_circuit")` — no events for stages that never ran.
+- T-PL11 (Phase A): a disabled stage (`enable_graph`/`enable_canonicalize`/`enable_concept_edges=False`) emits no start/finish events, so a caller deriving the declared total from these events reflects only what will actually run.
 
 ### okf.py (OKF export layer, Phase 2 — pure, no LLM)
 - T-OKF1: the export slug is derived from `source.title` (slugified); falls back to `entry_id` when the title yields nothing usable; stable across repeated calls.

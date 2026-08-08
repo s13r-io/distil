@@ -43,6 +43,10 @@ class PipelineConfig:
     enable_concept_edges: bool = True
     model_version: str = ""
     timing_callback: Callable[[str, float], None] | None = None
+    # Reports stage start/finish (and the little_to_extract short-circuit) for live progress
+    # display, independent of timing_callback's after-the-fact duration reporting. Events:
+    # ("<stage>", "start"), ("<stage>", "finish"), ("triage", "short_circuit").
+    phase_callback: Callable[[str, str], None] | None = None
 
 
 def run_pipeline(
@@ -81,7 +85,11 @@ def run_pipeline(
     triage = triage_result.triage
 
     # Honesty short-circuit: return a minimal entry, no filing or further LLM calls (T-PL2).
+    # Tell the phase reporter the run is stopping now, so a declared total sized for the full
+    # sequence never gets reported as "stuck" on a run that will never reach it.
     if is_low_value(triage_result):
+        if config.phase_callback is not None:
+            config.phase_callback("triage", "short_circuit")
         return KBEntry(entry_id=entry_id, source=source, triage=triage, meta=meta)
 
     # Stage 2 — extract; Stage 3 — normalize (pure faithfulness gate).
@@ -147,9 +155,13 @@ def _derive_tags(items, links, note) -> Tags:
 
 
 def _timed(stage: str, config: PipelineConfig, fn):
+    if config.phase_callback is not None:
+        config.phase_callback(stage, "start")
     start = perf_counter()
     try:
         return fn()
     finally:
         if config.timing_callback is not None:
             config.timing_callback(stage, perf_counter() - start)
+        if config.phase_callback is not None:
+            config.phase_callback(stage, "finish")

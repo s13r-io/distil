@@ -71,6 +71,7 @@ import os
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -208,19 +209,34 @@ def fetch_video_transcript(
     workdir: str | Path | None = None,
     timeout: float = 120.0,
     sleep=time.sleep,
+    on_phase: Callable[[str, str], None] | None = None,
 ) -> Transcript:
-    """Fetch English captions (native ``srt``, no ffmpeg conversion needed) for one video."""
+    """Fetch English captions (native ``srt``, no ffmpeg conversion needed) for one video.
+
+    ``on_phase(phase, event)`` — if given — reports ("transcript_fetch"|"caption_parse",
+    "start"|"finish") around the yt-dlp subprocess call and the srt parse respectively, purely
+    for caller-side progress display; it changes nothing about what this function does.
+    """
     if workdir is not None:
         # A caller-supplied workdir may be reused across fetches (e.g. tests sharing a
         # tmp_path); scope this fetch to its own unique child directory so a stale caption
         # file left behind by a previous invocation is never picked up by the glob below.
         scoped = Path(tempfile.mkdtemp(dir=str(workdir)))
-        return _fetch_into(video_url, run, scoped, timeout, sleep)
+        return _fetch_into(video_url, run, scoped, timeout, sleep, on_phase)
     with tempfile.TemporaryDirectory() as tmp:
-        return _fetch_into(video_url, run, Path(tmp), timeout, sleep)
+        return _fetch_into(video_url, run, Path(tmp), timeout, sleep, on_phase)
 
 
-def _fetch_into(video_url: str, run, workdir: Path, timeout: float, sleep=time.sleep) -> Transcript:
+def _fetch_into(
+    video_url: str,
+    run,
+    workdir: Path,
+    timeout: float,
+    sleep=time.sleep,
+    on_phase: Callable[[str, str], None] | None = None,
+) -> Transcript:
+    if on_phase is not None:
+        on_phase("transcript_fetch", "start")
     out_prefix = workdir / "captions"
     proc = _run_yt_dlp(
         [
@@ -253,14 +269,21 @@ def _fetch_into(video_url: str, run, workdir: Path, timeout: float, sleep=time.s
     if proc.returncode != 0:
         _logger.error("yt-dlp fetch failed for %s:\n%s", video_url, proc.stderr)
         raise YoutubeFetchError(f"yt-dlp failed: {_surface_error(proc.stderr)}")
+    if on_phase is not None:
+        on_phase("transcript_fetch", "finish")
     srt_files = sorted(workdir.glob("*.srt"))
     if not srt_files:
         raise YoutubeFetchError("No English captions available for this video.")
     raw = srt_files[0].read_text(encoding="utf-8")
+    if on_phase is not None:
+        on_phase("caption_parse", "start")
     try:
-        return ingest_srt_text(raw)
+        transcript = ingest_srt_text(raw)
     except IngestError as exc:
         raise YoutubeFetchError(str(exc)) from exc
+    if on_phase is not None:
+        on_phase("caption_parse", "finish")
+    return transcript
 
 
 def _surface_error(stderr: str | None, limit: int = 300) -> str:
