@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 from .embed import Embedder
 from .llm import LLMClient
+from .models import ConceptClaim
 from .prompts.synthesize import SYSTEM, build_synthesis_prompt
 from .store import Store
 
@@ -50,6 +51,15 @@ class RetrievedItem:
     score: float  # composite rank score (similarity × feedback × recency)
     entry_title: str = ""
     context: str = ""
+
+
+@dataclass
+class RetrievedConcept:
+    concept_id: str
+    title: str
+    description: str
+    similarity: float
+    claims: list[ConceptClaim] = field(default_factory=list)
 
 
 @dataclass
@@ -101,6 +111,39 @@ def retrieve(
     return scored[:top_k]
 
 
+def retrieve_concepts(
+    question: str, store: Store, embedder: Embedder, *, top_k: int = 3
+) -> list[RetrievedConcept]:
+    """Rank synthesized OKF concept pages against ``question`` (Phase 18, design report §9
+    item 6). Concepts are a *consumer* of the item-level retrieval substrate, not a
+    replacement for it (§5 of this repo's canonicalize design) — this only makes concept pages
+    independently findable, exactly the way :func:`retrieve` makes raw items findable.
+
+    A concept's score is the better of its stored centroid's similarity to the question and any
+    single member item's similarity — blending in members means a concept whose centroid is
+    diluted by many loosely-related videos still surfaces when at least one member is a close
+    match, the same way one strongly-worded video shouldn't be drowned out by a dozen others.
+    """
+    qvec = embedder.embed(question)
+    vectors_by_key = {
+        (entry_id, item_id): vec for item_id, entry_id, vec in store.iter_item_vectors()
+    }
+    scored: list[RetrievedConcept] = []
+    for concept in store.list_concepts():
+        centroid = store.concept_centroid(concept.concept_id)
+        sim = cosine(qvec, centroid) if centroid else 0.0
+        for member in concept.members:
+            vec = vectors_by_key.get((member.entry_id, member.item_id))
+            if vec is not None:
+                sim = max(sim, cosine(qvec, vec))
+        scored.append(RetrievedConcept(
+            concept_id=concept.concept_id, title=concept.title,
+            description=concept.description, similarity=sim, claims=concept.claims,
+        ))
+    scored.sort(key=lambda c: c.similarity, reverse=True)
+    return scored[:top_k]
+
+
 def ask(
     question: str,
     store: Store,
@@ -109,38 +152,54 @@ def ask(
     *,
     threshold: float = 0.35,
     top_k: int = 6,
+    concept_top_k: int = 3,
     lookup_only: bool = False,
 ) -> AskResult:
     results = retrieve(question, store, embedder, top_k=top_k)
+    concepts = retrieve_concepts(question, store, embedder, top_k=concept_top_k)
 
-    # ---- THE GATE: abstain if nothing clears the threshold, with ZERO synthesis calls. ----
+    # ---- THE GATE: abstain unless an item OR a concept clears the SAME threshold, with ZERO
+    # synthesis calls either way. Concepts never get a lower bar than raw items (Phase 18).
     cleared = [r for r in results if r.similarity >= threshold]
-    if not cleared:
+    cleared_concepts = [c for c in concepts if c.similarity >= threshold]
+    if not cleared and not cleared_concepts:
         return AskResult(
             abstained=True,
             message="No relevant notes found. Distil answers only from your knowledge base, "
                     "so it won't guess from outside knowledge.",
         )
 
-    sources = [Source(r.item_id, r.entry_id, r.quote, r.timestamp, r.entry_title) for r in cleared]
+    # Blend in each cleared concept's member items — findable by the concept even when raw
+    # per-item similarity alone would have missed them (design report §9 item 6).
+    all_items = cleared + _recruit_concept_members(
+        cleared_concepts, store, exclude={r.item_id for r in cleared}
+    )
+    sources = [
+        Source(r.item_id, r.entry_id, r.quote, r.timestamp, r.entry_title) for r in all_items
+    ]
 
     # Bare lookup: just the ranked sources, no synthesis call (T-Q5).
     if lookup_only:
         return AskResult(abstained=False, sources=sources)
 
-    # Grounded synthesis over the cleared items only.
-    notes_block = _render_notes(cleared)
+    # Grounded synthesis over the cleared items plus any synthesized concept prose — the prose
+    # is already grounded (every ConceptClaim.item_ids resolves to a real member, T-SYN2), so
+    # citing it is exactly as trustworthy as citing a directly-retrieved item.
+    notes_block = _render_notes(all_items)
+    concepts_block = _render_concept_notes(cleared_concepts)
+    if concepts_block:
+        notes_block = f"{notes_block}\n\n{concepts_block}" if notes_block else concepts_block
     raw = client.complete(build_synthesis_prompt(question, notes_block), system=SYSTEM)
     answer, cited, conflict = _parse_synthesis(raw)
 
-    retrieved_ids = {r.item_id for r in cleared}
+    retrieved_ids = {r.item_id for r in all_items}
     grounded = [c for c in cited if c in retrieved_ids]
     ungrounded = [c for c in cited if c not in retrieved_ids]
 
     # Surface a conflict even if the model didn't, when retrieved items are linked by a
     # `contradicts` edge (T-Q6).
     if not conflict:
-        conflict = _detect_contradiction(store, cleared)
+        conflict = _detect_contradiction(store, all_items)
 
     return AskResult(
         abstained=False,
@@ -169,6 +228,7 @@ def stream_ask(
     *,
     threshold: float = 0.35,
     top_k: int = 6,
+    concept_top_k: int = 3,
 ):
     """Streaming sibling of :func:`ask` (WEB_UI_SPEC §9).
 
@@ -184,8 +244,10 @@ def stream_ask(
     ``k_01`` citation IDs; those IDs remain available only in the final structured result.
     """
     results = retrieve(question, store, embedder, top_k=top_k)
+    concepts = retrieve_concepts(question, store, embedder, top_k=concept_top_k)
     cleared = [r for r in results if r.similarity >= threshold]
-    if not cleared:
+    cleared_concepts = [c for c in concepts if c.similarity >= threshold]
+    if not cleared and not cleared_concepts:
         abstain = AskResult(
             abstained=True,
             message="No relevant notes found. Distil answers only from your knowledge base, "
@@ -194,8 +256,16 @@ def stream_ask(
         yield StreamEvent(kind="abstain", text=abstain.message, result=abstain)
         return
 
-    sources = [Source(r.item_id, r.entry_id, r.quote, r.timestamp, r.entry_title) for r in cleared]
-    notes_block = _render_notes(cleared)
+    all_items = cleared + _recruit_concept_members(
+        cleared_concepts, store, exclude={r.item_id for r in cleared}
+    )
+    sources = [
+        Source(r.item_id, r.entry_id, r.quote, r.timestamp, r.entry_title) for r in all_items
+    ]
+    notes_block = _render_notes(all_items)
+    concepts_block = _render_concept_notes(cleared_concepts)
+    if concepts_block:
+        notes_block = f"{notes_block}\n\n{concepts_block}" if notes_block else concepts_block
     prompt = build_synthesis_prompt(question, notes_block)
 
     chunks: list[str] = []
@@ -218,11 +288,11 @@ def stream_ask(
     answer, cited, conflict = _parse_synthesis(raw)
     if answer:
         yield StreamEvent(kind="delta", text=answer)
-    retrieved_ids = {r.item_id for r in cleared}
+    retrieved_ids = {r.item_id for r in all_items}
     grounded = [c for c in cited if c in retrieved_ids]
     ungrounded = [c for c in cited if c not in retrieved_ids]
     if not conflict:
-        conflict = _detect_contradiction(store, cleared)
+        conflict = _detect_contradiction(store, all_items)
 
     yield StreamEvent(
         kind="final",
@@ -265,6 +335,59 @@ def _load_item(store: Store, entry_id: str, item_id: str):
         if item.item_id == item_id:
             return item, Store.note_context_for_item(entry, item_id)
     return None
+
+
+def _recruit_concept_members(
+    concepts: list[RetrievedConcept], store: Store, *, exclude: set[str]
+) -> list[RetrievedItem]:
+    """Pull each cleared concept's member items into the evidence pool (Phase 18). Every
+    recruited item still resolves to a real :class:`KnowledgeItem` via :func:`_load_item`,
+    exactly like a directly-retrieved item — concepts only widen *which* items are considered,
+    never how an item earns a place in ``sources``/``retrieved_ids``.
+    """
+    if not concepts:
+        return []
+    entry_meta = {r.entry_id: r for r in store.list_entries()}
+    seen = set(exclude)
+    out: list[RetrievedItem] = []
+    for concept in concepts:
+        full = store.load_concept(concept.concept_id)
+        if full is None:
+            continue
+        for member in full.members:
+            if member.item_id in seen:
+                continue
+            seen.add(member.item_id)
+            loaded = _load_item(store, member.entry_id, member.item_id)
+            if loaded is None:
+                continue
+            item, context = loaded
+            meta = entry_meta.get(member.entry_id)
+            out.append(RetrievedItem(
+                item_id=member.item_id, entry_id=member.entry_id, statement=item.statement,
+                quote=item.provenance.quote, timestamp=item.provenance.timestamp,
+                similarity=concept.similarity, score=concept.similarity,
+                entry_title=meta.title if meta else member.entry_id, context=context,
+            ))
+    return out
+
+
+def _render_concept_notes(concepts: list[RetrievedConcept]) -> str:
+    """Pre-synthesized concept-page prose as extra evidence (Phase 18). Already grounded —
+    every ``ConceptClaim.item_ids`` resolves to a real member (T-SYN2) — so citing one of these
+    claims is exactly as trustworthy as citing a raw retrieved item; nothing here is model text
+    trusted as a citation, it's the same ``[item_id]`` marker convention :func:`_render_notes`
+    already uses.
+    """
+    lines: list[str] = []
+    for c in concepts:
+        if not c.claims:
+            continue
+        lines.append(f'Concept "{c.title}": {c.description}')
+        for claim in c.claims:
+            markers = "".join(f"[{item_id}]" for item_id in claim.item_ids)
+            lines.append(f"  {claim.text} {markers}".rstrip())
+    return "\n".join(lines)
 
 
 def _render_notes(items: list[RetrievedItem]) -> str:

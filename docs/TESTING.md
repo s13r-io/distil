@@ -197,6 +197,11 @@ that must abstain.
 - T-Q6: when retrieved items are linked by a `contradicts` edge, the answer surfaces the conflict instead of picking one silently.
 - T-Q7 (eval): on the query KB fixture, answerable questions return correct source IDs and no-note questions abstain 100% of the time.
 - T-Q8: retrieved items include any distilled-note context that cites them, while source links remain item-level.
+- T-Q9 (Phase 18, query-over-concepts): `retrieve_concepts` ranks synthesized concept pages by similarity to the question, same as `retrieve` does for raw items.
+- T-Q10: a concept's centroid-diluting members don't hide it — blending in per-member similarity still surfaces the concept via its closest member.
+- T-Q11: a question that only a concept (not any single raw item) clears the threshold for still answers instead of abstaining — concepts get the SAME threshold, never a lower one.
+- T-Q12: sources recruited via a concept resolve from the live `KBEntry`/`KnowledgeItem`, never from the concept's own stale copied fields or model text — code-assembled citations hold even off the concept path.
+- T-Q13 (regression): a concept present in the KB with low similarity to the question does not lower the bar — abstention still holds, zero synthesis calls.
 
 ### auth (web, hosted) — `web/`
 - T-A1: with `DISTIL_PUBLIC=true` and no `DISTIL_AUTH_SECRET` set, the app refuses to start/serve (fails closed).
