@@ -34,7 +34,12 @@ web = ["fastapi>=0.111", "uvicorn[standard]>=0.30", "jinja2>=3.1", "python-multi
 # every image rebuild. The floor itself still needs bumping periodically since the deployed
 # image only ever gets what was current at build time; 2026.3.17 is the version distil/youtube.py's
 # client chain (Phase 21) was verified against.
-youtube = ["yt-dlp>=2026.3.17"]
+# bgutil-ytdlp-pot-provider (Phase 22) is the pure-Python yt-dlp *plugin* half of the PO-token
+# pair: it lets yt-dlp discover and call out to a separately-run bgutil provider server (see
+# DISTIL_POT_PROVIDER_URL below) over HTTP. It needs no Node/Deno runtime itself — that only
+# runs in the standalone provider service — so it doesn't reopen the "no JS runtime in this
+# image" decision documented in youtube.py's module docstring.
+youtube = ["yt-dlp>=2026.3.17", "bgutil-ytdlp-pot-provider>=1.3.1"]
 # Dev / test tooling.
 dev = [
     "pytest>=8.0",

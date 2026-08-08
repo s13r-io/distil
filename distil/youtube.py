@@ -43,12 +43,21 @@ impersonation, ...) must never crowd out the real failure the way the previous h
 again needs a code change just to see what actually happened; only the short user-facing message
 stays bounded.
 
-Phase 20: client rotation alone can't beat a *datacenter-IP-level* 429 (seen on Railway), so when
-``DISTIL_YOUTUBE_API_KEY`` is set, :func:`_extractor_args` (shared by both call sites, read at
-call time so it can't go stale mid-process) appends yt-dlp's ``innertube_host``/``innertube_key``
-extractor-args, routing requests through the YouTube Data API host — which accepts the key and
-isn't subject to that same IP-level throttling — instead of the anonymous innertube endpoint.
-Absent the env var, the command line is byte-identical to pre-Phase-20 behavior.
+Phase 22: client rotation alone can't beat YouTube's bot check on a *datacenter* IP ("Sign in to
+confirm you're not a bot") — that's an identity/reputation challenge, not a throttle, and nothing
+in ``--extractor-args youtube:...`` can satisfy it (a prior attempt, ``DISTIL_YOUTUBE_API_KEY``,
+only ever substituted into InnerTube's anonymous ``key=`` query parameter and carried no identity;
+it has been removed). A proof-of-origin (PO) token from a real attestation provider is yt-dlp's
+supported answer: when ``DISTIL_POT_PROVIDER_URL`` is set, :func:`_extractor_args` (shared by both
+call sites, read at call time so it can't go stale mid-process) appends a *second*
+``--extractor-args`` pair — ``youtubepot-bgutilhttp:base_url=<url>`` — pointing yt-dlp's
+``bgutil-ytdlp-pot-provider`` plugin (installed via the ``youtube`` extra) at a separately-run
+``bgutil-ytdlp-pot-provider`` HTTP server (a second service; see DEPLOY_RAILWAY.md). This is its
+own extractor namespace, not a suffix on the ``youtube:`` value, per yt-dlp's own multi-use
+support for ``--extractor-args``. Absent the env var, the command line is byte-identical to
+before. Per upstream's own documentation, a PO token makes traffic look more legitimate — it does
+not *guarantee* clearing a bot check, so this is unproven against the live datacenter IP until
+deployed; it is not a fix that can be verified from a residential dev machine.
 
 Speech-to-text (Whisper) for uncaptioned videos is out of scope; those videos raise
 :class:`YoutubeFetchError` so callers can skip + report them without failing a whole playlist.
@@ -77,21 +86,24 @@ _YT_DLP = "yt-dlp"
 # invocation for the rare video whose android_vr response omits captions.
 _PLAYER_CLIENT = "player_client=android_vr,web_safari"
 
+# The bgutil-ytdlp-pot-provider plugin's own extractor-args namespace (separate from `youtube:`).
+_POT_PROVIDER_EXTRACTOR_KEY = "youtubepot-bgutilhttp"
+
 
 def _extractor_args() -> list[str]:
-    """Build the ``--extractor-args`` pair shared by both yt-dlp call sites.
+    """Build the ``--extractor-args`` pairs shared by both yt-dlp call sites.
 
-    Reads ``DISTIL_YOUTUBE_API_KEY`` at call time (not import time) so callers — including
+    Reads ``DISTIL_POT_PROVIDER_URL`` at call time (not import time) so callers — including
     tests via monkeypatch — always see the current environment. When unset, the returned args
-    are byte-identical to pre-Phase-20 behavior (``player_client`` only). When set, appends
-    ``innertube_host``/``innertube_key`` so yt-dlp routes through the YouTube Data API host
-    instead of the anonymous innertube endpoint that datacenter IPs get 429'd on.
+    are byte-identical to before (``player_client`` only). When set, appends a second
+    ``--extractor-args`` pair pointing the bgutil POT-provider plugin at that server's
+    ``base_url`` (yt-dlp supports repeating ``--extractor-args`` for different extractors).
     """
-    value = f"youtube:{_PLAYER_CLIENT}"
-    api_key = os.environ.get("DISTIL_YOUTUBE_API_KEY")
-    if api_key:
-        value += f";innertube_host=youtubei.googleapis.com;innertube_key={api_key}"
-    return ["--extractor-args", value]
+    args = ["--extractor-args", f"youtube:{_PLAYER_CLIENT}"]
+    provider_url = os.environ.get("DISTIL_POT_PROVIDER_URL")
+    if provider_url:
+        args += ["--extractor-args", f"{_POT_PROVIDER_EXTRACTOR_KEY}:base_url={provider_url}"]
+    return args
 
 
 # Bounded retry for transient failures (429 / 5xx / network) — enough attempts to ride out a
