@@ -63,12 +63,26 @@ def test_list_playlist_video_urls_returns_watch_urls():
 
 
 @pytest.mark.unit
+def test_list_playlist_video_urls_passes_player_client_fallback_chain():
+    payload = json.dumps({"entries": [{"id": "abc"}]})
+
+    def fake_run(cmd, **kwargs):
+        idx = cmd.index("--extractor-args")
+        assert cmd[idx + 1] == "youtube:player_client=android,web"
+        return _proc(returncode=0, stdout=payload)
+
+    list_playlist_video_urls("https://www.youtube.com/playlist?list=PL1", run=fake_run)
+
+
+@pytest.mark.unit
 def test_list_playlist_video_urls_raises_on_yt_dlp_failure():
     def fake_run(cmd, **kwargs):
         return _proc(returncode=1, stderr="playlist does not exist")
 
     with pytest.raises(YoutubeFetchError):
-        list_playlist_video_urls("https://www.youtube.com/playlist?list=bad", run=fake_run)
+        list_playlist_video_urls(
+            "https://www.youtube.com/playlist?list=bad", run=fake_run, sleep=lambda s: None
+        )
 
 
 @pytest.mark.unit
@@ -104,6 +118,21 @@ def test_fetch_video_transcript_parses_downloaded_srt(tmp_path):
     assert len(transcript.segments) == 2
     assert transcript.segments[0].text == "Welcome to the talk."
     assert transcript.segments[0].timestamp == "00:00:01"
+
+
+@pytest.mark.unit
+def test_fetch_video_transcript_passes_player_client_fallback_chain(tmp_path):
+    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+
+    def fake_run(cmd, **kwargs):
+        idx = cmd.index("--extractor-args")
+        assert cmd[idx + 1] == "youtube:player_client=android,web"
+        out_index = cmd.index("-o") + 1
+        out_prefix = cmd[out_index]
+        Path(f"{out_prefix}.en.srt").write_text(srt_body, encoding="utf-8")
+        return _proc(returncode=0)
+
+    fetch_video_transcript("https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path)
 
 
 # ---- T-Y7: a reused workdir's stale caption file is never mistaken for current output ----
@@ -161,6 +190,90 @@ def test_fetch_video_transcript_raises_on_yt_dlp_failure(tmp_path):
         fetch_video_transcript(
             "https://www.youtube.com/watch?v=gone", run=fake_run, workdir=tmp_path
         )
+
+
+# ---- Phase 19: retry/backoff on transient failures (429/5xx/network) ----
+
+
+@pytest.mark.unit
+def test_fetch_video_transcript_retries_transient_429_then_succeeds(tmp_path):
+    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if len(calls) < 3:
+            return _proc(returncode=1, stderr="HTTP Error 429: Too Many Requests")
+        out_index = cmd.index("-o") + 1
+        out_prefix = cmd[out_index]
+        Path(f"{out_prefix}.en.srt").write_text(srt_body, encoding="utf-8")
+        return _proc(returncode=0)
+
+    sleeps = []
+    transcript = fetch_video_transcript(
+        "https://www.youtube.com/watch?v=abc",
+        run=fake_run,
+        workdir=tmp_path,
+        sleep=sleeps.append,
+    )
+    assert len(calls) == 3
+    assert transcript.full_text() == "Hello."
+    # Exponential backoff: 2s, then 4s — no real waiting since sleep is faked.
+    assert sleeps == [2.0, 4.0]
+
+
+@pytest.mark.unit
+def test_fetch_video_transcript_raises_youtube_fetch_error_on_persistent_429(tmp_path):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _proc(returncode=1, stderr="HTTP Error 429: Too Many Requests")
+
+    with pytest.raises(YoutubeFetchError):
+        fetch_video_transcript(
+            "https://www.youtube.com/watch?v=stillbad",
+            run=fake_run,
+            workdir=tmp_path,
+            sleep=lambda seconds: None,
+        )
+    # Bounded: capped attempts, not retried forever.
+    assert len(calls) == 3
+
+
+@pytest.mark.unit
+def test_fetch_video_transcript_does_not_retry_non_transient_failure(tmp_path):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _proc(returncode=1, stderr="Video unavailable")
+
+    with pytest.raises(YoutubeFetchError, match="Video unavailable"):
+        fetch_video_transcript(
+            "https://www.youtube.com/watch?v=gone",
+            run=fake_run,
+            workdir=tmp_path,
+            sleep=lambda seconds: (_ for _ in ()).throw(AssertionError("should not sleep")),
+        )
+    assert len(calls) == 1
+
+
+@pytest.mark.unit
+def test_list_playlist_video_urls_raises_youtube_fetch_error_on_persistent_5xx():
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _proc(returncode=1, stderr="HTTP Error 503: Service Unavailable")
+
+    with pytest.raises(YoutubeFetchError):
+        list_playlist_video_urls(
+            "https://www.youtube.com/playlist?list=bad",
+            run=fake_run,
+            sleep=lambda seconds: None,
+        )
+    assert len(calls) == 3
 
 
 # ---- T-Y6: malformed playlist JSON -> clear error, not a crash ----
