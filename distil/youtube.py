@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from distil.ingest import IngestError, Transcript, ingest_srt_text
+from distil.source import is_youtube_host
 
 _YT_DLP = "yt-dlp"
 
@@ -28,8 +29,11 @@ class YoutubeFetchError(ValueError):
 
 
 def is_playlist_url(url: str) -> bool:
-    """True for a playlist link (``?list=...`` with no specific video); false for a single video."""
-    parsed = urlparse(url)
+    """True for a YouTube playlist link (``?list=...`` with no specific video); false otherwise."""
+    if not is_youtube_host(url):
+        return False
+    candidate = url if "://" in url else f"https://{url}"
+    parsed = urlparse(candidate)
     query = parse_qs(parsed.query)
     if "list" in query and "v" not in query:
         return True
@@ -86,7 +90,7 @@ def _fetch_into(video_url: str, run, workdir: Path, timeout: float) -> Transcrip
             # quality than the original/auto-generated English track and would be picked up
             # by the sort-and-take-first below.
             "--sub-langs", "en",
-            "--sub-format", "srt/best",
+            "--sub-format", "json3/best",
             "--convert-subs", "srt",
             "-o", str(out_prefix),
             video_url,

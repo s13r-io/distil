@@ -8,10 +8,12 @@ with inline scoring. Auth (web/auth.py) is unchanged and gates every data route;
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import threading
 from pathlib import Path
@@ -243,6 +245,10 @@ def _enqueue_youtube_source(store_jobs: jobsmod.JobStore, url: str):
             video_urls = youtube.list_playlist_video_urls(url)
         except YoutubeFetchError as exc:
             return JSONResponse({"detail": str(exc)}, status_code=400)
+        except subprocess.TimeoutExpired:
+            return JSONResponse({"detail": "Listing the playlist timed out."}, status_code=400)
+        except OSError as exc:
+            return JSONResponse({"detail": f"Could not run yt-dlp: {exc}"}, status_code=400)
         job_ids = [
             store_jobs.enqueue(
                 kind="youtube", title="YouTube video", payload=v_url, source_url=v_url,
@@ -351,7 +357,7 @@ def create_app() -> FastAPI:
         store_jobs = jobsmod.JobStore(_db_path())
         has_content = bool(paste.strip()) or (file is not None and bool(file.filename))
         if not has_content and source_url.strip():
-            return _enqueue_youtube_source(store_jobs, source_url.strip())
+            return await asyncio.to_thread(_enqueue_youtube_source, store_jobs, source_url.strip())
         try:
             normalized_url = normalize_youtube_url(source_url)
         except SourceUrlError as exc:
