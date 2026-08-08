@@ -177,6 +177,10 @@ Replaces the synchronous ingest with a non-blocking, restart-safe job queue.
   - `POST /jobs/{id}/retry` — re-queues a `failed` job.
   - `POST /jobs/clear?scope=finished|failed` — bulk clear.
 - **Rate/cost:** serial processing naturally respects LLM rate limits and avoids cost spikes.
+- **Playlist up-front fetch (Phase E):** superseded description above of "one `youtube` job per
+  video, fetched inline at distill time" — see `AGENTS.md`'s "Playlist up-front fetch + staging"
+  entry for the current two-worker (`Worker` + `Fetcher`) design, the `pending_fetch`/`fetching`
+  statuses, and where staged content lives, not this v1 spec.
 
 ## 9. Backend: streaming Ask
 

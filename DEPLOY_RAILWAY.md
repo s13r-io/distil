@@ -47,7 +47,10 @@ DISTIL_AUTH_SECRET   = <a long random secret>   # REQUIRED for public hosting
 ```
 
 Optional tuning: `DISTIL_RETRIEVAL_THRESHOLD`, `DISTIL_TOP_K`, `DISTIL_NOVELTY_RATIO`,
-`DISTIL_PROFILE_ALPHA`. Never commit these — they live only in Railway.
+`DISTIL_PROFILE_ALPHA`, `DISTIL_STAGING_DIR` (defaults to a `staging/` subdirectory next to
+`DISTIL_DB_PATH`, i.e. already on the volume — only set this to move it elsewhere),
+`DISTIL_PLAYLIST_FETCH_DELAY_SECONDS` (default 3.0 — pause between a playlist's transcript
+fetches). Never commit these — they live only in Railway.
 
 > **Local embeddings + Railway:** with `DISTIL_EMBEDDER=local` (the chosen default) a small
 > embedding model loads into the service's RAM and should be baked into the image at build

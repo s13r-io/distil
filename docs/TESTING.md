@@ -69,6 +69,15 @@ that must abstain.
 - T-Y13 (Phase A, visible progress): a successful fetch reports `("transcript_fetch", "start")`, `("transcript_fetch", "finish")`, `("caption_parse", "start")`, `("caption_parse", "finish")`, in that order, via the optional `on_phase` callback.
 - T-Y14 (Phase A): a `yt-dlp` failure reports only `("transcript_fetch", "start")` — it never advances to `caption_parse`, so a stalled/failed fetch reads as stuck on the right phase rather than silently progressing.
 
+### web/jobs.py — playlist up-front fetch + staging (Phase E; `youtube.py` itself is unchanged)
+- T-J1: `Fetcher.process_once()` claims and fetches every currently `pending_fetch` job, one at a time, flipping each to `queued` with `kind=KIND_YOUTUBE_STAGED` — a playlist's transcripts are all fetched before the (unmodified, still single-worker) distill `Worker` needs to touch any of them.
+- T-J2: with two pending videos, fetching only the first leaves it `queued` (distillable) while the second is still untouched (`pending_fetch`) — proves the overlap: the distill `Worker` can process the first while the `Fetcher` keeps working through the rest, since the two claim disjoint job statuses.
+- T-J3: `Fetcher`'s inter-fetch pause (`delay_seconds`, default 3.0s) is applied via an injectable `sleep` before every fetch after the first, never before the first; configurable per-instance (wired from `DISTIL_PLAYLIST_FETCH_DELAY_SECONDS` in `web/app.py`).
+- T-J4: one video whose `fetch_fn` returns `{"status": "failed", ...}` (or raises) is marked `failed` with a readable error and never prevents the rest of the batch from fetching — the same isolation guarantee `_enqueue_youtube_source`'s docstring already states for distilling.
+- T-J5: `recover_interrupted` requeues both a crashed `running` distill job (`-> queued`) and a crashed `fetching` job (`-> pending_fetch`) in one call; a `youtube_staged` job recovered this way still finds its staged transcript file on disk (nothing ever unlinks it until it's actually consumed) and `web.app._load_job_transcript` reads it successfully.
+- T-J6: `web.app._upload_dir()`/`_transcript_stage_dir()` are derived from `DISTIL_DB_PATH`'s own directory (or `DISTIL_STAGING_DIR` if set) — never `tempfile.gettempdir()`. Regression coverage: this is the fix for a live bug where a queued-but-not-yet-processed upload's file lived on the container's ephemeral disk and was silently lost on restart/redeploy even though its job row (in sqlite, on the volume) survived.
+- T-J7: a job's staged file (uploaded file or prefetched transcript) is deleted when the job is consumed (already covered by the existing `_load_job_transcript` `finally`), when its job is removed via `POST /jobs/{id}/remove`, or swept by `POST /jobs/clear` — never left to accumulate unboundedly on the volume.
+
 ### models.py
 - T-M1: Profile validates; rejects bad `status` enum.
 - T-M2: KnowledgeItem requires `provenance`; `quote` is mandatory, `timestamp` may be null.
