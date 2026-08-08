@@ -467,28 +467,43 @@ def diagnose_pot(
     only way yt-dlp emits the discovery line) and ``--simulate`` (nothing written to disk). Never
     retries transient failures — a diagnostic should show exactly what happened on one real
     attempt, not silently swallow it into a different second attempt.
+
+    Never raises: a timeout or other process-launch failure is caught here (its exception text,
+    e.g. ``subprocess.TimeoutExpired``'s ``str()``, embeds the full argv including the
+    ``--extractor-args`` value carrying the provider URL) and reported as a
+    :class:`PotDiagnostic` with a sentinel ``returncode`` and redacted ``raw_output``, so callers
+    never need their own redaction and can't reintroduce the leak by skipping it.
     """
     provider_url = os.environ.get("DISTIL_POT_PROVIDER_URL")
-    proc = run(
-        [
-            _YT_DLP,
-            "--no-update",
-            "-v",
-            *_extractor_args(extra_youtube_args=["pot_trace=true"]),
-            "--skip-download",
-            "--simulate",
-            "--write-subs",
-            "--write-auto-subs",
-            "--sub-langs",
-            "en",
-            "--sub-format",
-            "srt/best",
-            video_url,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        proc = run(
+            [
+                _YT_DLP,
+                "--no-update",
+                "-v",
+                *_extractor_args(extra_youtube_args=["pot_trace=true"]),
+                "--skip-download",
+                "--simulate",
+                "--write-subs",
+                "--write-auto-subs",
+                "--sub-langs",
+                "en",
+                "--sub-format",
+                "srt/best",
+                video_url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        redacted_error = _redact_pot_diagnostic(str(exc), provider_url)
+        return PotDiagnostic(
+            returncode=-1,
+            provider_discovery=None,
+            context_attempts=[],
+            raw_output=redacted_error,
+        )
     redacted = _redact_pot_diagnostic(f"{proc.stdout}{proc.stderr}", provider_url)
     discovery_match = _PROVIDER_DISCOVERY_RE.search(redacted)
     # A single fetch can retry the same (context, client) pair once per format candidate —

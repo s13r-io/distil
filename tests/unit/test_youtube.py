@@ -7,6 +7,7 @@ these stay unit tests: no network, no subprocess, no real binary required.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -538,6 +539,27 @@ def test_diagnose_pot_output_never_leaks_provider_url(monkeypatch):
         )
 
     result = diagnose_pot("https://www.youtube.com/watch?v=abc", run=fake_run)
+    assert provider_url not in result.raw_output
+
+
+@pytest.mark.unit
+def test_diagnose_pot_never_raises_and_redacts_url_on_timeout(monkeypatch):
+    provider_url = "http://bgutil-pot-provider.railway.internal:4416"
+    monkeypatch.setenv("DISTIL_POT_PROVIDER_URL", provider_url)
+    cmd = [
+        "yt-dlp",
+        "--extractor-args",
+        f"youtubepot-bgutilhttp:base_url={provider_url}",
+    ]
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=60.0)
+
+    result = diagnose_pot("https://www.youtube.com/watch?v=abc", run=fake_run, timeout=60.0)
+    assert isinstance(result, PotDiagnostic)
+    assert result.returncode != 0
+    assert result.provider_discovery is None
+    assert result.context_attempts == []
     assert provider_url not in result.raw_output
 
 
