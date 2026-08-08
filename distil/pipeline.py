@@ -112,7 +112,9 @@ def run_pipeline(
         entry.related_entries = _timed("graph", config, lambda: link_graph(entry, store, client))
 
     # Stage 7 — file (and embed items into the vector store for the read layer).
-    _timed("file", config, lambda: store.file_entry(entry, embedder=embedder))
+    _timed(
+        "file", config, lambda: store.file_entry(entry, embedder=embedder, transcript=transcript)
+    )
     return entry
 
 

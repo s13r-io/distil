@@ -120,11 +120,30 @@ that must abstain.
 - T-S3: KB and DB survive process restart (persistence).
 - T-S4: new entries with `distilled_note` render a teaching note first and preserve raw evidence below it; legacy entries still render.
 - T-S5: noisy source filenames are cleaned for display, optional YouTube URLs render near the top of notes, and Note v1 evidence is collapsed/de-emphasized.
+- T-S6 (OKF, Phase 2): `file_entry(..., transcript=...)` exports `sources/<slug>.md` + `raw/<slug>.md` under `okf_root`; omitting `transcript` (feedback-only re-file) leaves no `okf_root` directory.
+- T-S7 (OKF, Phase 2): `okf_root` defaults to a sibling of `kb_dir`; `delete_entry` removes an entry's OKF pages too.
 
 ### pipeline.py
 - T-PL1: end-to-end with FakeClient produces a complete, schema-valid KBEntry with `distilled_note`.
 - T-PL2: `little_to_extract` path returns a minimal result without filing and makes no extract/link calls.
 - T-PL3: useful transcript with graph disabled stays within four LLM calls: triage, extract, link, note.
+- T-PL4 (OKF, Phase 2): filing a useful transcript exports both OKF pages (`sources/<slug>.md`, `raw/<slug>.md`) via `store.file_entry`'s `transcript` kwarg.
+
+### okf.py (OKF export layer, Phase 2 — pure, no LLM)
+- T-OKF1: the export slug is derived from `source.title` (slugified); falls back to `entry_id` when the title yields nothing usable; stable across repeated calls.
+- T-OKF2: two distinct entries whose titles collide get distinct slugs — neither export overwrites the other's pages.
+- T-OKF3: `sources/<slug>.md` has YAML frontmatter (`type: source`, title, description, slug, published, duration, raw path, tags, created/updated) and a body with a thesis, a chronological "Key moments" section from knowledge-item provenance, and a link to the raw page.
+- T-OKF4: the source page omits Concepts-covered/Entities sections (not implemented until a later phase) and never includes `feedback` or `application_links` data (neutrality).
+- T-OKF5: `raw/<slug>.md` has `type: raw-transcript`, `immutable: true`, and a timestamped body built from `Transcript` segments.
+- T-OKF6: `export_entry` regenerates `okf_root/index.md` and `okf_root/sources/index.md` deterministically; re-exporting the same entry is idempotent (no duplicate or orphaned files).
+- T-OKF7: `remove_entry` deletes both pages for an entry and refreshes both indexes; removing an entry with no exported pages is a no-op.
+
+### okf_lint.py (stdlib-only bundle validator, `python -m distil.okf_lint <okf_root>`)
+- T-OKFL1 (E1): every non-reserved `.md` file must have YAML frontmatter with a non-empty `type`.
+- T-OKFL2 (E2): every relative markdown link must resolve to a file inside the bundle.
+- T-OKFL3 (E3): every `sources/<slug>.md` must appear in `sources/index.md`.
+- T-OKFL4 (E4): `sources/<slug>.md` and `raw/<slug>.md` must exist in pairs (checked in both directions).
+- A freshly generated bundle lints clean, and `main()` exits non-zero when any error is present.
 
 ### cli.py
 - T-C1: `distil run <file>` accepts `.srt`/`.txt`/`.md` and `distil run --paste` (or stdin) accepts pasted text; exits 0 and prints the entry path.

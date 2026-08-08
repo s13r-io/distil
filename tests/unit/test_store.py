@@ -3,6 +3,7 @@
 import pytest
 
 from distil.embed import FakeEmbedder
+from distil.ingest import Segment, Transcript
 from distil.models import ActionStep, GroundedText, KBEntry, ReviewQuestion
 from distil.store import Store
 
@@ -243,3 +244,41 @@ def test_delete_entry_removes_file_index_and_vectors(store):
 @pytest.mark.unit
 def test_delete_missing_entry_returns_false(store):
     assert store.delete_entry("e_missing") is False
+
+
+# ---- OKF export plumbing (Phase 2) -------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_filing_with_transcript_exports_okf_pages(store):
+    entry = _entry()
+    transcript = Transcript(segments=[Segment(text="keep functions small", locator="seg:0",
+                                              timestamp="00:12:30")])
+    store.file_entry(entry, transcript=transcript)
+    assert (store.okf_root / "sources" / "a-talk.md").exists()
+    assert (store.okf_root / "raw" / "a-talk.md").exists()
+    assert (store.okf_root / "index.md").exists()
+
+
+@pytest.mark.unit
+def test_filing_without_transcript_does_not_touch_okf(store):
+    entry = _entry()
+    store.file_entry(entry)  # e.g. a feedback-only re-file
+    assert not store.okf_root.exists()
+
+
+@pytest.mark.unit
+def test_okf_root_defaults_to_sibling_of_kb_dir(tmp_path):
+    store = Store(db_path=tmp_path / "distil.db", kb_dir=tmp_path / "kb")
+    assert store.okf_root == tmp_path / "okf"
+
+
+@pytest.mark.unit
+def test_delete_entry_removes_okf_pages(store):
+    entry = _entry()
+    transcript = Transcript(segments=[Segment(text="keep functions small", locator="seg:0",
+                                              timestamp="00:12:30")])
+    store.file_entry(entry, transcript=transcript)
+    store.delete_entry("e_01")
+    assert not (store.okf_root / "sources" / "a-talk.md").exists()
+    assert not (store.okf_root / "raw" / "a-talk.md").exists()

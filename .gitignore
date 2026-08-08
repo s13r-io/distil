@@ -6,6 +6,7 @@
 # Generated knowledge base + data (gitignored by default; back up via separate private repo — TRACKER D3)
 /kb/
 /data/
+/okf/
 
 # Python
 __pycache__/
@@ -19,6 +20,7 @@ dist/
 .venv/
 venv/
 env/
+uv.lock
 
 # Tooling caches
 .pytest_cache/

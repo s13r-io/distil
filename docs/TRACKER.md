@@ -115,6 +115,13 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 |------|------------------------------------------------|--------|----|----|----|-------|-------|
 | 13.1 | youtube.py fetch layer + web ADD-by-URL wiring | done   | ✅ | ✅ | ✅ | agent | distil/youtube.py (yt-dlp via injectable `run`): playlist enumeration + caption fetch → `ingest.ingest_srt_text`; web/app.py ADD input accepts a video/playlist URL, enqueues one `youtube` job per video through the existing web/jobs.py Worker; per-video failures skipped+reported, never fatal to the batch. `youtube` optional extra added. |
 
+## Phase 14 — Per-video OKF export layer (OKF Phase 2) (T-OKF*, T-OKFL*)
+
+| ID   | Task                                          | Status | T? | C? | P? | Owner | Notes |
+|------|------------------------------------------------|--------|----|----|----|-------|-------|
+| 14.1 | okf.py export layer (sources/+raw/+indexes)   | done   | ✅ | ✅ | ✅ | agent | Alongside lossless `kb/<id>.md`, `okf.py` derives a neutral OKF v0.1 bundle (`okf/sources/<slug>.md` + `okf/raw/<slug>.md` + regenerated indexes) with no feedback/application-link data; stable title-derived slug (falls back to `entry_id`, disambiguated on title collision). `store.file_entry(..., transcript=...)` triggers export at the File stage (pipeline.py passes the in-memory Transcript through); omitted for feedback-only re-files. `delete_entry` cascades to remove OKF pages. ARCHITECTURE.md §3/§4 updated. |
+| 14.2 | okf_lint.py bundle validator                 | done   | ✅ | ✅ | ✅ | agent | stdlib-only, `python -m distil.okf_lint <okf_root>`; E1 frontmatter `type` present, E2 relative links resolve, E3 sources index completeness, E4 sources/raw parity (both directions, both errors). Concept/entity orphan checks deferred (not implemented until those layers exist). |
+
 ---
 
 ## Decisions needed (owner answers here)
@@ -147,6 +154,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 - 2026-06-21 Source metadata UX done: CLI/web accept optional YouTube URLs, uploaded filenames are cleaned before display, Note v1 evidence is collapsed/de-emphasized in markdown and web, and index titles prefer synthesized note titles. 171 unit tests green.
 - 2026-06-21 YouTube metadata + deletion done: YouTube URLs fetch best-effort oEmbed metadata (title/channel/channel URL/thumbnail/provider/fetched_at), notes render retained video metadata, and CLI/web deletion removes markdown, index row, and vectors. Unit tests/lint green.
 - 2026-08-08 Phase 13.1 done: YouTube video/playlist ingest (OKF Phase 1) — youtube.py fetches captions via yt-dlp and enumerates playlists, web ADD input enqueues one `youtube` job per video through the existing Worker, per-video failures are skipped+reported (never fatal to the batch). `youtube` extra added. 206 unit tests green.
+- 2026-08-08 Phase 14 (14.1-14.2) done: per-video OKF export layer (OKF Phase 2) — okf.py derives a neutral `sources/`+`raw/`+index bundle alongside `kb/` at the File stage (transcript-gated, so feedback-only re-files leave it untouched), okf_lint.py validates it (E1-E4, stdlib only). Neutrality (no feedback/application-links) and slug stability verified by dedicated unit tests. concepts/entities/canonicalization/OpenKnowledge wiring remain out of scope for a later phase. 235 unit tests green, ruff clean.
 
 ## Agent notes (non-blocking observations)
 - ENV: stack pins Python >=3.11 (ARCHITECTURE.md §1) and CI uses 3.11. The dev sandbox here runs 3.10, so `pip install -e .` is refused by `requires-python`; tests are run via `PYTHONPATH=.` instead. No stack change made — flagging only. If the owner wants the sandbox to do editable installs, lowering the floor to 3.10 would be a stack decision (raise in Decisions needed first).
