@@ -108,6 +108,36 @@ def test_slug_is_stable_across_calls():
     assert slug_for_entry(entry) == slug_for_entry(entry)
 
 
+@pytest.mark.unit
+def test_title_collision_between_distinct_entries_does_not_overwrite(tmp_path):
+    e1 = _entry(entry_id="e_aaa111", title="Live Q&A")
+    e2 = _entry(entry_id="e_bbb222", title="Live Q&A")
+
+    export_entry(e1, _transcript(), tmp_path)
+    export_entry(e2, _transcript(), tmp_path)
+
+    slug1 = slug_for_entry(e1, tmp_path)
+    slug2 = slug_for_entry(e2, tmp_path)
+    assert slug1 != slug2
+    assert (tmp_path / "sources" / f"{slug1}.md").exists()
+    assert (tmp_path / "sources" / f"{slug2}.md").exists()
+    assert (tmp_path / "raw" / f"{slug1}.md").exists()
+    assert (tmp_path / "raw" / f"{slug2}.md").exists()
+
+    text1 = (tmp_path / "sources" / f"{slug1}.md").read_text()
+    text2 = (tmp_path / "sources" / f"{slug2}.md").read_text()
+    assert "distil_entry_id: e_aaa111" in text1
+    assert "distil_entry_id: e_bbb222" in text2
+
+    # re-exporting either entry keeps its previously assigned slug, even though both still
+    # collide on the same base (title-derived) slug.
+    export_entry(e1, _transcript(), tmp_path)
+    export_entry(e2, _transcript(), tmp_path)
+    assert slug_for_entry(e1, tmp_path) == slug1
+    assert slug_for_entry(e2, tmp_path) == slug2
+    assert len(list((tmp_path / "sources").glob("*.md"))) == 3  # both entries + index.md
+
+
 # ---- export_entry: sources/ page -----------------------------------------------------------
 
 

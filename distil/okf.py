@@ -29,6 +29,15 @@ stripped). If that yields nothing usable (empty/untitled source), the slug falls
 entry's ``entry_id``. The title is not expected to change once an entry is filed, so the slug
 stays stable across re-exports of the same entry.
 
+Collision handling: each ``sources/<slug>.md`` records its owning entry in a
+``distil_entry_id`` frontmatter field. When resolving a slug for export/removal (i.e. when an
+``okf_root`` is supplied), that field is consulted first — if this entry already owns a slug
+from a previous export, that slug is reused even if another entry has since taken the base
+slug. Otherwise, if the base (title-derived) slug is free or already owned by this same entry,
+it is used as-is. Only when the base slug is owned by a *different* entry_id does the slug
+gain a short suffix derived from this entry's entry_id, so two distinct entries with the same
+title never overwrite each other's pages.
+
 ``published`` is not fetched by Distil today (YouTube oEmbed does not return a publish date),
 so it is set to the entry's capture date as the closest available honest proxy; this is
 documented here rather than invented silently.
@@ -47,10 +56,53 @@ from .source import _youtube_video_id, display_title
 _SLUG_RUN = re.compile(r"[^a-z0-9]+")
 
 
-def slug_for_entry(entry: KBEntry) -> str:
-    """Deterministic, stable OKF slug for ``entry`` (see module docstring)."""
-    slug = _slugify(entry.source.title)
-    return slug or entry.entry_id
+def slug_for_entry(entry: KBEntry, okf_root: str | Path | None = None) -> str:
+    """Deterministic, stable OKF slug for ``entry`` (see module docstring for the collision rule).
+
+    Without ``okf_root`` this just computes the base (title-derived, or entry_id-fallback)
+    slug with no collision check — used by callers that only need the "natural" slug shape.
+    With ``okf_root``, existing ``sources/*.md`` frontmatter is consulted to keep the slug
+    stable across re-exports and to disambiguate title collisions between distinct entries.
+    """
+    base = _slugify(entry.source.title) or entry.entry_id
+    if okf_root is None:
+        return base
+
+    sources_dir = Path(okf_root) / "sources"
+    owned = _slug_owned_by(sources_dir, entry.entry_id)
+    if owned:
+        return owned
+
+    owner = _owner_of_slug(sources_dir, base)
+    if owner is None or owner == entry.entry_id:
+        return base
+
+    suffix_len = 6
+    while True:
+        suffix = _slugify(entry.entry_id[-suffix_len:]) or entry.entry_id
+        candidate = f"{base}-{suffix}"
+        owner = _owner_of_slug(sources_dir, candidate)
+        if owner is None or owner == entry.entry_id:
+            return candidate
+        suffix_len += 2
+
+
+def _slug_owned_by(sources_dir: Path, entry_id: str) -> str | None:
+    if not sources_dir.exists():
+        return None
+    for path in sources_dir.glob("*.md"):
+        if path.name == "index.md":
+            continue
+        if _frontmatter_field(path.read_text(encoding="utf-8"), "distil_entry_id") == entry_id:
+            return path.stem
+    return None
+
+
+def _owner_of_slug(sources_dir: Path, slug: str) -> str | None:
+    path = sources_dir / f"{slug}.md"
+    if not path.exists():
+        return None
+    return _frontmatter_field(path.read_text(encoding="utf-8"), "distil_entry_id")
 
 
 def _slugify(text: str) -> str:
@@ -65,7 +117,7 @@ def export_entry(entry: KBEntry, transcript: Transcript, okf_root: str | Path) -
     sources_dir.mkdir(parents=True, exist_ok=True)
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    slug = slug_for_entry(entry)
+    slug = slug_for_entry(entry, root)
     (raw_dir / f"{slug}.md").write_text(_render_raw(entry, transcript, slug), encoding="utf-8")
     (sources_dir / f"{slug}.md").write_text(_render_source(entry, slug), encoding="utf-8")
     _rebuild_indexes(root)
@@ -74,7 +126,7 @@ def export_entry(entry: KBEntry, transcript: Transcript, okf_root: str | Path) -
 def remove_entry(entry: KBEntry, okf_root: str | Path) -> None:
     """Delete an entry's OKF pages (if present) and regenerate both indexes."""
     root = Path(okf_root)
-    slug = slug_for_entry(entry)
+    slug = slug_for_entry(entry, root)
     (root / "sources" / f"{slug}.md").unlink(missing_ok=True)
     (root / "raw" / f"{slug}.md").unlink(missing_ok=True)
     _rebuild_indexes(root)
@@ -101,6 +153,7 @@ def _render_source(entry: KBEntry, slug: str) -> str:
     if entry.source.url:
         lines.append(f"url: {entry.source.url}")
     lines.append(f"slug: {slug}")
+    lines.append(f"distil_entry_id: {entry.entry_id}")
     lines.append(f"published: {_date_only(entry.source.captured_at)}")
     lines.append(f"duration: {_yaml_str(_format_duration(entry.source.duration_sec))}")
     lines.append(f"raw: {_yaml_str(f'../raw/{slug}.md')}")
@@ -221,6 +274,7 @@ def _date_only(iso_timestamp: str) -> str:
 
 def _yaml_str(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = escaped.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
     return f'"{escaped}"'
 
 
