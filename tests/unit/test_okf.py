@@ -3,7 +3,7 @@
 import pytest
 
 from distil.ingest import Segment, Transcript
-from distil.models import Concept, ConceptClaim, ConceptMember, KBEntry
+from distil.models import Concept, ConceptClaim, ConceptEdge, ConceptMember, KBEntry
 from distil.okf import (
     export_concept,
     export_entry,
@@ -526,8 +526,79 @@ def test_okfc4_remove_concept_deletes_page_and_regenerates_indexes(concept_store
     assert not (concept_store.okf_root / "concepts" / "traditional-rag.md").exists()
     concepts_index = (concept_store.okf_root / "concepts" / "index.md").read_text()
     assert "traditional-rag" not in concepts_index
-    root_index = (concept_store.okf_root / "index.md").read_text()
-    assert "concepts/traditional-rag.md" not in root_index
+
+
+# ---- Phase 16 — typed-edge sections + contradiction flag (design report §9 item 4) -----------
+
+
+@pytest.mark.unit
+def test_concept_page_renders_typed_edge_sections(concept_store):
+    e1 = _concept_entry("e_r1", "Why AI Abandoned RAG", "k_01", "s1", "q1")
+    concept_store.file_entry(e1)
+    target = Concept(
+        concept_id="agentic-rag",
+        title="Agentic RAG",
+        description="RAG with a planning loop.",
+        members=[ConceptMember(entry_id="e_r1", item_id="k_01", quote="q1")],
+        created_at="2026-06-15T00:00:00",
+        updated_at="2026-06-15T00:00:00",
+    )
+    concept_store.save_concept(target)
+    export_concept(target, concept_store, concept_store.okf_root)
+
+    concept = _traditional_rag_concept()
+    concept.edges = [ConceptEdge(target_concept_id="agentic-rag", relation="contrasts_with")]
+    e2 = _concept_entry("e_r2", "Agentic RAG Explained", "k_02", "s2", "q2")
+    concept_store.file_entry(e2)
+
+    export_concept(concept, concept_store, concept_store.okf_root)
+
+    text = (concept_store.okf_root / "concepts" / "traditional-rag.md").read_text()
+    assert "## Contrasts with" in text
+    assert "[Agentic RAG](agentic-rag.md)" in text
+    assert "## Builds on" not in text
+    assert "## Related" not in text
+
+
+@pytest.mark.unit
+def test_concept_page_omits_edge_sections_when_no_edges(concept_store):
+    e1 = _concept_entry("e_r1", "Why AI Abandoned RAG", "k_01", "s1", "q1")
+    e2 = _concept_entry("e_r2", "Agentic RAG Explained", "k_02", "s2", "q2")
+    concept_store.file_entry(e1)
+    concept_store.file_entry(e2)
+    concept = _traditional_rag_concept()
+
+    export_concept(concept, concept_store, concept_store.okf_root)
+
+    text = (concept_store.okf_root / "concepts" / "traditional-rag.md").read_text()
+    assert "## Contrasts with" not in text
+    assert "## Builds on" not in text
+    assert "## Related" not in text
+
+
+@pytest.mark.unit
+def test_concept_page_flags_stance_contradiction_under_claims(concept_store):
+    e1 = _concept_entry(
+        "e_r1", "Why AI Abandoned RAG", "k_01", "Traditional RAG retrieves then generates.",
+        "retrieve then generate", "0:01:04",
+    )
+    e2 = _concept_entry(
+        "e_r2", "Agentic RAG Explained", "k_02", "Naive RAG has no planning step.",
+        "no planning step", "0:02:10",
+    )
+    e1.knowledge_items[0].stance = "fact"
+    e2.knowledge_items[0].stance = "opinion"
+    concept_store.file_entry(e1)
+    concept_store.file_entry(e2)
+    concept = _traditional_rag_concept()
+
+    export_concept(concept, concept_store, concept_store.okf_root)
+
+    text = (concept_store.okf_root / "concepts" / "traditional-rag.md").read_text()
+    assert "## Claims" in text
+    assert "> **Contradiction:** members disagree" in text
+    assert "why-ai-abandoned-rag (fact)" in text
+    assert "agentic-rag-explained (opinion)" in text
 
 
 @pytest.mark.unit

@@ -19,8 +19,13 @@ Checks (all ERROR; exit non-zero if any fire):
   E7  bidirectional concept<->source links (SCHEMA §5): a concept's `## Sources` link to a
       source implies that source's `## Concepts covered` links back, and vice versa
   E8  no orphan concepts: every concepts/<slug>.md has >=1 inbound link from a source's
-      `## Concepts covered` (the concepts/index.md listing does not count).
+      `## Concepts covered` or another concept's typed-edge section (`## Contrasts with` /
+      `## Builds on` / `## Related`, Phase 16) — the concepts/index.md listing does not count.
       sources/<slug>.md pages remain exempt — they're provenance leaves by design.
+
+Concept-to-concept typed-edge links (Phase 16) are same-directory (`concepts/x.md` ->
+`concepts/y.md`), so E2's generic link-resolution check already covers broken links there with
+no extra code; only E8's orphan check needed extending to recognize them as valid inbound links.
 """
 
 from __future__ import annotations
@@ -224,11 +229,35 @@ def _check_bidirectional_concept_links(root: Path, errors: list[str]) -> None:
                 )
 
 
+def _concept_edge_link_slugs(text: str, heading: str) -> list[str]:
+    """Every same-directory ``<slug>.md`` link target under a concept's typed-edge heading
+    (``## Contrasts with`` / ``## Builds on`` / ``## Related``, Phase 16 design report §9 item
+    4) — unlike ``_section_link_slugs``, these links have no ``../<dirname>/`` prefix since a
+    concept page links to another concept page in the same directory."""
+    idx = text.find(heading)
+    if idx == -1:
+        return []
+    section = text[idx:]
+    slugs: list[str] = []
+    for raw in LINK_RE.findall(section):
+        link = raw.split()[0].split("#", 1)[0]
+        if "/" in link:
+            continue
+        m = re.match(r"([^/]+)\.md$", link)
+        if m:
+            slugs.append(m.group(1))
+    return slugs
+
+
+_EDGE_HEADINGS = ("## Contrasts with", "## Builds on", "## Related")
+
+
 def _check_no_orphan_concepts(root: Path, errors: list[str]) -> None:
     """E8 — every ``concepts/<slug>.md`` (except reserved pages) must have >=1 inbound link
-    from a source's ``## Concepts covered`` section; the ``concepts/index.md`` directory
-    listing does not count (design report §7). ``sources/`` pages stay exempt — they're
-    provenance leaves by design, not required to be linked-to."""
+    from a source's ``## Concepts covered`` section or another concept's typed-edge section
+    (``## Contrasts with`` / ``## Builds on`` / ``## Related``, Phase 16); the
+    ``concepts/index.md`` directory listing does not count (design report §7). ``sources/``
+    pages stay exempt — they're provenance leaves by design, not required to be linked-to."""
     concepts_dir = root / "concepts"
     sources_dir = root / "sources"
     if not concepts_dir.exists():
@@ -241,12 +270,19 @@ def _check_no_orphan_concepts(root: Path, errors: list[str]) -> None:
             inbound.update(
                 _section_link_slugs(p.read_text(encoding="utf-8"), "## Concepts covered", "../concepts")
             )
+    for p in concepts_dir.glob("*.md"):
+        if p.name in RESERVED:
+            continue
+        text = p.read_text(encoding="utf-8")
+        for heading in _EDGE_HEADINGS:
+            inbound.update(_concept_edge_link_slugs(text, heading))
     for p in sorted(concepts_dir.glob("*.md")):
         if p.name in RESERVED:
             continue
         if p.stem not in inbound:
             errors.append(
-                f"E8 orphan concept page (no inbound link from any source): {p.relative_to(root)}"
+                f"E8 orphan concept page (no inbound link from any source or concept): "
+                f"{p.relative_to(root)}"
             )
 
 

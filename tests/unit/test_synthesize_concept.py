@@ -11,10 +11,10 @@ from distil.embed import FakeEmbedder
 from distil.llm import FakeClient
 from distil.models import Concept, ConceptClaim, ConceptMember, KBEntry
 from distil.store import Store
-from distil.synthesize_concept import render_claim, synthesize_concept
+from distil.synthesize_concept import find_claim_contradictions, render_claim, synthesize_concept
 
 
-def _entry(entry_id, item_id, statement, quote, timestamp=None) -> KBEntry:
+def _entry(entry_id, item_id, statement, quote, timestamp=None, stance="fact") -> KBEntry:
     return KBEntry.model_validate(
         {
             "entry_id": entry_id,
@@ -30,7 +30,7 @@ def _entry(entry_id, item_id, statement, quote, timestamp=None) -> KBEntry:
                     "item_id": item_id,
                     "type": "conceptual",
                     "statement": statement,
-                    "stance": "fact",
+                    "stance": stance,
                     "provenance": {"quote": quote, "timestamp": timestamp},
                 }
             ],
@@ -177,3 +177,71 @@ def test_syn4_citation_without_timestamp_omits_it():
     citations = {"k_01": ("some-slug", None)}
     rendered = render_claim(claim, citations)
     assert rendered == "No timestamp here. (some-slug)."
+
+
+# ---- Phase 16 — find_claim_contradictions: deterministic stance-conflict detection ----
+
+
+@pytest.mark.unit
+def test_contradiction_flagged_when_cited_members_stances_disagree(store, embedder):
+    e1 = _entry("e_01", "k_01", "Traditional RAG retrieves then generates.", "q1", stance="fact")
+    e2 = _entry("e_02", "k_02", "Naive RAG has no planning step.", "q2", stance="opinion")
+    store.file_entry(e1, embedder=embedder)
+    store.file_entry(e2, embedder=embedder)
+    concept = Concept(
+        concept_id="traditional-rag",
+        title="Traditional RAG",
+        description="d",
+        members=[
+            ConceptMember(entry_id="e_01", item_id="k_01", quote="q1"),
+            ConceptMember(entry_id="e_02", item_id="k_02", quote="q2"),
+        ],
+        claims=[ConceptClaim(text="Both agree on the shape.", item_ids=["k_01", "k_02"])],
+        created_at="t",
+        updated_at="t",
+    )
+
+    conflicts = find_claim_contradictions(concept, store)
+
+    assert 0 in conflicts
+    stances = {stance for _entry_id, _item_id, stance in conflicts[0]}
+    assert stances == {"fact", "opinion"}
+
+
+@pytest.mark.unit
+def test_no_contradiction_when_cited_members_stances_agree(store, embedder):
+    e1 = _entry("e_01", "k_01", "Traditional RAG retrieves then generates.", "q1", stance="fact")
+    e2 = _entry("e_02", "k_02", "Naive RAG has no planning step.", "q2", stance="fact")
+    store.file_entry(e1, embedder=embedder)
+    store.file_entry(e2, embedder=embedder)
+    concept = Concept(
+        concept_id="traditional-rag",
+        title="Traditional RAG",
+        description="d",
+        members=[
+            ConceptMember(entry_id="e_01", item_id="k_01", quote="q1"),
+            ConceptMember(entry_id="e_02", item_id="k_02", quote="q2"),
+        ],
+        claims=[ConceptClaim(text="Both agree on the shape.", item_ids=["k_01", "k_02"])],
+        created_at="t",
+        updated_at="t",
+    )
+
+    assert find_claim_contradictions(concept, store) == {}
+
+
+@pytest.mark.unit
+def test_no_contradiction_when_claim_cites_a_single_member(store, embedder):
+    e1 = _entry("e_01", "k_01", "Traditional RAG retrieves then generates.", "q1", stance="fact")
+    store.file_entry(e1, embedder=embedder)
+    concept = Concept(
+        concept_id="traditional-rag",
+        title="Traditional RAG",
+        description="d",
+        members=[ConceptMember(entry_id="e_01", item_id="k_01", quote="q1")],
+        claims=[ConceptClaim(text="Just one source.", item_ids=["k_01"])],
+        created_at="t",
+        updated_at="t",
+    )
+
+    assert find_claim_contradictions(concept, store) == {}

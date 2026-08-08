@@ -1,14 +1,15 @@
-"""Pipeline orchestration — wires stages 0→8. ARCHITECTURE.md §2; TESTING T-PL1, T-PL2, T-PL5, T-PL6.
+"""Pipeline orchestration — wires stages 0→9. ARCHITECTURE.md §2; TESTING T-PL1, T-PL2, T-PL5, T-PL6.
 
 One call turns a normalized transcript + profile into a filed, schema-valid :class:`KBEntry`:
 
     ingest (done by caller) → triage → [short-circuit] → extract → normalize → link
-    → note synthesis → graph → file → canonicalize
+    → note synthesis → graph → file → canonicalize → concept edges
 
 The ``little_to_extract`` verdict short-circuits: a minimal entry is returned but **not filed**,
-and no extract/link/graph/canonicalize LLM calls are made (T-PL2). The LLM-call budget is kept
-bounded (triage + extract + link, plus capped graph calls and capped canonicalize/synthesis
-calls — see ``canonicalize.py``'s module docstring and the OKF Phase 3 design report §6).
+and no extract/link/graph/canonicalize/concept-edge LLM calls are made (T-PL2). The LLM-call
+budget is kept bounded (triage + extract + link, plus capped graph calls and capped
+canonicalize/synthesis/concept-edge calls — see ``canonicalize.py``'s and ``concept_graph.py``'s
+module docstrings and the OKF Phase 3 design report §6, §9 item 4).
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 
 from .canonicalize import run_canonicalize_stage
+from .concept_graph import run_concept_edges_stage
 from .embed import Embedder
 from .extract import run_extraction
 from .graph import link_graph
@@ -38,6 +40,7 @@ class PipelineConfig:
     novelty_ratio: float = 0.2
     enable_graph: bool = True
     enable_canonicalize: bool = True
+    enable_concept_edges: bool = True
     model_version: str = ""
     timing_callback: Callable[[str, float], None] | None = None
 
@@ -122,7 +125,17 @@ def run_pipeline(
     # Stage 8 — canonicalize against existing concepts (capped; embedding candidates first),
     # then synthesize/export the touched concept pages (design report §5).
     if config.enable_canonicalize:
-        _timed("canonicalize", config, lambda: run_canonicalize_stage(entry, store, client))
+        touched = _timed(
+            "canonicalize", config, lambda: run_canonicalize_stage(entry, store, client)
+        )
+        # Stage 9 — concept<->concept typed edges for the concepts just synthesized (capped;
+        # centroid-similarity candidates first, Phase 16 design report §9 item 4).
+        if config.enable_concept_edges:
+            _timed(
+                "concept_edges",
+                config,
+                lambda: run_concept_edges_stage(touched, store, client),
+            )
     return entry
 
 

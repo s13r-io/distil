@@ -249,6 +249,18 @@ class ConceptClaim(_Model):
     item_ids: list[str] = Field(default_factory=list)
 
 
+ConceptRelation = Literal["contrasts_with", "builds_on", "related"]
+
+
+class ConceptEdge(_Model):
+    """One typed, directional link from this concept to another (Phase 16, OKF Phase 3b design
+    report §9 item 4). Computed independently whenever the source concept is (re-)synthesized —
+    same "from this side's perspective" shape ``RelatedEntry`` already has at entry granularity."""
+
+    target_concept_id: str
+    relation: ConceptRelation
+
+
 class Concept(_Model):
     """A canonical idea spanning one or more videos. ``concept_id`` == the slug (OKF's "path
     is identity"). No feedback/application-link data by construction — see report §3."""
@@ -258,6 +270,7 @@ class Concept(_Model):
     description: str
     members: list[ConceptMember] = Field(default_factory=list)
     claims: list[ConceptClaim] = Field(default_factory=list)
+    edges: list[ConceptEdge] = Field(default_factory=list)
     created_at: str
     updated_at: str
     body_model_version: str = ""

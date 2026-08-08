@@ -83,13 +83,15 @@ def render_claim(claim: ConceptClaim, citations: dict[str, tuple[str, str | None
     return f"{claim.text} ({', '.join(parts)})."
 
 
-def _load_member_statements(concept: Concept, store: Store) -> dict[str, str]:
-    """``item_id`` -> ``statement`` for every member whose owning entry still resolves.
-
-    ``ConceptMember`` doesn't carry ``statement`` (only ``quote``/``timestamp``, copied at
-    match time), so it's looked up from the owning ``KBEntry`` via ``store.load_entry``.
+def _load_member_items(concept: Concept, store: Store) -> dict[str, Any]:
+    """``item_id`` -> the real ``KnowledgeItem`` for every member whose owning entry still
+    resolves. ``ConceptMember`` doesn't carry the full item (only ``quote``/``timestamp``,
+    copied at match time), so it's looked up from the owning ``KBEntry`` via
+    ``store.load_entry``. Shared by ``_load_member_statements`` (synthesis prompt input) and
+    ``find_claim_contradictions`` (Phase 16 stance-conflict detection) — one entry-walk instead
+    of two.
     """
-    statements: dict[str, str] = {}
+    items: dict[str, Any] = {}
     entries_cache: dict[str, Any] = {}
     for member in concept.members:
         entry = entries_cache.get(member.entry_id, _MISSING)
@@ -103,8 +105,39 @@ def _load_member_statements(concept: Concept, store: Store) -> dict[str, str]:
             continue
         item = next((i for i in entry.knowledge_items if i.item_id == member.item_id), None)
         if item is not None:
-            statements[member.item_id] = item.statement
-    return statements
+            items[member.item_id] = item
+    return items
+
+
+def _load_member_statements(concept: Concept, store: Store) -> dict[str, str]:
+    return {item_id: item.statement for item_id, item in _load_member_items(concept, store).items()}
+
+
+def find_claim_contradictions(
+    concept: Concept, store: Store
+) -> dict[int, list[tuple[str, str, str]]]:
+    """Deterministic contradiction detection (Phase 16, no LLM): for each claim (by index in
+    ``concept.claims``), whether the ``KnowledgeItem.stance`` values of its cited members
+    disagree. Pure comparison over already-verified item data — the same "derive, never invent"
+    discipline :func:`render_claim` already applies to citations, just applied to detecting
+    disagreement instead of assembling a citation string.
+
+    Returns ``claim_index -> [(entry_id, item_id, stance), ...]`` — one row per cited member —
+    only for claims where more than one distinct ``stance`` is actually present. Claims whose
+    members all agree (or that cite only one member) are absent from the result.
+    """
+    items = _load_member_items(concept, store)
+    members_by_item = {member.item_id: member for member in concept.members}
+    conflicts: dict[int, list[tuple[str, str, str]]] = {}
+    for idx, claim in enumerate(concept.claims):
+        rows = [
+            (members_by_item[item_id].entry_id, item_id, items[item_id].stance)
+            for item_id in claim.item_ids
+            if item_id in items and item_id in members_by_item
+        ]
+        if len({stance for _entry_id, _item_id, stance in rows}) > 1:
+            conflicts[idx] = rows
+    return conflicts
 
 
 _MISSING = object()

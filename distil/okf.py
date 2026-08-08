@@ -51,9 +51,15 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from .ingest import Transcript
-from .models import Concept, KBEntry
+from .models import Concept, ConceptEdge, KBEntry
 from .source import _youtube_video_id, display_title
-from .synthesize_concept import render_claim
+from .synthesize_concept import find_claim_contradictions, render_claim
+
+_EDGE_HEADINGS: tuple[tuple[str, str], ...] = (
+    ("contrasts_with", "Contrasts with"),
+    ("builds_on", "Builds on"),
+    ("related", "Related"),
+)
 
 if TYPE_CHECKING:  # pragma: no cover - avoids an okf<->store import cycle (store imports okf)
     from .store import Store
@@ -286,8 +292,14 @@ def _render_concept(concept: Concept, store: Store, root: Path) -> str:
 
     citations = _concept_citations(concept, member_entries, root)
     if concept.claims:
-        for claim in concept.claims:
+        contradictions = find_claim_contradictions(concept, store)
+        lines.append("## Claims")
+        lines.append("")
+        for idx, claim in enumerate(concept.claims):
             lines.append(render_claim(claim, citations))
+            rows = contradictions.get(idx)
+            if rows:
+                lines.append(_render_contradiction(rows, member_entries, root))
             lines.append("")
     else:
         lines.append(concept.description)
@@ -307,7 +319,48 @@ def _render_concept(concept: Concept, store: Store, root: Path) -> str:
         quote = f"[{member.timestamp}] {member.quote}" if member.timestamp else member.quote
         lines.append(f'- [{entry.source.title}](../sources/{slug}.md) - "{quote}"')
     lines.append("")
+
+    if concept.edges:
+        other_titles = {
+            c.concept_id: c.title for c in store.list_concepts() if c.concept_id != concept.concept_id
+        }
+        for relation, heading in _EDGE_HEADINGS:
+            _append_edge_section(lines, heading, concept.edges, relation, other_titles)
     return "\n".join(lines)
+
+
+def _render_contradiction(
+    rows: list[tuple[str, str, str]], member_entries: dict[str, KBEntry], root: Path
+) -> str:
+    """Deterministic ``> **Contradiction:**`` flag (Phase 16 task brief): names every member
+    whose ``stance`` disagreed with another member cited by the same claim, resolved to its OKF
+    slug from verified member/entry data — never model text, same discipline as citations."""
+    parts: list[str] = []
+    for entry_id, _item_id, stance in rows:
+        entry = member_entries.get(entry_id)
+        label = slug_for_entry(entry, root) if entry is not None else entry_id
+        parts.append(f"{label} ({stance})")
+    return f"> **Contradiction:** members disagree — {', '.join(parts)}."
+
+
+def _append_edge_section(
+    lines: list[str],
+    heading: str,
+    edges: list[ConceptEdge],
+    relation: str,
+    titles: dict[str, str],
+) -> None:
+    """Render one typed-edge section (``## Contrasts with`` / ``## Builds on`` / ``## Related``,
+    Phase 16 design report §9 item 4) if ``edges`` has at least one link of ``relation`` whose
+    target concept still exists. Links are same-directory (``concepts/`` -> ``concepts/``)."""
+    matching = [e for e in edges if e.relation == relation and e.target_concept_id in titles]
+    if not matching:
+        return
+    lines.append(f"## {heading}")
+    lines.append("")
+    for edge in matching:
+        lines.append(f"- [{titles[edge.target_concept_id]}]({edge.target_concept_id}.md)")
+    lines.append("")
 
 
 def _aggregate_concept_tags(entries) -> list[str]:

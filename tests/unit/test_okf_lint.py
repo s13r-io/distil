@@ -243,3 +243,80 @@ def test_okfl8_e8_flags_hand_inserted_orphan_but_generated_bundle_is_clean(tmp_p
 
     errors = lint(store.okf_root)
     assert any("E8" in e and "orphan-idea.md" in e for e in errors)
+
+
+# ---- Phase 16 — E8 extended to recognize concept<->concept typed-edge inbound links ----------
+
+
+@pytest.mark.unit
+def test_okfl8_e8_treats_concept_edge_as_a_valid_inbound_link(tmp_path):
+    store, entry, concept = _build_clean_concept_bundle(tmp_path)
+    assert lint(store.okf_root) == []
+
+    # A second concept with zero inbound links from any source's "## Concepts covered" (its
+    # only member's source page doesn't cite it) — but "traditional-rag" links to it under a
+    # typed-edge heading, which should count as a valid inbound link (design report §9 item 4).
+    linked = Concept(
+        concept_id="agentic-rag",
+        title="Agentic RAG",
+        description="d",
+        members=[ConceptMember(entry_id=entry.entry_id, item_id="k_01", quote="q")],
+        created_at="t",
+        updated_at="t",
+    )
+    store.save_concept(linked)
+    export_concept(linked, store, store.okf_root)
+
+    concept_page = store.okf_root / "concepts" / "traditional-rag.md"
+    text = concept_page.read_text()
+    text = text.rstrip("\n") + "\n\n## Contrasts with\n\n- [Agentic RAG](agentic-rag.md)\n"
+    concept_page.write_text(text, encoding="utf-8")
+
+    errors = lint(store.okf_root)
+    assert not any("E8" in e and "agentic-rag.md" in e for e in errors)
+
+
+@pytest.mark.unit
+def test_okfl8_e8_still_flags_orphan_when_other_concepts_have_edges(tmp_path):
+    store, entry, concept = _build_clean_concept_bundle(tmp_path)
+    linked = Concept(
+        concept_id="agentic-rag",
+        title="Agentic RAG",
+        description="d",
+        members=[ConceptMember(entry_id=entry.entry_id, item_id="k_01", quote="q")],
+        created_at="t",
+        updated_at="t",
+    )
+    store.save_concept(linked)
+    export_concept(linked, store, store.okf_root)
+    concept_page = store.okf_root / "concepts" / "traditional-rag.md"
+    text = concept_page.read_text()
+    text = text.rstrip("\n") + "\n\n## Contrasts with\n\n- [Agentic RAG](agentic-rag.md)\n"
+    concept_page.write_text(text, encoding="utf-8")
+    assert not any(
+        "E8" in e and "agentic-rag.md" in e for e in lint(store.okf_root)
+    )  # sanity: edge target isn't itself an orphan
+
+    orphan = store.okf_root / "concepts" / "orphan-idea.md"
+    orphan.write_text(
+        "---\n"
+        "type: concept\n"
+        'title: "Orphan Idea"\n'
+        'description: "d"\n'
+        "tags: []\n"
+        "videos: []\n"
+        "created: 2026-06-15\n"
+        "updated: 2026-06-15\n"
+        "---\n\n"
+        "# Orphan Idea\n\n"
+        "d\n\n"
+        "## Sources\n\n",
+        encoding="utf-8",
+    )
+    index_path = store.okf_root / "concepts" / "index.md"
+    index_path.write_text(
+        index_path.read_text() + "- [Orphan Idea](orphan-idea.md) - d\n", encoding="utf-8"
+    )
+
+    errors = lint(store.okf_root)
+    assert any("E8" in e and "orphan-idea.md" in e for e in errors)
