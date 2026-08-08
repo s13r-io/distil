@@ -138,6 +138,73 @@ def test_pl1_reports_stage_timings(profile, store):
     assert all(seconds >= 0 for seconds in timings.values())
 
 
+# ---- Phase A visible progress: phase_callback reports stage entry/exit ----
+
+
+@pytest.mark.unit
+def test_phase_callback_reports_start_before_finish_in_stage_order(profile, store):
+    """Each stage's start event must precede its own finish event, in pipeline stage order —
+    and the existing timing_callback behaviour must be unaffected by adding phase_callback."""
+    transcript = ingest_text("Keep functions small.")
+    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    events: list[tuple[str, str]] = []
+    timings: dict[str, float] = {}
+    run_pipeline(
+        transcript, profile, store, client, source_title="t",
+        config=PipelineConfig(
+            enable_graph=False,
+            enable_canonicalize=False,
+            timing_callback=lambda stage, seconds: timings.__setitem__(stage, seconds),
+            phase_callback=lambda stage, event: events.append((stage, event)),
+        ),
+    )
+    assert events == [
+        ("triage", "start"), ("triage", "finish"),
+        ("extract", "start"), ("extract", "finish"),
+        ("normalize", "start"), ("normalize", "finish"),
+        ("link", "start"), ("link", "finish"),
+        ("note", "start"), ("note", "finish"),
+        ("file", "start"), ("file", "finish"),
+    ]
+    # timing_callback keeps working exactly as before, independent of phase_callback.
+    assert {"triage", "extract", "normalize", "link", "note", "file"} <= set(timings)
+
+
+@pytest.mark.unit
+def test_phase_callback_low_value_short_circuit_is_honest(profile, store):
+    """The little_to_extract short-circuit must report it is stopping, not silently stall on
+    a total the run will never reach (only triage ever starts/finishes)."""
+    transcript = ingest_text("hey guys smash that like button")
+    client = FakeClient(responses=[_TRIAGE_LOW])
+    events: list[tuple[str, str]] = []
+    run_pipeline(
+        transcript, profile, store, client, source_title="vlog",
+        config=PipelineConfig(phase_callback=lambda stage, event: events.append((stage, event))),
+    )
+    assert events == [("triage", "start"), ("triage", "finish"), ("triage", "short_circuit")]
+
+
+@pytest.mark.unit
+def test_phase_callback_omits_disabled_stages(profile, store):
+    """graph/canonicalize/concept_edges must not appear in the events when their flags are
+    off — the declared total a caller derives from these events must reflect what will
+    actually run, not a fixed nine."""
+    transcript = ingest_text("Keep functions small.")
+    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    events: list[tuple[str, str]] = []
+    run_pipeline(
+        transcript, profile, store, client, source_title="t",
+        config=PipelineConfig(
+            enable_graph=False,
+            enable_canonicalize=False,
+            enable_concept_edges=False,
+            phase_callback=lambda stage, event: events.append((stage, event)),
+        ),
+    )
+    stages_seen = {stage for stage, _event in events}
+    assert stages_seen == {"triage", "extract", "normalize", "link", "note", "file"}
+
+
 # ---- T-PL2: little_to_extract path returns minimal entry, makes no extract/link calls ----
 
 

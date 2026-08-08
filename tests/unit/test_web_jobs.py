@@ -117,6 +117,68 @@ def test_clear_scopes(jobstore):
     assert jobstore.clear("failed") == 1
 
 
+# ---- Phase A visible progress: phases advance in order, readable from the job ----------
+
+
+@pytest.mark.unit
+def test_start_phase_updates_current_phase_index_total_and_readable_from_job(jobstore):
+    job = jobstore.enqueue(kind="paste", title="t", payload="hello")
+    jobstore.start_phase(job.job_id, phase="ingest", index=1, total=6)
+    got = jobstore.get(job.job_id)
+    assert got.current_phase == "ingest"
+    assert got.phase_index == 1
+    assert got.phase_total == 6
+    assert got.phase_started_at is not None
+
+    jobstore.start_phase(job.job_id, phase="triage", index=2, total=6)
+    got = jobstore.get(job.job_id)
+    assert got.current_phase == "triage"
+    assert got.phase_index == 2
+    # phases advance in order — the previous phase is no longer "current".
+    assert got.current_phase != "ingest"
+
+
+@pytest.mark.unit
+def test_record_phase_duration_persists_and_accumulates(jobstore):
+    job = jobstore.enqueue(kind="paste", title="t", payload="hello")
+    jobstore.record_phase_duration(job.job_id, phase="triage", seconds=1.234)
+    jobstore.record_phase_duration(job.job_id, phase="extract", seconds=5.6)
+    got = jobstore.get(job.job_id)
+    assert got.phase_durations == {"triage": 1.234, "extract": 5.6}
+    assert got.to_dict()["phase_durations"] == {"triage": 1.234, "extract": 5.6}
+
+
+@pytest.mark.unit
+def test_collapse_total_reports_honestly_on_early_exit(jobstore):
+    """A low-value short-circuit must shrink the declared total to what actually ran, not
+    leave it claiming a total the job will never reach."""
+    job = jobstore.enqueue(kind="paste", title="t", payload="hello")
+    jobstore.start_phase(job.job_id, phase="triage", index=3, total=9)
+    jobstore.collapse_total(job.job_id)
+    got = jobstore.get(job.job_id)
+    assert got.phase_total == 3
+    assert got.phase_index == 3
+
+
+@pytest.mark.unit
+def test_failed_job_retains_the_phase_it_failed_in(jobstore):
+    job = jobstore.enqueue(kind="paste", title="t", payload="hello")
+    jobstore.start_phase(job.job_id, phase="extract", index=4, total=9)
+    jobstore.mark_failed(job.job_id, error="boom")
+    got = jobstore.get(job.job_id)
+    assert got.status == jobsmod.STATUS_FAILED
+    assert got.current_phase == "extract"  # names the phase it failed in
+
+
+@pytest.mark.unit
+def test_find_by_entry_id_returns_matching_job(jobstore):
+    job = jobstore.enqueue(kind="paste", title="t", payload="hello")
+    jobstore.mark_done(job.job_id, entry_id="e_1", summary="kept 1")
+    found = jobstore.find_by_entry_id("e_1")
+    assert found is not None and found.job_id == job.job_id
+    assert jobstore.find_by_entry_id("e_missing") is None
+
+
 # ---- Worker drives the queue with an injected distill_fn (no LLM) ----------------------
 
 
@@ -199,6 +261,95 @@ def test_web_distill_job_skips_inline_graph_and_reports_timings(tmp_path, monkey
     assert payload["entry_id"] == "e_fast"
     assert payload["status"] == "done"
     assert payload["timings"]["triage"] == 1.26
+
+
+# ---- Phase A visible progress, wired through _distill_job (no LLM) --------------------
+
+
+@pytest.mark.unit
+def test_distill_job_persists_phase_durations_and_current_phase(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
+    monkeypatch.setenv("DISTIL_KB_DIR", str(tmp_path / "kb"))
+    monkeypatch.setattr(webapp, "_make_client", lambda: object())
+    monkeypatch.setattr(webapp, "_cached_safe_embedder", lambda: None)
+    monkeypatch.setattr(webapp, "_fetch_source_metadata", lambda _url: webapp.SourceMetadata())
+    monkeypatch.setattr(webapp, "_schedule_graph_link", lambda entry_id: False)
+
+    def fake_run_pipeline(*_args, **kwargs):
+        config = kwargs["config"]
+        # Simulate what pipeline._timed does for one stage: entry, timing, exit.
+        config.phase_callback("triage", "start")
+        config.timing_callback("triage", 0.5)
+        config.phase_callback("triage", "finish")
+        return KBEntry.model_validate({
+            "entry_id": "e_fast",
+            "source": {"title": "Fast note", "captured_at": "2026-06-15T00:00:00"},
+            "triage": {
+                "knowledge_types_present": [{"type": "heuristic", "share": 1.0}],
+                "density": "high", "transcript_loss": {"level": "low", "evidence": []},
+                "verdict": "rich",
+            },
+            "knowledge_items": [{
+                "item_id": "k_01", "type": "heuristic", "statement": "Keep functions small.",
+                "stance": "opinion", "provenance": {"quote": "keep functions small"},
+            }],
+            "tags": {"topics": [], "knowledge_types": ["heuristic"]},
+            "meta": {"created_at": "2026-06-15T00:00:00", "model_version": "test"},
+        })
+
+    monkeypatch.setattr(webapp, "run_pipeline", fake_run_pipeline)
+    db = tmp_path / "distil.db"
+    job = jobsmod.JobStore(db).enqueue(kind="paste", title="t", payload="Keep functions small.")
+    result = webapp._distill_job(job)
+    assert result["status"] == jobsmod.STATUS_DONE
+
+    got = jobsmod.JobStore(db).get(job.job_id)
+    # ingest + metadata phases ran for real (not mocked) and their durations were persisted,
+    # alongside the pipeline-reported "triage" duration — this is requirement 5 (durations
+    # stored) plus requirement 3 (pre-pipeline steps get their own phases).
+    assert got.phase_durations["triage"] >= 0
+    assert "ingest" in got.phase_durations
+    assert "metadata" in got.phase_durations
+    assert got.current_phase == "triage"
+    assert got.phase_index is not None and got.phase_total is not None
+    assert got.phase_index <= got.phase_total
+
+
+@pytest.mark.unit
+def test_distill_job_low_value_short_circuit_collapses_total_honestly(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
+    monkeypatch.setenv("DISTIL_KB_DIR", str(tmp_path / "kb"))
+    monkeypatch.setattr(webapp, "_make_client", lambda: object())
+    monkeypatch.setattr(webapp, "_cached_safe_embedder", lambda: None)
+    monkeypatch.setattr(webapp, "_fetch_source_metadata", lambda _url: webapp.SourceMetadata())
+
+    def fake_run_pipeline(*_args, **kwargs):
+        config = kwargs["config"]
+        config.phase_callback("triage", "start")
+        config.timing_callback("triage", 0.2)
+        config.phase_callback("triage", "finish")
+        config.phase_callback("triage", "short_circuit")
+        return KBEntry.model_validate({
+            "entry_id": "e_low",
+            "source": {"title": "vlog", "captured_at": "2026-06-15T00:00:00"},
+            "triage": {
+                "knowledge_types_present": [], "density": "low",
+                "transcript_loss": {"level": "low", "evidence": []},
+                "verdict": "little_to_extract",
+            },
+            "meta": {"created_at": "2026-06-15T00:00:00", "model_version": "test"},
+        })
+
+    monkeypatch.setattr(webapp, "run_pipeline", fake_run_pipeline)
+    db = tmp_path / "distil.db"
+    job = jobsmod.JobStore(db).enqueue(kind="paste", title="t", payload="meh")
+    result = webapp._distill_job(job)
+    assert result["status"] == jobsmod.STATUS_LOW_VALUE
+
+    got = jobsmod.JobStore(db).get(job.job_id)
+    # The declared total must shrink to what actually ran (ingest, metadata, triage) rather
+    # than continuing to claim the full ~10-phase plan the run never reached.
+    assert got.phase_total == got.phase_index == 3
 
 
 # ---- /ingest is non-blocking and /jobs reports state -----------------------------------

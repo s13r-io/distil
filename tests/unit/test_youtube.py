@@ -123,6 +123,42 @@ def test_fetch_video_transcript_parses_downloaded_srt(tmp_path):
 
 
 @pytest.mark.unit
+def test_fetch_video_transcript_reports_transcript_fetch_and_caption_parse_phases(tmp_path):
+    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+
+    def fake_run(cmd, **kwargs):
+        out_index = cmd.index("-o") + 1
+        Path(f"{cmd[out_index]}.en.srt").write_text(srt_body, encoding="utf-8")
+        return _proc(returncode=0)
+
+    events: list[tuple[str, str]] = []
+    fetch_video_transcript(
+        "https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path,
+        on_phase=lambda phase, event: events.append((phase, event)),
+    )
+    assert events == [
+        ("transcript_fetch", "start"), ("transcript_fetch", "finish"),
+        ("caption_parse", "start"), ("caption_parse", "finish"),
+    ]
+
+
+@pytest.mark.unit
+def test_fetch_video_transcript_reports_only_fetch_start_on_yt_dlp_failure(tmp_path):
+    """A stall/failure during the network call must surface as a stuck 'transcript_fetch',
+    never silently advance to caption_parse."""
+    def fake_run(cmd, **kwargs):
+        return _proc(returncode=1, stderr="ERROR: Sign in to confirm you're not a bot")
+
+    events: list[tuple[str, str]] = []
+    with pytest.raises(YoutubeFetchError):
+        fetch_video_transcript(
+            "https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path,
+            on_phase=lambda phase, event: events.append((phase, event)),
+        )
+    assert events == [("transcript_fetch", "start")]
+
+
+@pytest.mark.unit
 def test_fetch_video_transcript_passes_player_client_fallback_chain(monkeypatch, tmp_path):
     monkeypatch.delenv("DISTIL_POT_PROVIDER_URL", raising=False)
     srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"

@@ -233,6 +233,22 @@ function jobBadge(s){
   const [cls,txt]=map[s]||['','Unknown'];
   return '<span class="badge '+cls+'">'+txt+'</span>';
 }
+const PHASE_LABELS={
+  transcript_fetch:'Fetching transcript', caption_parse:'Parsing captions',
+  ingest:'Reading transcript', metadata:'Fetching video info', triage:'Checking value',
+  extract:'Extracting knowledge', normalize:'Normalizing items', link:'Linking to profile',
+  note:'Writing teaching note', graph:'Linking related entries', file:'Filing entry',
+  canonicalize:'Matching concepts', concept_edges:'Linking concepts',
+};
+function progressDetail(j){
+  const label=PHASE_LABELS[j.current_phase]||j.current_phase||'Working';
+  let elapsed=0;
+  if(j.phase_started_at){
+    elapsed=Math.max(0,(Date.now()-new Date(j.phase_started_at).getTime())/1000);
+  }
+  const step=(j.phase_index && j.phase_total) ? ('Step '+j.phase_index+' of '+j.phase_total+' &middot; ') : '';
+  return step+esc(label)+' &middot; '+Math.round(elapsed)+'s';
+}
 async function loadJobs(){
   if(_jobsLoading) return;
   _jobsLoading=true;
@@ -248,9 +264,12 @@ async function loadJobs(){
         let detail='';
         if(j.status==='done') detail='<a href="/entries/'+encodeURIComponent(j.entry_id)+'">'+esc(j.summary||'')+' / View entry -></a>';
         else if(j.status==='low_value') detail=esc(j.summary||'');
-        else if(j.status==='failed') detail='<span style="color:var(--danger)">'+esc(j.error||'failed')+'</span> / <a href="#" data-retry="'+j.job_id+'">Retry</a>';
+        else if(j.status==='failed'){
+          const phase=j.current_phase?(' (failed during '+esc(PHASE_LABELS[j.current_phase]||j.current_phase)+')'):'';
+          detail='<span style="color:var(--danger)">'+esc(j.error||'failed')+phase+'</span> / <a href="#" data-retry="'+j.job_id+'">Retry</a>';
+        }
         else if(j.status==='queued') detail='<a href="#" data-remove="'+j.job_id+'">Remove</a>';
-        else if(j.status==='running') detail='Extracting items...';
+        else if(j.status==='running') detail=progressDetail(j);
         return '<div class="jobrow"><div class="top"><span class="entry-title">'+esc(j.title)+'</span>'+jobBadge(j.status)+'</div>'
           +'<div class="meta-line muted">'+detail+'</div></div>';
       }).join('');
