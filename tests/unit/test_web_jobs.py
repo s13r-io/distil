@@ -11,7 +11,7 @@ import pytest
 from distil.embed import FakeEmbedder
 from distil.llm import FakeClient
 from distil.models import KBEntry
-from distil.query import AskResult, Source, stream_ask
+from distil.query import AskResult, ConceptRef, Source, stream_ask
 from web import app as webapp
 from web import jobs as jobsmod
 from web.app import _ask_payload
@@ -50,6 +50,22 @@ def test_ask_payload_includes_source_titles_for_grouping():
         ],
     ))
     assert payload["sources"][0]["title"] == "Naming Functions"
+
+
+@pytest.mark.unit
+def test_ask_payload_includes_concepts_behind_the_answer():
+    payload = _ask_payload(AskResult(
+        abstained=False,
+        answer="Use clear names.",
+        concepts=[ConceptRef(concept_id="naming", title="Naming things well")],
+    ))
+    assert payload["concepts"] == [{"concept_id": "naming", "title": "Naming things well"}]
+
+
+@pytest.mark.unit
+def test_ask_payload_concepts_empty_when_none_cleared():
+    payload = _ask_payload(AskResult(abstained=True, message="No relevant notes found."))
+    assert payload["concepts"] == []
 
 
 @pytest.mark.unit

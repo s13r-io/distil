@@ -242,6 +242,10 @@ that must abstain.
 - T-Q11: a question that only a concept (not any single raw item) clears the threshold for still answers instead of abstaining — concepts get the SAME threshold, never a lower one.
 - T-Q12: sources recruited via a concept resolve from the live `KBEntry`/`KnowledgeItem`, never from the concept's own stale copied fields or model text — code-assembled citations hold even off the concept path.
 - T-Q13 (regression): a concept present in the KB with low similarity to the question does not lower the bar — abstention still holds, zero synthesis calls.
+- T-Q14 (Phase C): `ask()` and `stream_ask()`'s final result both carry `concepts` (the concepts that cleared the gate) at zero extra retrieval/model cost — surfaced from `web/app.py`'s `_ask_payload` for both the `/ask` and `/ask/stream` routes.
+- T-Q15 (Phase C, regression): an abstained result carries `concepts == []`.
+- T-Q16 (Phase C): `DISTIL_CONCEPT_NOTE_DEPTH` (or the `concept_note_depth` kwarg, which wins over the env) controls whether a matched concept's member quotes reach the synthesis prompt — `"claims"` (default) sends claim text only, `"full"` inlines each cited member's quote; an unrecognized value degrades to the default rather than raising.
+- T-Q17 (Phase C, regression): `depth="full"`'s richer concept-notes block does not weaken citation validation — a fabricated citation is still stripped and reported as ungrounded.
 
 ### auth (web, hosted) — `web/`
 - T-A1: with `DISTIL_PUBLIC=true` and no `DISTIL_AUTH_SECRET` set, the app refuses to start/serve (fails closed).

@@ -59,6 +59,7 @@
         <p class="muted" style="margin:0 0 8px;">Answer</p>
         <div class="ask-answer" id="ask-answer"></div>
         <div id="ask-conflict" class="banner warn hide"></div>
+        <div id="ask-concepts"></div>
         <div id="ask-sources"></div>
       </div>
       <div id="ask-abstain" class="banner info hide"></div>
@@ -91,7 +92,16 @@ function resetAsk(){
   document.getElementById('ask-abstain').classList.add('hide');
   document.getElementById('ask-conflict').classList.add('hide');
   document.getElementById('ask-answer').innerHTML='';
+  document.getElementById('ask-concepts').innerHTML='';
   document.getElementById('ask-sources').innerHTML='';
+}
+function renderConcepts(concepts){
+  if(!concepts||!concepts.length) return '';
+  let h='<p class="muted" style="margin:14px 0 8px;">Concepts used</p><div class="row wrap">';
+  concepts.forEach(c=>{
+    h+='<a class="badge info" href="/concepts/'+encodeURIComponent(c.concept_id)+'">'+esc(c.title)+'</a>';
+  });
+  return h+'</div>';
 }
 function renderSources(srcs){
   if(!srcs||!srcs.length) return '';
@@ -129,6 +139,7 @@ function showFinal(p){
   document.getElementById('ask-result').classList.remove('hide');
   if(p.answer!=null) document.getElementById('ask-answer').textContent=p.answer;
   if(p.conflict){const c=document.getElementById('ask-conflict');c.textContent='Conflict: '+p.conflict;c.classList.remove('hide');}
+  document.getElementById('ask-concepts').innerHTML=renderConcepts(p.concepts);
   document.getElementById('ask-sources').innerHTML=renderSources(p.sources);
 }
 askBtn.addEventListener('click', async () => {
@@ -182,6 +193,7 @@ async function streamAsk(q){
           if(!answerStarted){answerStarted=true;document.getElementById('ask-status').classList.add('hide');document.getElementById('ask-result').classList.remove('hide');}
         }
         if(ev.conflict){const c=document.getElementById('ask-conflict');c.textContent='Conflict: '+ev.conflict;c.classList.remove('hide');}
+        document.getElementById('ask-concepts').innerHTML=renderConcepts(ev.concepts);
         document.getElementById('ask-sources').innerHTML=renderSources(ev.sources);
       }
     }
