@@ -19,6 +19,8 @@ extension being present.
 from __future__ import annotations
 
 import json
+import os
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,10 +29,17 @@ from pathlib import Path
 from . import okf
 from .embed import Embedder
 from .ingest import Transcript
-from .models import KBEntry, Profile
+from .models import Concept, KBEntry, Profile
 from .source import display_title
 
 _FRONT_MATTER_DELIM = "---"
+
+# Concept candidate retrieval defaults (canonicalize.py, Phase 15.1 design report §1, §6).
+# Tunable via env without a code change, since only a real-data validation gate can confirm them.
+CONCEPT_SIM_FLOOR = 0.55
+MAX_CONCEPT_CANDIDATES = 5
+_K_EMBED = 8
+_TOKEN = re.compile(r"[a-z0-9]+")
 
 
 @dataclass
@@ -50,6 +59,16 @@ class EntryIndexRow:
     score: int | None
     created_at: str
     file_path: str
+
+
+@dataclass
+class ConceptCandidate:
+    """One deterministically-gathered candidate offered to the canonicalize LLM call."""
+
+    concept_id: str
+    title: str
+    description: str
+    similarity: float
 
 
 class Store:
@@ -104,6 +123,15 @@ class Store:
                 embedded_at     TEXT NOT NULL,
                 vec             TEXT,                 -- JSON vector (fallback backend only)
                 PRIMARY KEY (entry_id, item_id)
+            );
+            -- Canonicalized concepts (Phase 15.1). One JSON blob column, mirroring `profiles`;
+            -- `centroid` is a read-path optimization (mean of member item vectors), kept out of
+            -- `data` so candidate lookup doesn't need to recompute it on every call.
+            CREATE TABLE IF NOT EXISTS concepts (
+                concept_id TEXT PRIMARY KEY,
+                slug       TEXT NOT NULL,
+                data       TEXT NOT NULL,
+                centroid   TEXT NOT NULL
             );
             """
         )
@@ -171,7 +199,8 @@ class Store:
         return KBEntry.model_validate_json(payload)
 
     def delete_entry(self, entry_id: str) -> bool:
-        """Delete a KB entry, its SQLite index row, its item vectors, and its OKF pages."""
+        """Delete a KB entry, its SQLite index row, its item vectors, its OKF pages, and
+        retract any concept memberships it holds (Phase 15.1 design report §5 point 3)."""
         path = self.entry_path(entry_id)
         file_existed = path.exists()
         entry: KBEntry | None = None
@@ -184,6 +213,7 @@ class Store:
         with self._conn:
             self._conn.execute("DELETE FROM item_vectors_meta WHERE entry_id = ?", (entry_id,))
             cur = self._conn.execute("DELETE FROM entries WHERE entry_id = ?", (entry_id,))
+        self.retract_entry_concept_memberships(entry_id)
         if entry is not None:
             okf.remove_entry(entry, self.okf_root)
         return file_existed or cur.rowcount > 0
@@ -355,6 +385,146 @@ class Store:
         if row is None:
             return None
         return Profile.model_validate_json(row["data"])
+
+    # ---- Concepts (Phase 15.1 — canonicalize engine; design report §3, §5) ------------
+
+    def save_concept(self, concept: Concept) -> None:
+        """Upsert ``concept``, recomputing its centroid from current member item vectors."""
+        # `slug` always equals `concept_id` by construction today (concept_id IS the slug —
+        # "path is identity"), but is kept as its own column for the same collision-
+        # disambiguation reasons okf.py separates `distil_entry_id` from `slug`: a forward
+        # hook for if/when concept_id and slug diverge (e.g. a stable internal id with a
+        # renamed display slug).
+        centroid = self._compute_centroid(concept)
+        self._conn.execute(
+            """
+            INSERT INTO concepts (concept_id, slug, data, centroid)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(concept_id) DO UPDATE SET
+                slug=excluded.slug,
+                data=excluded.data,
+                centroid=excluded.centroid
+            """,
+            (
+                concept.concept_id,
+                concept.concept_id,
+                concept.model_dump_json(),
+                json.dumps(centroid),
+            ),
+        )
+        self._conn.commit()
+
+    def load_concept(self, concept_id: str) -> Concept | None:
+        cur = self._conn.execute("SELECT data FROM concepts WHERE concept_id = ?", (concept_id,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return Concept.model_validate_json(row["data"])
+
+    def list_concepts(self) -> list[Concept]:
+        cur = self._conn.execute("SELECT data FROM concepts ORDER BY concept_id")
+        return [Concept.model_validate_json(r["data"]) for r in cur.fetchall()]
+
+    def delete_concept(self, concept_id: str) -> bool:
+        with self._conn:
+            cur = self._conn.execute("DELETE FROM concepts WHERE concept_id = ?", (concept_id,))
+        return cur.rowcount > 0
+
+    def retract_entry_concept_memberships(self, entry_id: str) -> None:
+        """Remove ``entry_id``'s members from every concept (idempotency + delete cascade).
+
+        A concept that drops to zero members after retraction is deleted outright — the same
+        "stale rows get cleaned up" discipline :meth:`list_entries` already applies to entries.
+        """
+        for concept in self.list_concepts():
+            remaining = [m for m in concept.members if m.entry_id != entry_id]
+            if len(remaining) == len(concept.members):
+                continue
+            if not remaining:
+                self.delete_concept(concept.concept_id)
+                continue
+            concept.members = remaining
+            concept.updated_at = datetime.now(timezone.utc).isoformat()
+            self.save_concept(concept)
+
+    def find_concept_candidates(
+        self,
+        item_vector: list[float],
+        entry_topics: list[str],
+        item_statement: str = "",
+        *,
+        exclude_concept_ids: set[str] | None = None,
+    ) -> list[ConceptCandidate]:
+        """Deterministic candidate pool for one item (design report §1 step 1, §2).
+
+        Primary signal: cosine similarity between ``item_vector`` and each concept's stored
+        centroid, kept above ``CONCEPT_SIM_FLOOR`` and capped at ``_K_EMBED``. Unioned with a
+        cheap token-overlap backstop (the item's statement and the entry's topics against each
+        concept's title/description) for cases the embedder under-weights, e.g. a distinctive
+        proper noun. The union is capped at ``MAX_CONCEPT_CANDIDATES``, highest-similarity first.
+        """
+        from .query import cosine  # local import: avoids a store<->query circular import
+
+        exclude = exclude_concept_ids or set()
+        sim_floor = float(os.environ.get("DISTIL_CONCEPT_SIM_FLOOR", CONCEPT_SIM_FLOOR))
+        max_candidates = int(
+            os.environ.get("DISTIL_CONCEPT_MAX_CANDIDATES", MAX_CONCEPT_CANDIDATES)
+        )
+
+        scored: list[tuple[Concept, float]] = []
+        for concept, centroid in self._concepts_with_centroid():
+            if concept.concept_id in exclude:
+                continue
+            scored.append((concept, cosine(item_vector, centroid)))
+
+        embed_pool = sorted(
+            (pair for pair in scored if pair[1] >= sim_floor), key=lambda p: p[1], reverse=True
+        )[:_K_EMBED]
+        embed_ids = {c.concept_id for c, _ in embed_pool}
+
+        wanted_tokens = _normalize_tokens(item_statement) | {t.lower() for t in entry_topics}
+        backstop: list[tuple[Concept, float]] = []
+        if wanted_tokens:
+            for concept, sim in scored:
+                if concept.concept_id in embed_ids:
+                    continue
+                tokens = _normalize_tokens(f"{concept.title} {concept.description}")
+                if wanted_tokens & tokens:
+                    backstop.append((concept, sim))
+
+        pool = sorted(embed_pool + backstop, key=lambda p: p[1], reverse=True)[:max_candidates]
+        return [
+            ConceptCandidate(
+                concept_id=c.concept_id, title=c.title, description=c.description, similarity=sim
+            )
+            for c, sim in pool
+        ]
+
+    def _concepts_with_centroid(self) -> list[tuple[Concept, list[float]]]:
+        cur = self._conn.execute("SELECT data, centroid FROM concepts ORDER BY concept_id")
+        out: list[tuple[Concept, list[float]]] = []
+        for r in cur.fetchall():
+            centroid = json.loads(r["centroid"]) if r["centroid"] else []
+            out.append((Concept.model_validate_json(r["data"]), centroid))
+        return out
+
+    def _compute_centroid(self, concept: Concept) -> list[float]:
+        member_keys = {(m.entry_id, m.item_id) for m in concept.members}
+        if not member_keys:
+            return []
+        vectors = [
+            vec
+            for item_id, entry_id, vec in self.iter_item_vectors()
+            if (entry_id, item_id) in member_keys
+        ]
+        if not vectors:
+            return []
+        dim = len(vectors[0])
+        mean = [0.0] * dim
+        for vec in vectors:
+            for i, v in enumerate(vec):
+                mean[i] += v
+        return [v / len(vectors) for v in mean]
 
     # ---- rendering / parsing ----------------------------------------------------------
 
@@ -585,3 +755,7 @@ class Store:
             created_at=r["created_at"],
             file_path=r["file_path"],
         )
+
+
+def _normalize_tokens(text: str) -> set[str]:
+    return set(_TOKEN.findall(text.lower()))

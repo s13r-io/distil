@@ -1,0 +1,48 @@
+"""Canonicalize match/new/reject prompt (Stage 8, Phase 15.1).
+
+Candidate gathering is deterministic (embedding similarity vs concept centroids, unioned with
+a token-overlap backstop — see ``store.find_concept_candidates``). The LLM is used only to
+decide, per item and using only the offered candidates, whether it matches an existing concept,
+starts a new one, or isn't concept-worthy. One batched call covers the whole video.
+"""
+
+from __future__ import annotations
+
+import json
+
+PROMPT_VERSION = "canonicalize/v1"
+
+SYSTEM = (
+    "You decide whether each new knowledge item is the same idea as an existing concept, a "
+    "brand-new concept, or not concept-worthy. Use ONLY the candidates provided for each item — "
+    "never invent a concept_id that isn't listed. Respond with a single JSON array and nothing "
+    "else."
+)
+
+_TEMPLATE = """\
+VIDEO: {source_title}
+
+ITEMS AND THEIR CANDIDATE CONCEPTS:
+{items_block}
+
+For each item, return exactly one decision:
+- {{"item_id": "...", "decision": "match", "concept_id": "<one of its listed candidates>"}}
+- {{"item_id": "...", "decision": "new", "title": "...", "description": "<one sentence>"}}
+- {{"item_id": "...", "decision": "reject"}}
+
+Rules:
+- "match" only to a concept_id that was listed as a candidate for that item.
+- "new" only when no candidate is really the same idea (same claim, not just the same topic).
+- "reject" for items that are personal anecdotes or facts about the speaker, not durable ideas.
+Return a JSON array with exactly one decision object per item_id, in the order given.
+"""
+
+
+def build_canonicalize_prompt(source_title: str, item_payloads: list[dict]) -> str:
+    """``item_payloads``: one dict per item with ``item_id``, ``statement``, ``quote``, and a
+    ``candidates`` list of ``{concept_id, title, description}`` (empty when the deterministic
+    pool found nothing — the item can still be proposed as ``new`` or ``reject``)."""
+    return _TEMPLATE.format(
+        source_title=source_title,
+        items_block=json.dumps(item_payloads, ensure_ascii=False, indent=2),
+    )

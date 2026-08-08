@@ -5,6 +5,8 @@ from pydantic import ValidationError
 
 from distil.models import (
     ApplicationLink,
+    Concept,
+    ConceptMember,
     Feedback,
     KBEntry,
     KnowledgeItem,
@@ -218,3 +220,39 @@ def test_feedback_rejects_out_of_range_score():
 def test_feedback_rejects_bad_reason():
     with pytest.raises(ValidationError):
         Feedback(score=2, reason="meh")
+
+
+# ---- Concept / ConceptMember (Phase 15.1 — canonicalize engine, design report §3) --------
+
+
+@pytest.mark.unit
+def test_concept_member_requires_quote():
+    with pytest.raises(ValidationError):
+        ConceptMember(entry_id="e_01", item_id="k_01")
+
+
+@pytest.mark.unit
+def test_concept_member_timestamp_optional():
+    member = ConceptMember(entry_id="e_01", item_id="k_01", quote="q")
+    assert member.timestamp is None
+
+
+@pytest.mark.unit
+def test_concept_round_trip_lossless():
+    concept = Concept(
+        concept_id="traditional-rag",
+        title="Traditional RAG",
+        description="Retrieve then generate.",
+        members=[ConceptMember(entry_id="e_01", item_id="k_01", quote="q", timestamp="00:01:00")],
+        created_at="2026-06-15T00:00:00",
+        updated_at="2026-06-15T00:00:00",
+    )
+    restored = Concept.model_validate_json(concept.model_dump_json())
+    assert restored == concept
+
+
+@pytest.mark.unit
+def test_concept_has_no_claims_field_in_phase_15_1():
+    # ConceptClaim/synthesis is explicitly out of scope for Phase 15.1 (design report §9,
+    # "15.2 — Concept page synthesis"); the model must not carry it yet.
+    assert "claims" not in Concept.model_fields
