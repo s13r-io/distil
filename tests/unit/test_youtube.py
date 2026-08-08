@@ -15,6 +15,7 @@ import pytest
 from distil.ingest import Transcript
 from distil.youtube import (
     YoutubeFetchError,
+    _surface_error,
     fetch_video_transcript,
     is_playlist_url,
     list_playlist_video_urls,
@@ -69,7 +70,7 @@ def test_list_playlist_video_urls_passes_player_client_fallback_chain(monkeypatc
 
     def fake_run(cmd, **kwargs):
         idx = cmd.index("--extractor-args")
-        assert cmd[idx + 1] == "youtube:player_client=android,web"
+        assert cmd[idx + 1] == "youtube:player_client=android_vr,web_safari"
         return _proc(returncode=0, stdout=payload)
 
     list_playlist_video_urls("https://www.youtube.com/playlist?list=PL1", run=fake_run)
@@ -128,7 +129,7 @@ def test_fetch_video_transcript_passes_player_client_fallback_chain(monkeypatch,
 
     def fake_run(cmd, **kwargs):
         idx = cmd.index("--extractor-args")
-        assert cmd[idx + 1] == "youtube:player_client=android,web"
+        assert cmd[idx + 1] == "youtube:player_client=android_vr,web_safari"
         out_index = cmd.index("-o") + 1
         out_prefix = cmd[out_index]
         Path(f"{out_prefix}.en.srt").write_text(srt_body, encoding="utf-8")
@@ -144,9 +145,7 @@ def test_fetch_video_transcript_passes_player_client_fallback_chain(monkeypatch,
 def test_fetch_video_transcript_ignores_stale_srt_in_reused_workdir(tmp_path):
     # Simulate a leftover caption file from a previous fetch that reused this same workdir.
     stale = tmp_path / "captions.en.srt"
-    stale.write_text(
-        "1\n00:00:01,000 --> 00:00:02,000\nSTALE OLD CAPTION\n", encoding="utf-8"
-    )
+    stale.write_text("1\n00:00:01,000 --> 00:00:02,000\nSTALE OLD CAPTION\n", encoding="utf-8")
 
     fresh_srt = "1\n00:00:01,000 --> 00:00:03,000\nFresh caption for this fetch.\n"
 
@@ -288,7 +287,7 @@ def test_list_playlist_video_urls_omits_key_args_when_env_unset(monkeypatch):
 
     def fake_run(cmd, **kwargs):
         idx = cmd.index("--extractor-args")
-        assert cmd[idx + 1] == "youtube:player_client=android,web"
+        assert cmd[idx + 1] == "youtube:player_client=android_vr,web_safari"
         return _proc(returncode=0, stdout=payload)
 
     list_playlist_video_urls("https://www.youtube.com/playlist?list=PL1", run=fake_run)
@@ -302,7 +301,7 @@ def test_list_playlist_video_urls_passes_api_key_when_env_set(monkeypatch):
     def fake_run(cmd, **kwargs):
         idx = cmd.index("--extractor-args")
         value = cmd[idx + 1]
-        assert value.startswith("youtube:player_client=android,web;")
+        assert value.startswith("youtube:player_client=android_vr,web_safari;")
         assert "innertube_host=youtubei.googleapis.com" in value
         assert "innertube_key=secret-key-123" in value
         return _proc(returncode=0, stdout=payload)
@@ -317,7 +316,7 @@ def test_fetch_video_transcript_omits_key_args_when_env_unset(monkeypatch, tmp_p
 
     def fake_run(cmd, **kwargs):
         idx = cmd.index("--extractor-args")
-        assert cmd[idx + 1] == "youtube:player_client=android,web"
+        assert cmd[idx + 1] == "youtube:player_client=android_vr,web_safari"
         out_index = cmd.index("-o") + 1
         out_prefix = cmd[out_index]
         Path(f"{out_prefix}.en.srt").write_text(srt_body, encoding="utf-8")
@@ -334,7 +333,7 @@ def test_fetch_video_transcript_passes_api_key_when_env_set(monkeypatch, tmp_pat
     def fake_run(cmd, **kwargs):
         idx = cmd.index("--extractor-args")
         value = cmd[idx + 1]
-        assert value.startswith("youtube:player_client=android,web;")
+        assert value.startswith("youtube:player_client=android_vr,web_safari;")
         assert "innertube_host=youtubei.googleapis.com" in value
         assert "innertube_key=secret-key-123" in value
         out_index = cmd.index("-o") + 1
@@ -355,3 +354,143 @@ def test_list_playlist_video_urls_raises_on_bad_json():
 
     with pytest.raises(YoutubeFetchError):
         list_playlist_video_urls("https://www.youtube.com/playlist?list=weird", run=fake_run)
+
+
+# ---- Phase 21: the real yt-dlp error must survive warning-heavy stderr, and the complete
+# stderr must reach the logs — regression coverage for the `_tail`-returned-the-head bug. ----
+
+# Mirrors what real yt-dlp emits: the SABR-format warning plus the 90-day staleness warning,
+# both non-fatal, together comfortably exceeding the old head-truncation's 300-char budget
+# before the actual `ERROR:` line ever appears.
+_WARNING_NOISE = (
+    "WARNING: [youtube] abc12345678: Some android client https formats have been skipped as "
+    "they are missing a URL. YouTube may have enabled the SABR-only streaming experiment for "
+    "the current session. See https://github.com/yt-dlp/yt-dlp/issues/12482 for more details\n"
+    "WARNING: Your yt-dlp version (2024.08.06) is older than 90 days! It is strongly "
+    'recommended to always use the latest version. Run "yt-dlp --update" or "yt-dlp -U" to '
+    "update. To suppress this warning, add --no-update to your command/config.\n"
+)
+
+
+def test_warning_noise_exceeds_old_truncation_budget():
+    # Sanity check on the fixture itself: this is exactly the shape of stderr that defeated the
+    # old head-truncating `_tail(text, limit=300)` helper.
+    assert len(_WARNING_NOISE) > 300
+
+
+@pytest.mark.unit
+def test_surface_error_prefers_error_line_over_leading_warnings():
+    stderr = (
+        _WARNING_NOISE + "ERROR: [youtube] abc12345678: Video unavailable. This video is private.\n"
+    )
+    assert (
+        _surface_error(stderr)
+        == "ERROR: [youtube] abc12345678: Video unavailable. This video is private."
+    )
+
+
+@pytest.mark.unit
+def test_surface_error_falls_back_to_genuine_tail_without_error_line():
+    # No `ERROR:` line at all (e.g. a bare crash message) — fall back to the *last* `limit`
+    # characters, not the first, since head-truncation is exactly the bug being fixed.
+    stderr = ("noise " * 100) + "the actually useful bit at the end"
+    result = _surface_error(stderr, limit=50)
+    assert result == stderr[-50:]
+    assert "the actually useful bit at the end" in result
+
+
+@pytest.mark.unit
+def test_fetch_video_transcript_surfaces_error_past_warning_noise(tmp_path):
+    stderr = (
+        _WARNING_NOISE + "ERROR: [youtube] abc12345678: Video unavailable. This video is private.\n"
+    )
+
+    def fake_run(cmd, **kwargs):
+        return _proc(returncode=1, stderr=stderr)
+
+    with pytest.raises(YoutubeFetchError, match="Video unavailable"):
+        fetch_video_transcript(
+            "https://www.youtube.com/watch?v=abc12345678", run=fake_run, workdir=tmp_path
+        )
+
+
+@pytest.mark.unit
+def test_list_playlist_video_urls_surfaces_error_past_warning_noise():
+    stderr = _WARNING_NOISE + "ERROR: [youtube:tab] Playlist does not exist.\n"
+
+    def fake_run(cmd, **kwargs):
+        return _proc(returncode=1, stderr=stderr)
+
+    with pytest.raises(YoutubeFetchError, match="Playlist does not exist"):
+        list_playlist_video_urls("https://www.youtube.com/playlist?list=bad", run=fake_run)
+
+
+@pytest.mark.unit
+def test_fetch_video_transcript_logs_complete_untruncated_stderr(tmp_path, caplog):
+    stderr = (
+        _WARNING_NOISE + "ERROR: [youtube] abc12345678: Video unavailable. This video is private.\n"
+    )
+
+    def fake_run(cmd, **kwargs):
+        return _proc(returncode=1, stderr=stderr)
+
+    with caplog.at_level("ERROR", logger="distil.youtube"):
+        with pytest.raises(YoutubeFetchError):
+            fetch_video_transcript(
+                "https://www.youtube.com/watch?v=abc12345678", run=fake_run, workdir=tmp_path
+            )
+    assert stderr in caplog.text
+
+
+@pytest.mark.unit
+def test_list_playlist_video_urls_logs_complete_untruncated_stderr(caplog):
+    stderr = _WARNING_NOISE + "ERROR: [youtube:tab] Playlist does not exist.\n"
+
+    def fake_run(cmd, **kwargs):
+        return _proc(returncode=1, stderr=stderr)
+
+    with caplog.at_level("ERROR", logger="distil.youtube"):
+        with pytest.raises(YoutubeFetchError):
+            list_playlist_video_urls("https://www.youtube.com/playlist?list=bad", run=fake_run)
+    assert stderr in caplog.text
+
+
+@pytest.mark.unit
+def test_fetch_video_transcript_passes_no_update_flag(tmp_path):
+    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+
+    def fake_run(cmd, **kwargs):
+        assert "--no-update" in cmd
+        out_index = cmd.index("-o") + 1
+        out_prefix = cmd[out_index]
+        Path(f"{out_prefix}.en.srt").write_text(srt_body, encoding="utf-8")
+        return _proc(returncode=0)
+
+    fetch_video_transcript("https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path)
+
+
+@pytest.mark.unit
+def test_list_playlist_video_urls_passes_no_update_flag():
+    payload = json.dumps({"entries": [{"id": "abc"}]})
+
+    def fake_run(cmd, **kwargs):
+        assert "--no-update" in cmd
+        return _proc(returncode=0, stdout=payload)
+
+    list_playlist_video_urls("https://www.youtube.com/playlist?list=PL1", run=fake_run)
+
+
+@pytest.mark.unit
+def test_fetch_video_transcript_requests_srt_natively_without_convert_subs(tmp_path):
+    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+
+    def fake_run(cmd, **kwargs):
+        idx = cmd.index("--sub-format")
+        assert cmd[idx + 1] == "srt/best"
+        assert "--convert-subs" not in cmd
+        out_index = cmd.index("-o") + 1
+        out_prefix = cmd[out_index]
+        Path(f"{out_prefix}.en.srt").write_text(srt_body, encoding="utf-8")
+        return _proc(returncode=0)
+
+    fetch_video_transcript("https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path)

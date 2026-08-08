@@ -27,7 +27,14 @@ vec = ["sqlite-vec==0.1.6"]
 web = ["fastapi>=0.111", "uvicorn[standard]>=0.30", "jinja2>=3.1", "python-multipart>=0.0.9"]
 # YouTube video/playlist ingest (Phase 1). Optional: only the web ADD-by-URL path needs it,
 # and pinning yt-dlp's fast-moving releases as a hard runtime dep would churn core installs.
-youtube = ["yt-dlp>=2024.8.6"]
+# Floor (not a hard `==` pin) is intentional: YouTube changes its extraction internals every
+# few weeks, and yt-dlp ships a corresponding fix release just as often (see its own 90-day
+# staleness warning) — a `==` pin would go stale and start failing in production long before
+# anyone touched this file again, whereas a floor lets `pip install` pick up newer fixes on
+# every image rebuild. The floor itself still needs bumping periodically since the deployed
+# image only ever gets what was current at build time; 2026.3.17 is the version distil/youtube.py's
+# client chain (Phase 21) was verified against.
+youtube = ["yt-dlp>=2026.3.17"]
 # Dev / test tooling.
 dev = [
     "pytest>=8.0",
