@@ -24,7 +24,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import okf
 from .embed import Embedder
+from .ingest import Transcript
 from .models import KBEntry, Profile
 from .source import display_title
 
@@ -51,9 +53,14 @@ class EntryIndexRow:
 
 
 class Store:
-    def __init__(self, db_path: str | Path, kb_dir: str | Path):
+    def __init__(
+        self, db_path: str | Path, kb_dir: str | Path, okf_root: str | Path | None = None
+    ):
         self.db_path = Path(db_path)
         self.kb_dir = Path(kb_dir)
+        # Sibling of kb_dir by default, mirroring the existing data/ + kb/ layout: the two
+        # on-disk stores (lossless internal vs. neutral derived) sit next to each other.
+        self.okf_root = Path(okf_root) if okf_root is not None else self.kb_dir.parent / "okf"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.kb_dir.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path))
@@ -107,9 +114,21 @@ class Store:
     def entry_path(self, entry_id: str) -> Path:
         return self.kb_dir / f"{entry_id}.md"
 
-    def file_entry(self, entry: KBEntry, *, embedder: Embedder | None = None) -> Path:
+    def file_entry(
+        self,
+        entry: KBEntry,
+        *,
+        embedder: Embedder | None = None,
+        transcript: Transcript | None = None,
+    ) -> Path:
         """Write the markdown file, upsert the index row, and (if an embedder is given) embed
-        each knowledge item into the vector store. Returns the file path."""
+        each knowledge item into the vector store. Returns the file path.
+
+        When ``transcript`` is given, also (re)exports the neutral OKF layer (``sources/`` +
+        ``raw/`` under :attr:`okf_root`) for this entry — see ``okf.py``. Callers that re-file
+        an already-exported entry without its transcript (e.g. after scoring feedback) leave
+        the OKF pages untouched, since feedback is private state that must not leak into them.
+        """
         path = self.entry_path(entry.entry_id)
         path.write_text(self._render_markdown(entry), encoding="utf-8")
 
@@ -142,6 +161,8 @@ class Store:
         self._conn.commit()
         if embedder is not None:
             self._embed_entry_items(entry, embedder)
+        if transcript is not None:
+            okf.export_entry(entry, transcript, self.okf_root)
         return path
 
     def load_entry(self, entry_id: str) -> KBEntry:
@@ -150,13 +171,21 @@ class Store:
         return KBEntry.model_validate_json(payload)
 
     def delete_entry(self, entry_id: str) -> bool:
-        """Delete a KB entry, its SQLite index row, and its item vectors."""
+        """Delete a KB entry, its SQLite index row, its item vectors, and its OKF pages."""
         path = self.entry_path(entry_id)
         file_existed = path.exists()
+        entry: KBEntry | None = None
+        if file_existed:
+            try:
+                entry = self.load_entry(entry_id)
+            except Exception:
+                entry = None
         path.unlink(missing_ok=True)
         with self._conn:
             self._conn.execute("DELETE FROM item_vectors_meta WHERE entry_id = ?", (entry_id,))
             cur = self._conn.execute("DELETE FROM entries WHERE entry_id = ?", (entry_id,))
+        if entry is not None:
+            okf.remove_entry(entry, self.okf_root)
         return file_existed or cur.rowcount > 0
 
     def list_entries(self) -> list[EntryIndexRow]:

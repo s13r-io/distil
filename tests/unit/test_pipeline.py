@@ -132,6 +132,19 @@ def test_pl2_low_value_returns_minimal_without_filing(profile, store):
 
 
 @pytest.mark.unit
+def test_pl1_filing_exports_okf_pages(profile, store):
+    transcript = ingest_text("Keep functions small and focused on one thing.")
+    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    entry = run_pipeline(transcript, profile, store, client,
+                         source_title="A talk", config=PipelineConfig(enable_graph=False))
+    from distil.okf import slug_for_entry
+
+    slug = slug_for_entry(entry)
+    assert (store.okf_root / "sources" / f"{slug}.md").exists()
+    assert (store.okf_root / "raw" / f"{slug}.md").exists()
+
+
+@pytest.mark.unit
 def test_pl_entry_id_is_unique_and_indexed(profile, store):
     t = ingest_text("Keep functions small.")
     e1 = run_pipeline(t, profile, store,
