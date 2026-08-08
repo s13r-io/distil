@@ -99,7 +99,7 @@ distil/
   synthesize_concept.py  # concept-page synthesis: grounded ConceptClaim synthesis + code-rendered citations, called from `run_canonicalize_stage` (see AGENTS.md)
   profile_update.py  # stage 9 (PURE: implements SCHEMA §3 table)
   embed.py           # Embedder protocol + LocalEmbedder + ApiEmbedder + FakeEmbedder (tests)
-  query.py           # read layer: retrieve → relevance gate → grounded synthesis → sources
+  query.py           # read layer: retrieve + retrieve_concepts → relevance gate → grounded synthesis → sources (see AGENTS.md)
   store.py           # SQLite (+ sqlite-vec vectors) + markdown filing (+ OKF export at File, §4)
   pipeline.py        # orchestrates 1→8 (now also embeds items at the File stage; canonicalize gated by PipelineConfig.enable_canonicalize)
   cli.py             # Typer commands (run, score, list, show, ask, reindex)
@@ -222,6 +222,16 @@ A bare lookup ("do I have notes on X?") returns the ranked source list without s
 question runs synthesis on top. **The gate is what enforces no-hallucination:** generation is
 never invoked unless retrieval clears the threshold, so the system cannot answer from the
 model's outside knowledge — it either grounds in your notes or says it has none.
+
+**Concepts join the same gate (Phase 18 / OKF Phase 3d).** `retrieve_concepts` ranks synthesized
+OKF concept pages (the `concepts` table, Phase 15) against the question the same way `retrieve`
+ranks raw items, blending in each concept's closest member so a centroid diluted by loosely-related
+videos can't hide it. A concept clears the relevance gate at the exact same
+`DISTIL_RETRIEVAL_THRESHOLD` as a raw item — never a lower bar; abstention only fires when neither
+clears it. Once cleared, its member items are recruited into the evidence pool (citations still
+resolve from the live item, never the concept's own copied fields) and its already-grounded
+`ConceptClaim` prose is added as extra synthesis context. Concepts only widen what's considered;
+they never replace item-level retrieval or relax the gate. See `AGENTS.md` for the full wiring.
 
 LLM-call budget for `ask`: one embedding call (or zero, if local) + at most one synthesis
 call. Local embeddings make retrieval fully provider-independent.
