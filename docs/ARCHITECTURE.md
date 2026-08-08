@@ -97,7 +97,7 @@ distil/
   pipeline.py        # orchestrates 1→7 (now also embeds items at the File stage)
   cli.py             # Typer commands (run, score, list, show, ask, reindex)
   youtube.py         # fetch layer (Phase 1): yt-dlp playlist listing + caption fetch → Transcript (see AGENTS.md)
-  okf.py             # OKF export layer (Phase 2): per-video sources/+raw/ pages + indexes (see AGENTS.md)
+  okf.py             # OKF export layer: per-video sources/+raw/ pages (Phase 2) + concept pages (Phase 15.2) + indexes (see AGENTS.md)
   okf_lint.py        # stdlib-only validator for the OKF bundle: `python -m distil.okf_lint <okf_root>`
 web/                 # FastAPI app (v0.2): view/score/browse + ask box; auth middleware
 tests/
@@ -105,7 +105,7 @@ tests/
   unit/              # deterministic tests (no API)
   eval/              # LLM behavior tests (marked, gated by API key)
 kb/                  # generated entries (gitignored by default, or committed if user wants)
-okf/                 # derived neutral OKF bundle: sources/, raw/, index.md (regenerated from kb/)
+okf/                 # derived neutral OKF bundle: sources/, raw/, concepts/, index.md (regenerated from kb/)
 data/                # distil.db incl. vectors (gitignored)
 ```
 

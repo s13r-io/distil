@@ -133,10 +133,14 @@ that must abstain.
 - T-OKF1: the export slug is derived from `source.title` (slugified); falls back to `entry_id` when the title yields nothing usable; stable across repeated calls.
 - T-OKF2: two distinct entries whose titles collide get distinct slugs — neither export overwrites the other's pages.
 - T-OKF3: `sources/<slug>.md` has YAML frontmatter (`type: source`, title, description, slug, published, duration, raw path, tags, created/updated) and a body with a thesis, a chronological "Key moments" section from knowledge-item provenance, and a link to the raw page.
-- T-OKF4: the source page omits Concepts-covered/Entities sections (not implemented until a later phase) and never includes `feedback` or `application_links` data (neutrality).
+- T-OKF4: the source page omits an Entities section (not implemented until a later phase) and never includes `feedback` or `application_links` data (neutrality); see T-OKFC3 for the Phase 15.2 "## Concepts covered" backlink.
 - T-OKF5: `raw/<slug>.md` has `type: raw-transcript`, `immutable: true`, and a timestamped body built from `Transcript` segments.
 - T-OKF6: `export_entry` regenerates `okf_root/index.md` and `okf_root/sources/index.md` deterministically; re-exporting the same entry is idempotent (no duplicate or orphaned files).
 - T-OKF7: `remove_entry` deletes both pages for an entry and refreshes both indexes; removing an entry with no exported pages is a no-op.
+- T-OKFC1 (Phase 15.2): `export_concept` writes `concepts/<concept_id>.md` with frontmatter (`type: concept`, title, description, deduped/capped `tags`, sorted unique member `videos` slugs, created/updated), rendered claims with code-derived citations, and a "## Sources" appendix quoting each member's provenance verbatim; never includes `feedback`/`application_links` data.
+- T-OKFC2 (Phase 15.2): re-exporting an unchanged concept is byte-identical.
+- T-OKFC3 (Phase 15.2): `render_source_with_concepts` (a separate post-canonicalize step, since `export_entry`/Stage 7 runs before canonicalize/Stage 8) adds a source page's "## Concepts covered" backlink section when the source has covering concepts, omits the section when it has none, and is idempotent on re-render.
+- T-OKFC4 (Phase 15.2): `remove_concept` deletes the concept page and regenerates `concepts/index.md` and the root index; a concept retracted to zero members is removable this way.
 
 ### okf_lint.py (stdlib-only bundle validator, `python -m distil.okf_lint <okf_root>`)
 - T-OKFL1 (E1): every non-reserved `.md` file must have YAML frontmatter with a non-empty `type`.
@@ -154,10 +158,13 @@ that must abstain.
 - T-CANON6: the candidate pool embedded in the prompt is capped at `MAX_CONCEPT_CANDIDATES` (default 5) even when more concepts qualify.
 - T-CANON7: two same-batch `new` proposals whose normalized titles collide are merged into a single concept instead of creating duplicates.
 - T-CANON9: `Store.delete_entry` cascades into `retract_entry_concept_memberships` — deleting an entry's sole source removes the concept entirely, while deleting one of several sources only retracts that entry's membership and leaves the concept intact for the rest.
+- T-CANON8 (Phase 15.2): `synthesize_touched_concepts` ranks a video's touched concepts by embedding similarity (`Store.concept_centroid`) and synthesizes only the top `MAX_CONCEPTS_TO_SYNTHESIZE_PER_VIDEO` (env `DISTIL_CONCEPTS_SYNTH_PER_VIDEO`, default 5); the rest are marked `pending_synthesis=True` and make no LLM call. A touched set within the cap synthesizes all of them.
 
-T-CANON8 (synthesis-capping over a concept's growing member list) is out of scope for Phase
-15.1: no synthesis (`ConceptClaim`) exists yet, so there is nothing to cap. It lands with
-synthesis in Phase 15.2/15.3 per the design report.
+### synthesize_concept.py (concept-page synthesis, Phase 15.2 — unit, FakeClient)
+- T-SYN1: valid claims JSON parses into cleaned `ConceptClaim`s.
+- T-SYN2: a claim whose `item_ids` don't ALL resolve to real members of this concept is dropped whole (stricter than `note.py`'s per-id filtering).
+- T-SYN3: malformed/empty-after-cleaning model output falls back to a deterministic one-liner built from the concept description and member statements; never raises.
+- T-SYN4: `render_claim` is a pure function — the rendered citation parenthetical exactly matches the code-derived `(okf_slug, timestamp)` map, including multi-citation and no-timestamp cases; the synthesis model never authors citation text.
 
 ### cli.py
 - T-C1: `distil run <file>` accepts `.srt`/`.txt`/`.md` and `distil run --paste` (or stdin) accepts pasted text; exits 0 and prints the entry path.
