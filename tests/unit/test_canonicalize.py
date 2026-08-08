@@ -1,13 +1,17 @@
-"""Phase 15.1 — canonicalize.py: match/new/reject matching engine.
+"""Phase 15.1/15.2 — canonicalize.py: match/new/reject matching engine + synthesis capping.
 
-Tests T-CANON1-7, T-CANON9 (design report §8; T-CANON8, synthesis capping, is 15.2 scope).
+Tests T-CANON1-9 (design report §8; T-CANON8, synthesis capping, is 15.2 scope).
 """
 
 import json
 
 import pytest
 
-from distil.canonicalize import canonicalize_entry
+from distil.canonicalize import (
+    MAX_CONCEPTS_TO_SYNTHESIZE_PER_VIDEO,
+    canonicalize_entry,
+    synthesize_touched_concepts,
+)
 from distil.embed import FakeEmbedder
 from distil.llm import FakeClient
 from distil.models import Concept, ConceptMember, KBEntry
@@ -334,3 +338,74 @@ def test_canon9_delete_entry_cascades_concept_retraction(store, embedder):
     remaining = store.load_concept(cid)
     assert remaining is not None
     assert {m.entry_id for m in remaining.members} == {"e_03"}
+
+
+# ---- T-CANON8: per-video synthesis capping (design report §6, 15.2 scope) --------------------
+
+
+@pytest.mark.unit
+def test_canon8_synthesis_capping_defers_the_rest(store, embedder, monkeypatch):
+    monkeypatch.setenv("DISTIL_CONCEPTS_SYNTH_PER_VIDEO", "2")
+    entry = _entry(
+        "e_01",
+        [
+            _item("k_01", "Idea one about rag", quote="q1"),
+            _item("k_02", "Idea two about rag", quote="q2"),
+            _item("k_03", "Idea three about rag", quote="q3"),
+        ],
+    )
+    store.file_entry(entry, embedder=embedder)
+    fake = FakeClient(
+        responses=[
+            json.dumps(
+                [
+                    {"item_id": "k_01", "decision": "new", "title": "Idea One", "description": "d1"},
+                    {"item_id": "k_02", "decision": "new", "title": "Idea Two", "description": "d2"},
+                    {"item_id": "k_03", "decision": "new", "title": "Idea Three", "description": "d3"},
+                ]
+            )
+        ]
+    )
+    touched = canonicalize_entry(entry, store, fake)
+    assert len(touched) == 3
+
+    synth_fake = FakeClient(responses=["[]", "[]"])  # only 2 synthesis calls should ever happen
+    synthesize_touched_concepts(entry, touched, store, synth_fake)
+
+    assert synth_fake.call_count == 2
+    concepts = store.list_concepts()
+    pending = [c for c in concepts if c.pending_synthesis]
+    synthesized = [c for c in concepts if not c.pending_synthesis]
+    assert len(pending) == 1
+    assert len(synthesized) == 2
+    # synthesized concepts actually got a claims body (fallback, since synth_fake returns "[]")
+    for concept in synthesized:
+        assert concept.claims != []
+
+
+@pytest.mark.unit
+def test_canon8_default_cap_constant(monkeypatch):
+    monkeypatch.delenv("DISTIL_CONCEPTS_SYNTH_PER_VIDEO", raising=False)
+    assert MAX_CONCEPTS_TO_SYNTHESIZE_PER_VIDEO == 5
+
+
+@pytest.mark.unit
+def test_canon8_touched_set_within_cap_synthesizes_all(store, embedder, monkeypatch):
+    monkeypatch.delenv("DISTIL_CONCEPTS_SYNTH_PER_VIDEO", raising=False)
+    entry = _entry("e_01", [_item("k_01", _AGENTIC_RAG)])
+    store.file_entry(entry, embedder=embedder)
+    fake = FakeClient(
+        responses=[
+            json.dumps(
+                [{"item_id": "k_01", "decision": "new", "title": "Agentic RAG", "description": "d"}]
+            )
+        ]
+    )
+    touched = canonicalize_entry(entry, store, fake)
+
+    synthesize_touched_concepts(entry, touched, store, FakeClient(responses=["[]"]))
+
+    concepts = store.list_concepts()
+    assert len(concepts) == 1
+    assert concepts[0].pending_synthesis is False
+    assert concepts[0].claims != []

@@ -47,13 +47,19 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from .ingest import Transcript
-from .models import KBEntry
+from .models import Concept, KBEntry
 from .source import _youtube_video_id, display_title
+from .synthesize_concept import render_claim
+
+if TYPE_CHECKING:  # pragma: no cover - avoids an okf<->store import cycle (store imports okf)
+    from .store import Store
 
 _SLUG_RUN = re.compile(r"[^a-z0-9]+")
+_MAX_CONCEPT_TAGS = 8
 
 
 def slug_for_entry(entry: KBEntry, okf_root: str | Path | None = None) -> str:
@@ -115,7 +121,12 @@ def slugify(text: str) -> str:
 
 
 def export_entry(entry: KBEntry, transcript: Transcript, okf_root: str | Path) -> None:
-    """Write/refresh ``sources/<slug>.md`` + ``raw/<slug>.md`` and regenerate both indexes."""
+    """Write/refresh ``sources/<slug>.md`` + ``raw/<slug>.md`` and regenerate both indexes.
+
+    Stage 7 (File) runs before canonicalize (Stage 8, design report §5), so this page is
+    always rendered with no "## Concepts covered" section — :func:`render_source_with_concepts`
+    is the post-canonicalize step that adds it once concept membership is known.
+    """
     root = Path(okf_root)
     sources_dir = root / "sources"
     raw_dir = root / "raw"
@@ -137,10 +148,58 @@ def remove_entry(entry: KBEntry, okf_root: str | Path) -> None:
     _rebuild_indexes(root)
 
 
+def render_source_with_concepts(entry: KBEntry, store: Store, okf_root: str | Path) -> None:
+    """Re-render ``sources/<slug>.md`` for ``entry``, adding a "## Concepts covered" section
+    listing every concept with a member from this entry (SCHEMA §5 "bidirectional"; design
+    report §3, §5). A post-canonicalize step: Stage 7 (File) already wrote this page without
+    concept knowledge, so this re-touches it once membership is known. Full deterministic
+    regeneration like the rest of this module — re-rendering the same concept set is
+    byte-identical.
+    """
+    root = Path(okf_root)
+    slug = slug_for_entry(entry, root)
+    covering = sorted(
+        (c for c in store.list_concepts() if any(m.entry_id == entry.entry_id for m in c.members)),
+        key=lambda c: c.title.lower(),
+    )
+    text = _render_source(entry, slug, covering_concepts=covering)
+    (root / "sources" / f"{slug}.md").write_text(text, encoding="utf-8")
+
+
+def export_concept(concept: Concept, store: Store, okf_root: str | Path) -> None:
+    """Write/refresh ``concepts/<concept_id>.md`` and regenerate all indexes (design report §3).
+
+    No feedback/application-link data by construction (``Concept`` carries none). Claims are
+    rendered with code-assembled citations (:func:`distil.synthesize_concept.render_claim`) —
+    never model-authored citation text.
+    """
+    root = Path(okf_root)
+    concepts_dir = root / "concepts"
+    concepts_dir.mkdir(parents=True, exist_ok=True)
+    (concepts_dir / f"{concept.concept_id}.md").write_text(
+        _render_concept(concept, store, root), encoding="utf-8"
+    )
+    _rebuild_indexes(root)
+
+
+def remove_concept(concept_id: str, okf_root: str | Path) -> None:
+    """Delete a concept's OKF page (if present) and regenerate all indexes.
+
+    Called whenever a concept drops to zero members after a retraction (design report §5) —
+    the DB row is already gone (``Store.retract_entry_concept_memberships``); this cleans up
+    the page it left behind.
+    """
+    root = Path(okf_root)
+    (root / "concepts" / f"{concept_id}.md").unlink(missing_ok=True)
+    _rebuild_indexes(root)
+
+
 # ---- page rendering ----------------------------------------------------------------------
 
 
-def _render_source(entry: KBEntry, slug: str) -> str:
+def _render_source(
+    entry: KBEntry, slug: str, covering_concepts: list[Concept] | None = None
+) -> str:
     title = display_title(
         entry.source.title,
         entry.distilled_note.title if entry.distilled_note is not None else None,
@@ -187,7 +246,94 @@ def _render_source(entry: KBEntry, slug: str) -> str:
     lines.append("")
     lines.append(f"[Raw transcript](../raw/{slug}.md)")
     lines.append("")
+
+    if covering_concepts:
+        lines.append("## Concepts covered")
+        lines.append("")
+        for concept in covering_concepts:
+            lines.append(f"- [{concept.title}](../concepts/{concept.concept_id}.md)")
+        lines.append("")
     return "\n".join(lines)
+
+
+def _render_concept(concept: Concept, store: Store, root: Path) -> str:
+    member_entries: dict[str, KBEntry] = {}
+    for member in concept.members:
+        if member.entry_id in member_entries:
+            continue
+        try:
+            member_entries[member.entry_id] = store.load_entry(member.entry_id)
+        except Exception:
+            continue
+
+    tags = _aggregate_concept_tags(member_entries.values())
+    videos = sorted({slug_for_entry(entry, root) for entry in member_entries.values()})
+
+    lines = [
+        "---",
+        "type: concept",
+        f"title: {_yaml_str(concept.title)}",
+        f"description: {_yaml_str(concept.description)}",
+        f"tags: {_yaml_flow_list(tags)}",
+        f"videos: {_yaml_flow_list(videos)}",
+        f"created: {_date_only(concept.created_at)}",
+        f"updated: {_date_only(concept.updated_at)}",
+        "---",
+        "",
+        f"# {concept.title}",
+        "",
+    ]
+
+    citations = _concept_citations(concept, member_entries, root)
+    if concept.claims:
+        for claim in concept.claims:
+            lines.append(render_claim(claim, citations))
+            lines.append("")
+    else:
+        lines.append(concept.description)
+        lines.append("")
+
+    lines.append("## Sources")
+    lines.append("")
+    seen_entries: set[str] = set()
+    for member in concept.members:
+        if member.entry_id in seen_entries:
+            continue
+        seen_entries.add(member.entry_id)
+        entry = member_entries.get(member.entry_id)
+        if entry is None:
+            continue
+        slug = slug_for_entry(entry, root)
+        quote = f"[{member.timestamp}] {member.quote}" if member.timestamp else member.quote
+        lines.append(f'- [{entry.source.title}](../sources/{slug}.md) - "{quote}"')
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _aggregate_concept_tags(entries) -> list[str]:
+    """Union of member entries' ``tags.topics``, deduped, first-seen order, capped at
+    ``_MAX_CONCEPT_TAGS`` (open question, design report: unbounded growth as a concept
+    accumulates videos with varied tags — capped the same way ``note._normalize_topics`` is)."""
+    tags: list[str] = []
+    for entry in entries:
+        for topic in entry.tags.topics:
+            if topic not in tags:
+                tags.append(topic)
+    return tags[:_MAX_CONCEPT_TAGS]
+
+
+def _concept_citations(
+    concept: Concept, member_entries: dict[str, KBEntry], root: Path
+) -> dict[str, tuple[str, str | None]]:
+    """``item_id`` -> ``(okf_slug, timestamp)``, resolved from verified member/entry data —
+    never from model text (design report §4 step 4)."""
+    citations: dict[str, tuple[str, str | None]] = {}
+    for member in concept.members:
+        entry = member_entries.get(member.entry_id)
+        if entry is None:
+            continue
+        citations[member.item_id] = (slug_for_entry(entry, root), member.timestamp)
+    return citations
 
 
 def _render_raw(entry: KBEntry, transcript: Transcript, slug: str) -> str:
@@ -216,23 +362,22 @@ def _render_raw(entry: KBEntry, transcript: Transcript, slug: str) -> str:
 
 
 def _rebuild_indexes(root: Path) -> None:
-    sources_dir = root / "sources"
-    entries: list[tuple[str, str, str]] = []  # (slug, title, description)
-    if sources_dir.exists():
-        for path in sorted(sources_dir.glob("*.md")):
-            if path.name == "index.md":
-                continue
-            text = path.read_text(encoding="utf-8")
-            title = _frontmatter_field(text, "title") or path.stem
-            description = _frontmatter_field(text, "description") or ""
-            entries.append((path.stem, title, description))
+    sources_entries = _collect_pages(root / "sources")
+    concepts_entries = sorted(_collect_pages(root / "concepts"), key=lambda e: e[1].lower())
 
     sources_index = ["# Sources", ""]
-    for slug, title, description in entries:
+    for slug, title, description in sources_entries:
         sources_index.append(f"- [{title}]({slug}.md) - {description}")
     sources_index.append("")
-    (sources_dir).mkdir(parents=True, exist_ok=True)
-    (sources_dir / "index.md").write_text("\n".join(sources_index), encoding="utf-8")
+    (root / "sources").mkdir(parents=True, exist_ok=True)
+    (root / "sources" / "index.md").write_text("\n".join(sources_index), encoding="utf-8")
+
+    concepts_index = ["# Concepts", ""]
+    for slug, title, description in concepts_entries:
+        concepts_index.append(f"- [{title}]({slug}.md) - {description}")
+    concepts_index.append("")
+    (root / "concepts").mkdir(parents=True, exist_ok=True)
+    (root / "concepts" / "index.md").write_text("\n".join(concepts_index), encoding="utf-8")
 
     root_index = [
         "---",
@@ -241,20 +386,44 @@ def _rebuild_indexes(root: Path) -> None:
         "",
         "# Distil OKF Bundle",
         "",
-        "Per-video OKF layer generated by Distil. Concepts and entities are not yet "
-        "synthesized (that begins in a later phase); this bundle currently covers "
-        "`sources/` (neutral per-video summaries) and `raw/` (immutable transcripts) only.",
+        "Per-video OKF layer generated by Distil, alongside cross-video `concepts/` pages "
+        "synthesized from canonicalized knowledge items. Entities are not yet synthesized "
+        "(that begins in a later phase); this bundle currently covers `sources/` (neutral "
+        "per-video summaries), `raw/` (immutable transcripts), and `concepts/` (cross-video "
+        "synthesis).",
         "",
         "## Sources",
         "",
     ]
-    for slug, title, _description in entries:
+    for slug, title, _description in sources_entries:
         root_index.append(f"- [{title}](sources/{slug}.md)")
     root_index.append("")
     root_index.append("See [sources/index.md](sources/index.md) for one-line descriptions.")
     root_index.append("")
+    root_index.append("## Concepts")
+    root_index.append("")
+    for slug, title, _description in concepts_entries:
+        root_index.append(f"- [{title}](concepts/{slug}.md)")
+    root_index.append("")
+    root_index.append("See [concepts/index.md](concepts/index.md) for one-line descriptions.")
+    root_index.append("")
     root.mkdir(parents=True, exist_ok=True)
     (root / "index.md").write_text("\n".join(root_index), encoding="utf-8")
+
+
+def _collect_pages(dirpath: Path) -> list[tuple[str, str, str]]:
+    """One ``(slug, title, description)`` tuple per non-index page in ``dirpath``, reused for
+    both ``sources/`` and ``concepts/`` — same frontmatter-scan shape either way."""
+    entries: list[tuple[str, str, str]] = []
+    if dirpath.exists():
+        for path in sorted(dirpath.glob("*.md")):
+            if path.name == "index.md":
+                continue
+            text = path.read_text(encoding="utf-8")
+            title = _frontmatter_field(text, "title") or path.stem
+            description = _frontmatter_field(text, "description") or ""
+            entries.append((path.stem, title, description))
+    return entries
 
 
 # ---- small helpers ---------------------------------------------------------------------

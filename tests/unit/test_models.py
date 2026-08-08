@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from distil.models import (
     ApplicationLink,
     Concept,
+    ConceptClaim,
     ConceptMember,
     Feedback,
     KBEntry,
@@ -252,7 +253,31 @@ def test_concept_round_trip_lossless():
 
 
 @pytest.mark.unit
-def test_concept_has_no_claims_field_in_phase_15_1():
-    # ConceptClaim/synthesis is explicitly out of scope for Phase 15.1 (design report §9,
-    # "15.2 — Concept page synthesis"); the model must not carry it yet.
-    assert "claims" not in Concept.model_fields
+def test_concept_claim_validates_like_grounded_text():
+    claim = ConceptClaim(text="Traditional RAG retrieves then generates.", item_ids=["k_01"])
+    assert claim.text == "Traditional RAG retrieves then generates."
+    assert claim.item_ids == ["k_01"]
+
+
+@pytest.mark.unit
+def test_concept_claim_item_ids_default_empty():
+    claim = ConceptClaim(text="x")
+    assert claim.item_ids == []
+
+
+@pytest.mark.unit
+def test_concept_has_claims_and_pending_synthesis_fields():
+    # Phase 15.2 (design report §3, §6) adds the synthesized body + the synthesis-capping flag.
+    assert "claims" in Concept.model_fields
+    assert "pending_synthesis" in Concept.model_fields
+    concept = Concept(
+        concept_id="traditional-rag",
+        title="Traditional RAG",
+        description="Retrieve then generate.",
+        members=[ConceptMember(entry_id="e_01", item_id="k_01", quote="q")],
+        claims=[ConceptClaim(text="Retrieve then generate.", item_ids=["k_01"])],
+        created_at="2026-06-15T00:00:00",
+        updated_at="2026-06-15T00:00:00",
+    )
+    assert concept.claims[0].text == "Retrieve then generate."
+    assert concept.pending_synthesis is False

@@ -425,6 +425,17 @@ class Store:
         cur = self._conn.execute("SELECT data FROM concepts ORDER BY concept_id")
         return [Concept.model_validate_json(r["data"]) for r in cur.fetchall()]
 
+    def concept_centroid(self, concept_id: str) -> list[float]:
+        """The stored centroid vector for ``concept_id`` (mean of member item vectors, kept
+        up to date by :meth:`save_concept`), or ``[]`` if the concept doesn't exist / has no
+        embedded members yet. Read-path helper for per-video synthesis ranking (design report
+        §6) — avoids re-deriving the centroid from scratch."""
+        cur = self._conn.execute("SELECT centroid FROM concepts WHERE concept_id = ?", (concept_id,))
+        row = cur.fetchone()
+        if row is None or not row["centroid"]:
+            return []
+        return json.loads(row["centroid"])
+
     def delete_concept(self, concept_id: str) -> bool:
         with self._conn:
             cur = self._conn.execute("DELETE FROM concepts WHERE concept_id = ?", (concept_id,))
