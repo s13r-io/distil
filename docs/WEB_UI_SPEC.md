@@ -61,6 +61,9 @@ The most prominent block on the page.
   - **Conflict banner** (FR20): amber, shown **only** when retrieved notes disagree.
   - **Abstention** (FR18): when nothing clears the threshold, show the honest "no relevant
     notes — won't make something up" message *instead* of an answer. No sources.
+  - **Concepts used:** links to the `/concepts/{id}` pages that contributed, shown beside the
+    sources list on both the all-at-once and streaming paths; added later (Phase C) — see
+    `AGENTS.md`'s "Answer depth" entry, not this v1 spec.
 - **Each new question replaces the previous answer** (no history stack).
 - **Stream failure:** discard the partial answer, show "Answer interrupted — Retry."
 
