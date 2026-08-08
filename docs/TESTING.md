@@ -60,6 +60,7 @@ that must abstain.
 - T-Y4: a video with no caption file written (no captions available) raises `YoutubeFetchError`, not a crash.
 - T-Y5: a `yt-dlp` process failure (private/deleted video) raises `YoutubeFetchError` with the underlying stderr.
 - T-Y6 (web/jobs): one uncaptioned/failed video in a playlist batch is marked `failed` on its own job; the next queued job still processes — never fatal to the batch (`Worker._process` already isolates per-job exceptions; `web/app.py` enqueues one `kind="youtube"` job per video).
+- T-Y7: a caller-supplied `workdir` reused across fetches (e.g. a shared `tmp_path`) never picks up a stale `.srt` left by a previous fetch — each fetch is scoped to its own unique child directory, and the stale file is left untouched.
 
 ### models.py
 - T-M1: Profile validates; rejects bad `status` enum.
