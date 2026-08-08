@@ -63,6 +63,7 @@ that must abstain.
 - T-Y7: a caller-supplied `workdir` reused across fetches (e.g. a shared `tmp_path`) never picks up a stale `.srt` left by a previous fetch — each fetch is scoped to its own unique child directory, and the stale file is left untouched.
 - T-Y8 (Phase 19): both `list_playlist_video_urls` and `_fetch_into` pass `--extractor-args youtube:player_client=android,web` to `yt-dlp`.
 - T-Y9 (Phase 19): a transient failure (429/5xx) retries with exponential backoff (injectable `sleep`) and succeeds once `yt-dlp` returns success within the bounded attempt count; a persistent transient failure still raises `YoutubeFetchError` after exhausting attempts; a non-transient failure (e.g. private/deleted video) raises immediately with no retry/sleep.
+- T-Y10 (Phase 20): with `DISTIL_YOUTUBE_API_KEY` set (via `monkeypatch`), both `list_playlist_video_urls` and `_fetch_into` pass `--extractor-args` containing `innertube_key=<value>` and `innertube_host=youtubei.googleapis.com` alongside `player_client=android,web`; with the env var unset, the command line is unchanged from T-Y8.
 
 ### models.py
 - T-M1: Profile validates; rejects bad `status` enum.

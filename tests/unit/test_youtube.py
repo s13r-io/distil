@@ -63,7 +63,8 @@ def test_list_playlist_video_urls_returns_watch_urls():
 
 
 @pytest.mark.unit
-def test_list_playlist_video_urls_passes_player_client_fallback_chain():
+def test_list_playlist_video_urls_passes_player_client_fallback_chain(monkeypatch):
+    monkeypatch.delenv("DISTIL_YOUTUBE_API_KEY", raising=False)
     payload = json.dumps({"entries": [{"id": "abc"}]})
 
     def fake_run(cmd, **kwargs):
@@ -121,7 +122,8 @@ def test_fetch_video_transcript_parses_downloaded_srt(tmp_path):
 
 
 @pytest.mark.unit
-def test_fetch_video_transcript_passes_player_client_fallback_chain(tmp_path):
+def test_fetch_video_transcript_passes_player_client_fallback_chain(monkeypatch, tmp_path):
+    monkeypatch.delenv("DISTIL_YOUTUBE_API_KEY", raising=False)
     srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
 
     def fake_run(cmd, **kwargs):
@@ -274,6 +276,73 @@ def test_list_playlist_video_urls_raises_youtube_fetch_error_on_persistent_5xx()
             sleep=lambda seconds: None,
         )
     assert len(calls) == 3
+
+
+# ---- Phase 20: DISTIL_YOUTUBE_API_KEY wiring (innertube_host/innertube_key) ----
+
+
+@pytest.mark.unit
+def test_list_playlist_video_urls_omits_key_args_when_env_unset(monkeypatch):
+    monkeypatch.delenv("DISTIL_YOUTUBE_API_KEY", raising=False)
+    payload = json.dumps({"entries": [{"id": "abc"}]})
+
+    def fake_run(cmd, **kwargs):
+        idx = cmd.index("--extractor-args")
+        assert cmd[idx + 1] == "youtube:player_client=android,web"
+        return _proc(returncode=0, stdout=payload)
+
+    list_playlist_video_urls("https://www.youtube.com/playlist?list=PL1", run=fake_run)
+
+
+@pytest.mark.unit
+def test_list_playlist_video_urls_passes_api_key_when_env_set(monkeypatch):
+    monkeypatch.setenv("DISTIL_YOUTUBE_API_KEY", "secret-key-123")
+    payload = json.dumps({"entries": [{"id": "abc"}]})
+
+    def fake_run(cmd, **kwargs):
+        idx = cmd.index("--extractor-args")
+        value = cmd[idx + 1]
+        assert value.startswith("youtube:player_client=android,web;")
+        assert "innertube_host=youtubei.googleapis.com" in value
+        assert "innertube_key=secret-key-123" in value
+        return _proc(returncode=0, stdout=payload)
+
+    list_playlist_video_urls("https://www.youtube.com/playlist?list=PL1", run=fake_run)
+
+
+@pytest.mark.unit
+def test_fetch_video_transcript_omits_key_args_when_env_unset(monkeypatch, tmp_path):
+    monkeypatch.delenv("DISTIL_YOUTUBE_API_KEY", raising=False)
+    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+
+    def fake_run(cmd, **kwargs):
+        idx = cmd.index("--extractor-args")
+        assert cmd[idx + 1] == "youtube:player_client=android,web"
+        out_index = cmd.index("-o") + 1
+        out_prefix = cmd[out_index]
+        Path(f"{out_prefix}.en.srt").write_text(srt_body, encoding="utf-8")
+        return _proc(returncode=0)
+
+    fetch_video_transcript("https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path)
+
+
+@pytest.mark.unit
+def test_fetch_video_transcript_passes_api_key_when_env_set(monkeypatch, tmp_path):
+    monkeypatch.setenv("DISTIL_YOUTUBE_API_KEY", "secret-key-123")
+    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+
+    def fake_run(cmd, **kwargs):
+        idx = cmd.index("--extractor-args")
+        value = cmd[idx + 1]
+        assert value.startswith("youtube:player_client=android,web;")
+        assert "innertube_host=youtubei.googleapis.com" in value
+        assert "innertube_key=secret-key-123" in value
+        out_index = cmd.index("-o") + 1
+        out_prefix = cmd[out_index]
+        Path(f"{out_prefix}.en.srt").write_text(srt_body, encoding="utf-8")
+        return _proc(returncode=0)
+
+    fetch_video_transcript("https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path)
 
 
 # ---- T-Y6: malformed playlist JSON -> clear error, not a crash ----

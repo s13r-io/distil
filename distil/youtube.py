@@ -19,6 +19,13 @@ Both call sites also retry a few times with exponential backoff on transient fai
 network) via :func:`_run_yt_dlp` before surfacing :class:`YoutubeFetchError`, to ride out a short
 YouTube rate window — bounded so a persistent block still fails fast with the same error.
 
+Phase 20: client rotation alone can't beat a *datacenter-IP-level* 429 (seen on Railway), so when
+``DISTIL_YOUTUBE_API_KEY`` is set, :func:`_extractor_args` (shared by both call sites, read at
+call time so it can't go stale mid-process) appends yt-dlp's ``innertube_host``/``innertube_key``
+extractor-args, routing requests through the YouTube Data API host — which accepts the key and
+isn't subject to that same IP-level throttling — instead of the anonymous innertube endpoint.
+Absent the env var, the command line is byte-identical to pre-Phase-20 behavior.
+
 Speech-to-text (Whisper) for uncaptioned videos is out of scope; those videos raise
 :class:`YoutubeFetchError` so callers can skip + report them without failing a whole playlist.
 """
@@ -26,6 +33,7 @@ Speech-to-text (Whisper) for uncaptioned videos is out of scope; those videos ra
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import time
@@ -39,7 +47,23 @@ _YT_DLP = "yt-dlp"
 
 # android needs no JS runtime and is throttled far less than web on server IPs; web stays as a
 # fallback in the same invocation for the rare video whose android response omits captions.
-_PLAYER_CLIENT_ARGS = ["--extractor-args", "youtube:player_client=android,web"]
+_PLAYER_CLIENT = "player_client=android,web"
+
+
+def _extractor_args() -> list[str]:
+    """Build the ``--extractor-args`` pair shared by both yt-dlp call sites.
+
+    Reads ``DISTIL_YOUTUBE_API_KEY`` at call time (not import time) so callers — including
+    tests via monkeypatch — always see the current environment. When unset, the returned args
+    are byte-identical to pre-Phase-20 behavior (``player_client`` only). When set, appends
+    ``innertube_host``/``innertube_key`` so yt-dlp routes through the YouTube Data API host
+    instead of the anonymous innertube endpoint that datacenter IPs get 429'd on.
+    """
+    value = f"youtube:{_PLAYER_CLIENT}"
+    api_key = os.environ.get("DISTIL_YOUTUBE_API_KEY")
+    if api_key:
+        value += f";innertube_host=youtubei.googleapis.com;innertube_key={api_key}"
+    return ["--extractor-args", value]
 
 # Bounded retry for transient failures (429 / 5xx / network) — enough attempts to ride out a
 # short YouTube rate window, few enough that a persistent block still fails fast.
@@ -106,7 +130,7 @@ def list_playlist_video_urls(
 ) -> list[str]:
     """Enumerate a playlist's videos as normalized ``watch?v=`` URLs (no downloads)."""
     proc = _run_yt_dlp(
-        [_YT_DLP, *_PLAYER_CLIENT_ARGS, "--flat-playlist", "--dump-single-json", playlist_url],
+        [_YT_DLP, *_extractor_args(), "--flat-playlist", "--dump-single-json", playlist_url],
         run, timeout, sleep,
     )
     if proc.returncode != 0:
@@ -149,7 +173,7 @@ def _fetch_into(video_url: str, run, workdir: Path, timeout: float, sleep=time.s
     out_prefix = workdir / "captions"
     proc = _run_yt_dlp(
         [
-            _YT_DLP, *_PLAYER_CLIENT_ARGS,
+            _YT_DLP, *_extractor_args(),
             "--skip-download",
             "--write-subs", "--write-auto-subs",
             # Exact "en" only — a wildcard like "en.*" also matches yt-dlp's auto-translated

@@ -49,6 +49,9 @@ DISTIL_AUTH_SECRET   = <a long random secret>   # REQUIRED for public hosting
 Optional tuning: `DISTIL_RETRIEVAL_THRESHOLD`, `DISTIL_TOP_K`, `DISTIL_NOVELTY_RATIO`,
 `DISTIL_PROFILE_ALPHA`. Never commit these — they live only in Railway.
 
+If YouTube ingest hits 429s from Railway's datacenter IP, set `DISTIL_YOUTUBE_API_KEY` to a
+YouTube Data API key (see `.env.example`) to route those fetches around the throttle.
+
 > **Local embeddings + Railway:** with `DISTIL_EMBEDDER=local` (the chosen default) a small
 > embedding model loads into the service's RAM and should be baked into the image at build
 > time. Pick an instance with enough memory for it. On a very small instance, set
