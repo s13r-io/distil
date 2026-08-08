@@ -56,6 +56,11 @@ def ingest_file(path: str | Path) -> Transcript:
     )
 
 
+def ingest_srt_text(raw: str) -> Transcript:
+    """Parse raw SRT-formatted text (e.g. captions fetched via ``yt-dlp``) into a Transcript."""
+    return _parse_srt(raw)
+
+
 def ingest_text(text: str) -> Transcript:
     """Normalize pasted/plain text. Detects inline ``HH:MM:SS`` markers per line."""
     if not text or not text.strip():

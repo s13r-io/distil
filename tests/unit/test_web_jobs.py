@@ -270,6 +270,117 @@ def test_ingest_rejects_non_youtube_source_url(client):
     assert r.status_code == 400
 
 
+# ---- YouTube-only ADD input: a bare video/playlist URL (no paste, no file) --------------
+
+
+@pytest.mark.unit
+def test_ingest_youtube_video_url_only_queues_youtube_job(client):
+    r = client.post("/ingest", data={"source_url": "https://youtu.be/abc123"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "queued"
+    jobs = client.get("/jobs", headers={"accept": "application/json"}).json()
+    queued = next(j for j in jobs if j["job_id"] == body["job_id"])
+    assert queued["source_url"] == "https://www.youtube.com/watch?v=abc123"
+    assert queued["kind"] == "youtube"
+
+
+@pytest.mark.unit
+def test_ingest_rejects_non_youtube_url_only_source(client):
+    r = client.post("/ingest", data={"source_url": "https://example.com/watch?v=abc"})
+    assert r.status_code == 400
+
+
+@pytest.mark.unit
+def test_ingest_youtube_playlist_enqueues_one_job_per_video(client, monkeypatch):
+    from distil import youtube as ytmod
+
+    monkeypatch.setattr(
+        webapp.youtube, "list_playlist_video_urls",
+        lambda url, **kw: [
+            "https://www.youtube.com/watch?v=vid1",
+            "https://www.youtube.com/watch?v=vid2",
+        ],
+    )
+    r = client.post(
+        "/ingest", data={"source_url": "https://www.youtube.com/playlist?list=PL123"}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "queued"
+    assert len(body["job_ids"]) == 2
+    jobs = client.get("/jobs", headers={"accept": "application/json"}).json()
+    kinds = {j["kind"] for j in jobs}
+    assert kinds == {"youtube"}
+    urls = {j["source_url"] for j in jobs}
+    assert urls == {
+        "https://www.youtube.com/watch?v=vid1", "https://www.youtube.com/watch?v=vid2",
+    }
+    assert ytmod is ytmod  # keep import used
+
+
+@pytest.mark.unit
+def test_ingest_youtube_playlist_listing_failure_returns_400(client, monkeypatch):
+    from distil.youtube import YoutubeFetchError
+
+    def boom(url, **kw):
+        raise YoutubeFetchError("Could not list playlist: playlist does not exist")
+
+    monkeypatch.setattr(webapp.youtube, "list_playlist_video_urls", boom)
+    r = client.post(
+        "/ingest", data={"source_url": "https://www.youtube.com/playlist?list=bad"}
+    )
+    assert r.status_code == 400
+    assert "playlist" in r.json()["detail"].lower()
+
+
+# ---- worker: a bad video in a batch is skipped, others still process (never fatal) ------
+
+
+@pytest.mark.unit
+def test_load_job_transcript_dispatches_youtube_kind(monkeypatch):
+    from distil.ingest import Transcript
+
+    sentinel = Transcript(segments=[])
+    captured = {}
+
+    def fake_fetch(url, **kw):
+        captured["url"] = url
+        return sentinel
+
+    monkeypatch.setattr(webapp.youtube, "fetch_video_transcript", fake_fetch)
+    job = jobsmod.Job(
+        job_id="j1", kind="youtube", title="t",
+        payload="https://www.youtube.com/watch?v=abc", source_url=None,
+        status="queued", entry_id=None, summary=None, error=None,
+        created_at="", updated_at="",
+    )
+    result = webapp._load_job_transcript(job)
+    assert result is sentinel
+    assert captured["url"] == "https://www.youtube.com/watch?v=abc"
+
+
+@pytest.mark.unit
+def test_worker_reports_uncaptioned_video_failure_without_blocking_next_job(tmp_path):
+    from distil.youtube import YoutubeFetchError
+
+    db = tmp_path / "distil.db"
+    store = jobsmod.JobStore(db)
+    bad = store.enqueue(kind="youtube", title="no captions", payload="https://x/1")
+    good = store.enqueue(kind="youtube", title="captioned", payload="https://x/2")
+
+    def fake_distill(job):
+        if job.title == "no captions":
+            raise YoutubeFetchError("No English captions available for this video.")
+        return {"status": "done", "entry_id": "e_ok", "summary": "kept 1 item"}
+
+    worker = jobsmod.Worker(db, fake_distill)
+    assert worker.process_once() and worker.process_once()
+    assert store.get(bad.job_id).status == jobsmod.STATUS_FAILED
+    assert "captions" in store.get(bad.job_id).error
+    assert store.get(good.job_id).status == jobsmod.STATUS_DONE
+
+
 # ---- streaming ask: deltas then final; abstention makes zero synthesis calls -----------
 
 

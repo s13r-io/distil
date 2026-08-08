@@ -53,6 +53,14 @@ that must abstain.
 - T-I5: unknown/binary file or empty input → clear error, not a crash.
 - T-I6: the normalized transcript shape is identical across `.srt`/`.txt`/`.md`/paste (downstream stages don't care about source format).
 
+### youtube.py (fetch layer — `yt-dlp` invoked via an injectable ``run``, no real subprocess/network in unit tests)
+- T-Y1: a playlist URL (`?list=` with no `v`, or `/playlist` path) is distinguished from a single video URL.
+- T-Y2: a playlist enumerates to a list of normalized `watch?v=` URLs; empty/malformed listings raise `YoutubeFetchError`.
+- T-Y3: a captioned video's fetched `.srt` parses into a `Transcript` via `ingest.ingest_srt_text` (same shape as uploaded `.srt`).
+- T-Y4: a video with no caption file written (no captions available) raises `YoutubeFetchError`, not a crash.
+- T-Y5: a `yt-dlp` process failure (private/deleted video) raises `YoutubeFetchError` with the underlying stderr.
+- T-Y6 (web/jobs): one uncaptioned/failed video in a playlist batch is marked `failed` on its own job; the next queued job still processes — never fatal to the batch (`Worker._process` already isolates per-job exceptions; `web/app.py` enqueues one `kind="youtube"` job per video).
+
 ### models.py
 - T-M1: Profile validates; rejects bad `status` enum.
 - T-M2: KnowledgeItem requires `provenance`; `quote` is mandatory, `timestamp` may be null.

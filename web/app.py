@@ -28,6 +28,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from distil import youtube
 from distil.cli import _make_client, _make_embedder
 from distil.graph import link_graph
 from distil.ingest import ingest_file, ingest_text
@@ -45,6 +46,7 @@ from distil.source import (
     normalize_youtube_url,
 )
 from distil.store import Store
+from distil.youtube import YoutubeFetchError
 
 from . import auth
 from . import jobs as jobsmod
@@ -138,6 +140,8 @@ def _load_job_transcript(job: jobsmod.Job):
             return ingest_file(str(p))
         finally:
             p.unlink(missing_ok=True)
+    if job.kind == "youtube":
+        return youtube.fetch_video_transcript(job.payload)
     return ingest_text(job.payload)
 
 
@@ -224,6 +228,36 @@ def _graph_link_job(entry_id: str) -> None:
             store.file_entry(entry)
     except Exception:
         return
+
+
+def _enqueue_youtube_source(store_jobs: jobsmod.JobStore, url: str):
+    """ADD input: a bare YouTube video or playlist URL, no paste/file.
+
+    A playlist enqueues one ``youtube`` job per video through the existing single-worker
+    queue; a bad video's caption/availability failure only fails its own job (jobs.py
+    ``Worker`` already isolates per-job exceptions), so one skipped video never blocks the
+    rest of the playlist.
+    """
+    if youtube.is_playlist_url(url):
+        try:
+            video_urls = youtube.list_playlist_video_urls(url)
+        except YoutubeFetchError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        job_ids = [
+            store_jobs.enqueue(
+                kind="youtube", title="YouTube video", payload=v_url, source_url=v_url,
+            ).job_id
+            for v_url in video_urls
+        ]
+        return {"status": "queued", "job_ids": job_ids, "count": len(job_ids)}
+    try:
+        normalized_url = normalize_youtube_url(url)
+    except SourceUrlError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=400)
+    job = store_jobs.enqueue(
+        kind="youtube", title="YouTube video", payload=normalized_url, source_url=normalized_url,
+    )
+    return {"job_id": job.job_id, "status": job.status}
 
 
 def _fetch_source_metadata(source_url: str | None) -> SourceMetadata:
@@ -315,6 +349,9 @@ def create_app() -> FastAPI:
         file: UploadFile | None = None,
     ):
         store_jobs = jobsmod.JobStore(_db_path())
+        has_content = bool(paste.strip()) or (file is not None and bool(file.filename))
+        if not has_content and source_url.strip():
+            return _enqueue_youtube_source(store_jobs, source_url.strip())
         try:
             normalized_url = normalize_youtube_url(source_url)
         except SourceUrlError as exc:

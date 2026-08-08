@@ -42,9 +42,9 @@ def _now() -> str:
 @dataclass
 class Job:
     job_id: str
-    kind: str  # "paste" | "file"
+    kind: str  # "paste" | "file" | "youtube"
     title: str
-    payload: str  # pasted text, or a stored file path for uploads
+    payload: str  # pasted text, a stored file path for uploads, or a YouTube video URL
     source_url: str | None
     status: str
     entry_id: str | None
