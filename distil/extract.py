@@ -16,27 +16,47 @@ unparseable/unrecoverable response); a schema-level (semantic) failure in an ite
 parse is not retried. When the response looks like a JSON array that began but was cut off
 mid-stream, ``_parse_items_json`` recovers whatever complete leading objects it can rather than
 discarding the whole response — see ``_recover_truncated_leading_objects``.
+
+**type/stance drift (T-E8)**: the model occasionally copies a ``stance`` value (most often
+``personal_experience``) into the ``type`` field. Since ``build_extract_prompt`` fixes the
+requested ``KnowledgeType`` per call, the caller always knows the one correct value, so
+``_items_from_json`` repairs a ``type`` that isn't a valid ``KnowledgeType`` to the requested
+type before validating — see ``_repair_type``. A ``type`` that validates but doesn't match the
+request is left alone (the model is allowed to say an item is a different valid type than the
+dominant one). An item that still fails validation after that repair is dropped rather than
+failing the whole batch — see ``_items_from_json``'s salvage floor.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
+from typing import get_args
 
 from pydantic import ValidationError
 
 from .ingest import Transcript
 from .llm import LLMClient
-from .models import KnowledgeItem, Triage
+from .models import KnowledgeItem, KnowledgeType, Triage
 from .prompts.extract import SYSTEM, build_extract_prompt
 from .triage import ParseError
+
+logger = logging.getLogger(__name__)
 
 _MAX_QUOTE_WORDS = 15
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 
 _MAX_RETRIES = 2
 _RETRY_SLEEP_SECONDS = 0.5
+
+_VALID_KNOWLEDGE_TYPES = frozenset(get_args(KnowledgeType))
+
+# A wholesale-garbage response (wrong shape, hallucinated fields, etc.) should still fail loudly
+# rather than silently returning a near-empty result. Below half the items surviving validation
+# is past what one or two isolated model mistakes would produce, so treat it as systemic and raise.
+_MIN_SALVAGE_FRACTION = 0.5
 
 
 class QuoteDisciplineError(ValueError):
@@ -56,7 +76,7 @@ def run_extraction(
     ktype = dominant_type(triage)
     prompt = build_extract_prompt(ktype, transcript.full_text())
     data = _complete_with_retry(client, prompt, SYSTEM)
-    items = _items_from_json(data)
+    items = _items_from_json(data, ktype)
     _truncate_overlong_quotes(items)
     _enforce_quote_discipline(items)
     return items
@@ -143,21 +163,50 @@ def _recover_truncated_leading_objects(text: str) -> list:
     return recovered
 
 
-def _items_from_json(data: list) -> list[KnowledgeItem]:
+def _repair_type(obj: dict, requested_type: str) -> None:
+    """Repair a ``type`` that isn't a valid ``KnowledgeType`` to the requested type (T-E8).
+
+    The model sometimes copies a ``stance`` value (typically ``personal_experience``) into
+    ``type``. ``build_extract_prompt`` fixed one concrete ``KnowledgeType`` for this call, so
+    the caller already knows the correct value — no need to guess or reject. If ``type`` IS a
+    valid ``KnowledgeType`` (just not the requested one), it is left alone: the model is
+    allowed to flag an item as a different real type than the dominant one asked for.
+    """
+    if obj.get("type") not in _VALID_KNOWLEDGE_TYPES:
+        obj["type"] = requested_type
+
+
+def _items_from_json(data: list, requested_type: str) -> list[KnowledgeItem]:
     """Validate already-parsed JSON array data into schema-conforming items.
 
-    Any failure here (not a dict, or schema mismatch) is a semantic failure in an item the
-    model *did* fully produce — never retried by ``_complete_with_retry``.
+    A ``type`` value is repaired first (see ``_repair_type``) since it is recoverable — the
+    caller always knows the type it asked for. An item that still fails validation after that
+    repair is a genuine semantic failure and is dropped rather than discarding every other item
+    in the batch (never retried by ``_complete_with_retry`` — this is not a parse failure). If
+    too few items survive, that signals a systemically broken response rather than one or two
+    isolated mistakes, so raise instead of silently returning near-nothing.
     """
     items: list[KnowledgeItem] = []
+    dropped = 0
     for i, obj in enumerate(data):
         if not isinstance(obj, dict):
-            raise ParseError("Each extracted item must be a JSON object.")
+            dropped += 1
+            logger.warning("Extracted item %d dropped: not a JSON object.", i)
+            continue
         obj.setdefault("item_id", f"k_{i + 1:02d}")
+        _repair_type(obj, requested_type)
         try:
             items.append(KnowledgeItem.model_validate(obj))
         except ValidationError as exc:
-            raise ParseError(f"Extracted item {i} did not match the schema: {exc}") from exc
+            dropped += 1
+            logger.warning("Extracted item %d dropped: did not match the schema: %s", i, exc)
+
+    total = len(data)
+    if total and len(items) / total < _MIN_SALVAGE_FRACTION:
+        raise ParseError(
+            f"Extraction produced {len(items)}/{total} valid items ({dropped} dropped) — "
+            f"below the {_MIN_SALVAGE_FRACTION:.0%} salvage floor; treating as a broken response."
+        )
     return items
 
 

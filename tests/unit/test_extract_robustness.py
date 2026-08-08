@@ -145,3 +145,85 @@ def test_semantic_schema_failure_is_not_retried():
     with pytest.raises(ParseError):
         run_extraction(t, _triage("conceptual"), fake)
     assert fake.call_count == 1
+
+
+# ---- T-E8: type/stance drift (reported live-service failure) ----
+
+
+def _item(**overrides) -> dict:
+    base = {
+        "type": "conceptual",
+        "statement": "A complete item.",
+        "stance": "fact",
+        "speaker_confidence": "high",
+        "provenance": {"quote": "a complete item", "timestamp": None, "locator": None},
+    }
+    base.update(overrides)
+    return base
+
+
+@pytest.mark.unit
+def test_stance_value_in_type_field_is_repaired_to_requested_type():
+    """Reproduces the reported error: 'Extracted item 18 did not match the schema: 1
+    validation error for KnowledgeItem type ... input_value=\\'personal_experience\\''.
+
+    The model copied a `stance` value into `type`. Since the caller always knows the exact
+    `KnowledgeType` it asked for (`build_extract_prompt`), this is repaired rather than
+    dropped or fatal.
+    """
+    t = ingest_text("someone shares a personal story about debugging")
+    resp = json.dumps([_item(type="personal_experience", stance="personal_experience")])
+    items = run_extraction(t, _triage("conceptual"), FakeClient(responses=[resp]))
+    assert len(items) == 1
+    assert items[0].type == "conceptual"
+    assert items[0].stance == "personal_experience"
+
+
+@pytest.mark.unit
+def test_valid_but_non_requested_type_is_left_alone():
+    """A `type` that IS a valid KnowledgeType, just not the requested one, is not overwritten —
+    the model is allowed to flag an item as a genuinely different type."""
+    t = ingest_text("a mix of concept and opinion content")
+    resp = json.dumps([_item(type="opinion", stance="opinion")])
+    items = run_extraction(t, _triage("conceptual"), FakeClient(responses=[resp]))
+    assert items[0].type == "opinion"
+
+
+@pytest.mark.unit
+def test_unrecoverable_item_is_dropped_while_valid_siblings_survive():
+    """One item that fails validation even after the type repair (missing required fields) is
+    dropped, not fatal — its valid siblings in the same batch still come back."""
+    bad_item = {"type": "personal_experience", "statement": "missing stance and provenance"}
+    resp = json.dumps([_item(), _item(statement="Second complete item."), bad_item])
+    t = ingest_text("some transcript text about a concept")
+    items = run_extraction(t, _triage("conceptual"), FakeClient(responses=[resp]))
+    assert len(items) == 2
+    assert {i.statement for i in items} == {"A complete item.", "Second complete item."}
+
+
+@pytest.mark.unit
+def test_all_bad_array_still_raises():
+    """When every item is unrecoverable, that's a wholesale-broken response — raise rather than
+    silently returning an empty list."""
+    bad_items = [
+        {"type": "personal_experience", "statement": "missing stance and provenance"},
+        {"type": "personal_experience", "statement": "also missing stance and provenance"},
+    ]
+    t = ingest_text("some transcript text about a concept")
+    fake = FakeClient(responses=[json.dumps(bad_items)])
+    with pytest.raises(ParseError):
+        run_extraction(t, _triage("conceptual"), fake)
+    assert fake.call_count == 1  # schema-level failure — still not retried
+
+
+@pytest.mark.unit
+def test_below_salvage_floor_raises_even_though_some_items_survive():
+    """A response where most items are broken (well under the 50% salvage floor) is treated as
+    systemically broken and raises, rather than silently returning the one surviving item."""
+    bad_item = {"type": "personal_experience", "statement": "missing stance and provenance"}
+    resp = json.dumps([_item(), bad_item, bad_item, bad_item])
+    t = ingest_text("some transcript text about a concept")
+    fake = FakeClient(responses=[resp])
+    with pytest.raises(ParseError):
+        run_extraction(t, _triage("conceptual"), fake)
+    assert fake.call_count == 1
