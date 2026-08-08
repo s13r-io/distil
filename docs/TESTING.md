@@ -145,6 +145,20 @@ that must abstain.
 - T-OKFL4 (E4): `sources/<slug>.md` and `raw/<slug>.md` must exist in pairs (checked in both directions).
 - A freshly generated bundle lints clean, and `main()` exits non-zero when any error is present.
 
+### canonicalize.py (concept matching engine, Phase 15.1 — unit, FakeClient/FakeEmbedder)
+- T-CANON1: a near-match candidate returned as `match` appends the filing entry's item as a new member of the existing concept; no new concept is created.
+- T-CANON2: an empty candidate pool with a `new` decision creates a fresh concept (slug derived from the proposed title) with the item as its sole member.
+- T-CANON3: re-canonicalizing the same entry is idempotent — memberships are retracted before reapplying, so the resulting member list is exactly equal (not merely same-length) across repeated runs, with no duplicate concepts.
+- T-CANON4: a decision outside the match/new/reject enum is dropped (treated as reject) rather than raising or fabricating a match.
+- T-CANON5: a `match` naming a `concept_id` that was never offered as a candidate is dropped, not trusted, even if it happens to be a real concept.
+- T-CANON6: the candidate pool embedded in the prompt is capped at `MAX_CONCEPT_CANDIDATES` (default 5) even when more concepts qualify.
+- T-CANON7: two same-batch `new` proposals whose normalized titles collide are merged into a single concept instead of creating duplicates.
+- T-CANON9: `Store.delete_entry` cascades into `retract_entry_concept_memberships` — deleting an entry's sole source removes the concept entirely, while deleting one of several sources only retracts that entry's membership and leaves the concept intact for the rest.
+
+T-CANON8 (synthesis-capping over a concept's growing member list) is out of scope for Phase
+15.1: no synthesis (`ConceptClaim`) exists yet, so there is nothing to cap. It lands with
+synthesis in Phase 15.2/15.3 per the design report.
+
 ### cli.py
 - T-C1: `distil run <file>` accepts `.srt`/`.txt`/`.md` and `distil run --paste` (or stdin) accepts pasted text; exits 0 and prints the entry path.
 - T-C2: `distil score <id> --score 5 --reason relevant` mutates the profile.

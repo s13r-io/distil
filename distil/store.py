@@ -390,6 +390,11 @@ class Store:
 
     def save_concept(self, concept: Concept) -> None:
         """Upsert ``concept``, recomputing its centroid from current member item vectors."""
+        # `slug` always equals `concept_id` by construction today (concept_id IS the slug —
+        # "path is identity"), but is kept as its own column for the same collision-
+        # disambiguation reasons okf.py separates `distil_entry_id` from `slug`: a forward
+        # hook for if/when concept_id and slug diverge (e.g. a stable internal id with a
+        # renamed display slug).
         centroid = self._compute_centroid(concept)
         self._conn.execute(
             """
