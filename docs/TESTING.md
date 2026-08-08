@@ -82,6 +82,9 @@ that must abstain.
 - T-E2: heuristic items include `rationale` and `scope`; procedural items include `order_index`.
 - T-E3 (eval, FAITHFULNESS): every returned item's `provenance.quote` substring-matches the transcript, **for timestamped and untimestamped sources alike**. The quote is the format-independent faithfulness anchor. **This is the headline guarantee — zero tolerance for fabricated provenance.**
 - T-E4: each quote is < 15 words (copyright/quote discipline enforced in code).
+- T-E5: a response truncated mid-array (output-token cap or dropped connection) recovers whatever complete leading items parsed, discarding only the cut-off tail; recovered items still go through quote truncation/discipline.
+- T-E6: a response truncated before even its first item completes yields nothing recoverable → clean `ParseError`, not a crash; a non-array response is still rejected outright.
+- T-E7: a dropped connection (`client.complete` raises) retries and can still succeed; a persistent parse or connection failure raises after exhausting the bounded retry count; a schema-level failure in a fully-parsed item is never retried.
 
 ### normalize.py (PURE)
 - T-N1: near-duplicate items are merged.

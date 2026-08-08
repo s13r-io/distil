@@ -47,17 +47,24 @@ class FakeClient:
     critical for the abstention guarantee (T-Q2), which asserts zero synthesis calls.
     """
 
-    def __init__(self, responses: list[str] | None = None):
+    def __init__(self, responses: list[str | Exception] | None = None):
         self._responses = list(responses or [])
         self._cursor = 0
         self.calls: list[_Call] = []
 
     def complete(self, prompt: str, *, system: str | None = None) -> str:
+        """Return (or raise) the next canned response.
+
+        A queued :class:`Exception` instance is raised instead of returned, so tests can
+        simulate a dropped connection ahead of a later successful retry.
+        """
         self.calls.append(_Call(prompt=prompt, system=system))
         if self._cursor >= len(self._responses):
             raise IndexError("FakeClient ran out of canned responses")
         response = self._responses[self._cursor]
         self._cursor += 1
+        if isinstance(response, BaseException):
+            raise response
         return response
 
     def stream(self, prompt: str, *, system: str | None = None):
