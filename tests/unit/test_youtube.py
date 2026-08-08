@@ -65,7 +65,7 @@ def test_list_playlist_video_urls_returns_watch_urls():
 
 @pytest.mark.unit
 def test_list_playlist_video_urls_passes_player_client_fallback_chain(monkeypatch):
-    monkeypatch.delenv("DISTIL_YOUTUBE_API_KEY", raising=False)
+    monkeypatch.delenv("DISTIL_POT_PROVIDER_URL", raising=False)
     payload = json.dumps({"entries": [{"id": "abc"}]})
 
     def fake_run(cmd, **kwargs):
@@ -124,7 +124,7 @@ def test_fetch_video_transcript_parses_downloaded_srt(tmp_path):
 
 @pytest.mark.unit
 def test_fetch_video_transcript_passes_player_client_fallback_chain(monkeypatch, tmp_path):
-    monkeypatch.delenv("DISTIL_YOUTUBE_API_KEY", raising=False)
+    monkeypatch.delenv("DISTIL_POT_PROVIDER_URL", raising=False)
     srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
 
     def fake_run(cmd, **kwargs):
@@ -277,15 +277,19 @@ def test_list_playlist_video_urls_raises_youtube_fetch_error_on_persistent_5xx()
     assert len(calls) == 3
 
 
-# ---- Phase 20: DISTIL_YOUTUBE_API_KEY wiring (innertube_host/innertube_key) ----
+# ---- Phase 22: DISTIL_POT_PROVIDER_URL wiring (youtubepot-bgutilhttp:base_url) ----
+# Replaces the removed Phase 20 DISTIL_YOUTUBE_API_KEY mechanism (innertube_host/innertube_key
+# could never address a bot-identity challenge — see distil/youtube.py's module docstring).
 
 
 @pytest.mark.unit
-def test_list_playlist_video_urls_omits_key_args_when_env_unset(monkeypatch):
-    monkeypatch.delenv("DISTIL_YOUTUBE_API_KEY", raising=False)
+def test_list_playlist_video_urls_omits_pot_provider_args_when_env_unset(monkeypatch):
+    monkeypatch.delenv("DISTIL_POT_PROVIDER_URL", raising=False)
     payload = json.dumps({"entries": [{"id": "abc"}]})
 
     def fake_run(cmd, **kwargs):
+        # Byte-identical to pre-Phase-22 behavior: exactly one --extractor-args pair.
+        assert cmd.count("--extractor-args") == 1
         idx = cmd.index("--extractor-args")
         assert cmd[idx + 1] == "youtube:player_client=android_vr,web_safari"
         return _proc(returncode=0, stdout=payload)
@@ -294,27 +298,32 @@ def test_list_playlist_video_urls_omits_key_args_when_env_unset(monkeypatch):
 
 
 @pytest.mark.unit
-def test_list_playlist_video_urls_passes_api_key_when_env_set(monkeypatch):
-    monkeypatch.setenv("DISTIL_YOUTUBE_API_KEY", "secret-key-123")
+def test_list_playlist_video_urls_passes_pot_provider_url_when_env_set(monkeypatch):
+    monkeypatch.setenv(
+        "DISTIL_POT_PROVIDER_URL", "http://bgutil-pot-provider.railway.internal:4416"
+    )
     payload = json.dumps({"entries": [{"id": "abc"}]})
 
     def fake_run(cmd, **kwargs):
-        idx = cmd.index("--extractor-args")
-        value = cmd[idx + 1]
-        assert value.startswith("youtube:player_client=android_vr,web_safari;")
-        assert "innertube_host=youtubei.googleapis.com" in value
-        assert "innertube_key=secret-key-123" in value
+        assert cmd.count("--extractor-args") == 2
+        first = cmd.index("--extractor-args")
+        assert cmd[first + 1] == "youtube:player_client=android_vr,web_safari"
+        second = cmd.index("--extractor-args", first + 1)
+        assert cmd[second + 1] == (
+            "youtubepot-bgutilhttp:base_url=http://bgutil-pot-provider.railway.internal:4416"
+        )
         return _proc(returncode=0, stdout=payload)
 
     list_playlist_video_urls("https://www.youtube.com/playlist?list=PL1", run=fake_run)
 
 
 @pytest.mark.unit
-def test_fetch_video_transcript_omits_key_args_when_env_unset(monkeypatch, tmp_path):
-    monkeypatch.delenv("DISTIL_YOUTUBE_API_KEY", raising=False)
+def test_fetch_video_transcript_omits_pot_provider_args_when_env_unset(monkeypatch, tmp_path):
+    monkeypatch.delenv("DISTIL_POT_PROVIDER_URL", raising=False)
     srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
 
     def fake_run(cmd, **kwargs):
+        assert cmd.count("--extractor-args") == 1
         idx = cmd.index("--extractor-args")
         assert cmd[idx + 1] == "youtube:player_client=android_vr,web_safari"
         out_index = cmd.index("-o") + 1
@@ -326,22 +335,38 @@ def test_fetch_video_transcript_omits_key_args_when_env_unset(monkeypatch, tmp_p
 
 
 @pytest.mark.unit
-def test_fetch_video_transcript_passes_api_key_when_env_set(monkeypatch, tmp_path):
-    monkeypatch.setenv("DISTIL_YOUTUBE_API_KEY", "secret-key-123")
+def test_fetch_video_transcript_passes_pot_provider_url_when_env_set(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "DISTIL_POT_PROVIDER_URL", "http://bgutil-pot-provider.railway.internal:4416"
+    )
     srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
 
     def fake_run(cmd, **kwargs):
-        idx = cmd.index("--extractor-args")
-        value = cmd[idx + 1]
-        assert value.startswith("youtube:player_client=android_vr,web_safari;")
-        assert "innertube_host=youtubei.googleapis.com" in value
-        assert "innertube_key=secret-key-123" in value
+        assert cmd.count("--extractor-args") == 2
+        first = cmd.index("--extractor-args")
+        assert cmd[first + 1] == "youtube:player_client=android_vr,web_safari"
+        second = cmd.index("--extractor-args", first + 1)
+        assert cmd[second + 1] == (
+            "youtubepot-bgutilhttp:base_url=http://bgutil-pot-provider.railway.internal:4416"
+        )
         out_index = cmd.index("-o") + 1
         out_prefix = cmd[out_index]
         Path(f"{out_prefix}.en.srt").write_text(srt_body, encoding="utf-8")
         return _proc(returncode=0)
 
     fetch_video_transcript("https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path)
+
+
+@pytest.mark.unit
+def test_no_distil_youtube_api_key_handling_survives():
+    import distil.youtube as youtube_module
+
+    source = Path(youtube_module.__file__).read_text(encoding="utf-8")
+    # Historical mentions in comments/docstrings explaining *why* it was removed are fine; no
+    # code should read the env var itself.
+    assert 'os.environ.get("DISTIL_YOUTUBE_API_KEY")' not in source
+    assert "innertube_key" not in source
+    assert "innertube_host" not in source
 
 
 # ---- T-Y6: malformed playlist JSON -> clear error, not a crash ----

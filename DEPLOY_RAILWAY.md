@@ -6,7 +6,7 @@ at the bottom before you start — they're the things that bite people.
 
 > **Read this first:** hosting puts the app on a public URL with your LLM API key attached.
 > Anyone who finds the URL could spend your budget and read/write your private notes. **Do not
-> generate a public domain until the auth gate is enabled** (Step 6). The app is built to
+> generate a public domain until the auth gate is enabled** (Step 7). The app is built to
 > refuse public serving without `DISTIL_AUTH_SECRET`, but don't rely on that as your only line.
 
 ## Prerequisites
@@ -49,29 +49,101 @@ DISTIL_AUTH_SECRET   = <a long random secret>   # REQUIRED for public hosting
 Optional tuning: `DISTIL_RETRIEVAL_THRESHOLD`, `DISTIL_TOP_K`, `DISTIL_NOVELTY_RATIO`,
 `DISTIL_PROFILE_ALPHA`. Never commit these — they live only in Railway.
 
-If YouTube ingest hits 429s from Railway's datacenter IP, set `DISTIL_YOUTUBE_API_KEY` to a
-YouTube Data API key (see `.env.example`) to route those fetches around the throttle.
-
 > **Local embeddings + Railway:** with `DISTIL_EMBEDDER=local` (the chosen default) a small
 > embedding model loads into the service's RAM and should be baked into the image at build
 > time. Pick an instance with enough memory for it. On a very small instance, set
 > `DISTIL_EMBEDDER=api` instead — it's a config change only, no code change.
 
-### 4. Confirm the start command
+### 4. Wire in the YouTube PO-token provider (fixes the datacenter-IP bot check)
+Railway's datacenter IPs get YouTube's `Sign in to confirm you're not a bot` challenge on ingest,
+even with the player-client hardening already in place — that's an identity check, not a rate
+limit, and no `--extractor-args` value alone can satisfy it. The fix is to run a second service
+that hands yt-dlp a real proof-of-origin (PO) token: the prebuilt
+[`brainicism/bgutil-ytdlp-pot-provider`](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
+image, reached over Railway's private network, no public domain needed.
+
+> **Read this first:** per upstream's own documentation, a PO token makes traffic look more
+> legitimate to YouTube — it does **not** guarantee clearing a bot check. Treat this step as the
+> best available mitigation, confirm it's *wired correctly* (below), and watch real ingest logs
+> after deploying to see whether the datacenter IP actually clears.
+
+Pick whichever path matches how you work — both end in the same two services and one new
+variable.
+
+#### 4a. Dashboard clicks
+1. In your Railway project: **New → Empty Service** (or **Docker Image** if your Railway version
+   offers it directly), then Service → **Settings → Source → Deploy from Docker Image**, and set
+   the image to `brainicism/bgutil-ytdlp-pot-provider:latest`. Name the service something
+   findable, e.g. `bgutil-pot-provider`. Do **not** attach a volume or generate a public domain
+   for it — it's private-network-only and stateless.
+2. Deploy it. Railway services in the same project share private networking automatically; no
+   extra "connect" step is needed. Note the service name you gave it — Railway's internal DNS
+   for it is `<service-name>.railway.internal`, and the provider listens on port `4416` inside
+   the image.
+3. On the **distil** service (not the provider service): Service → **Variables** → add
+   `DISTIL_POT_PROVIDER_URL = http://<service-name>.railway.internal:4416` (use the exact service
+   name from step 1, e.g. `http://bgutil-pot-provider.railway.internal:4416`).
+4. Redeploy the distil service so it picks up the new variable.
+
+#### 4b. Non-interactive `railway` CLI
+Equivalent to 4a, run from a machine already authenticated (`railway login`) and linked to the
+project (`railway link`):
+
+```shell
+# 1. Create the provider service from the public image (no repo, no build).
+railway add --image brainicism/bgutil-ytdlp-pot-provider:latest --service bgutil-pot-provider --json
+
+# 2. Point distil at it over private networking — internal DNS is <service-name>.railway.internal,
+#    port 4416 is the image's default. --skip-deploys avoids two redeploys back to back; the
+#    manual redeploy in step 3 picks the variable up.
+railway variable set \
+  DISTIL_POT_PROVIDER_URL=http://bgutil-pot-provider.railway.internal:4416 \
+  --service distil --skip-deploys --json
+
+# 3. Redeploy distil so the new variable takes effect.
+railway redeploy --service distil --yes --json
+```
+
+Do not run `railway domain` for the provider service — it must stay off the public internet;
+only distil reaches it, over the private network. Also do not raise `numReplicas` on either
+service or attach a volume to the provider service — this project stays single-replica,
+single-volume (see `railway.toml` and the gotchas below).
+
+#### Confirm the plugin actually loaded
+The wiring only *offers* yt-dlp a PO token — confirm yt-dlp is actually discovering the plugin
+before trusting it. From the distil service's shell (`railway ssh --service distil`, or a one-off
+local run with the same `DISTIL_POT_PROVIDER_URL`), run a verbose fetch:
+
+```shell
+yt-dlp -v --extractor-args "youtubepot-bgutilhttp:base_url=$DISTIL_POT_PROVIDER_URL" <a video URL>
+```
+
+Look for a line like:
+
+```
+[youtube] [pot] PO Token Providers: bgutil:http-1.3.1 (external)
+```
+
+If that line is missing, or shows `(unavailable)` instead of `(external)`, the plugin isn't
+reaching the provider service — check the internal URL and that the provider service is actually
+running (`railway logs --service bgutil-pot-provider`) before assuming the bot check itself is
+the problem.
+
+### 5. Confirm the start command
 `railway.toml` already sets it to bind the injected port:
 `uvicorn web.app:app --host 0.0.0.0 --port $PORT`. If you configure the service manually
 instead, make sure it binds `0.0.0.0` and `$PORT` — a hardcoded port will fail to receive traffic.
 
-### 5. Redeploy and check logs
+### 6. Redeploy and check logs
 Trigger a redeploy. Watch the **Deploy Logs** for a clean start and the app binding to the port.
 Fix any missing-variable errors before continuing.
 
-### 6. Enable auth, *then* expose a domain
+### 7. Enable auth, *then* expose a domain
 Confirm `DISTIL_PUBLIC=true` and `DISTIL_AUTH_SECRET` are set (Step 3). Only now: Service →
 **Settings → Networking → Generate Domain**. Open the URL; you should be prompted for the
 secret before any data is reachable. If you can reach data without auth, stop and fix it.
 
-### 7. Back up your knowledge base (provider-independent)
+### 8. Back up your knowledge base (provider-independent)
 Your `kb/` now lives on a Railway volume. Don't let it be trapped there:
 
 - **Preferred:** configure the scheduled job (Phase 11.5) that commits `kb/` to a private git
@@ -82,8 +154,8 @@ Your `kb/` now lives on a Railway volume. Don't let it be trapped there:
 
 1. **Ephemeral disk.** Without a volume at `/data`, every redeploy wipes your KB. (Step 2.)
 2. **Public = exposed.** A generated domain is open to the internet with your key attached;
-   auth is mandatory, not optional. (Step 6.)
-3. **Port binding.** Bind `0.0.0.0:$PORT`; there's no port-mapping layer on Railway. (Step 4.)
+   auth is mandatory, not optional. (Step 7.)
+3. **Port binding.** Bind `0.0.0.0:$PORT`; there's no port-mapping layer on Railway. (Step 5.)
 
 ## Alternative: managed Postgres
 For the index you can swap SQLite for Railway's managed Postgres (it provisions a `DATABASE_URL`

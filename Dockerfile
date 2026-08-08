@@ -14,7 +14,11 @@ COPY distil ./distil
 COPY web ./web
 
 # Core + provider + local embeddings + vector search + YouTube ingest. Drop embed-local if
-# hosting tiny (set DISTIL_EMBEDDER=api) to shrink the image.
+# hosting tiny (set DISTIL_EMBEDDER=api) to shrink the image. The `youtube` extra includes
+# bgutil-ytdlp-pot-provider — a pure-Python yt-dlp plugin, no Node/Deno runtime needed here.
+# The provider it talks to (DISTIL_POT_PROVIDER_URL) runs as its own service; see
+# DEPLOY_RAILWAY.md. Don't add Node/Deno to this image just to run that provider in-process —
+# see distil/youtube.py's module docstring for why a JS runtime was deliberately kept out.
 RUN pip install --upgrade pip && \
     pip install ".[anthropic,embed-local,vec,web,youtube]"
 
