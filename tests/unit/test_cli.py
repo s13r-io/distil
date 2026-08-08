@@ -45,6 +45,9 @@ _NOTE = json.dumps({
     "review_questions": [],
     "topics": ["function design"],
 })
+# Stage 8 (canonicalize) runs by default now; these CLI tests don't exercise concepts, so a
+# plain reject keeps the canned-response budget accurate without side effects.
+_CANON_REJECT = json.dumps([{"item_id": "k_01", "decision": "reject"}])
 
 
 @pytest.fixture
@@ -72,7 +75,7 @@ def _fake(monkeypatch, responses):
 
 @pytest.mark.unit
 def test_c1_run_file_exits_zero_and_prints_path(env, monkeypatch, tmp_path):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
     monkeypatch.setattr(
         cli,
         "fetch_youtube_oembed_metadata",
@@ -107,7 +110,7 @@ def test_c1_run_file_exits_zero_and_prints_path(env, monkeypatch, tmp_path):
 
 @pytest.mark.unit
 def test_c1_run_paste_via_option(env, monkeypatch):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
     result = runner.invoke(
         cli.app, ["run", "--paste", "Keep functions small and focused.", "--no-graph"]
     )
@@ -131,7 +134,7 @@ def test_c1_low_value_run_prints_nothing_filed(env, monkeypatch):
 
 @pytest.mark.unit
 def test_c2_score_mutates_profile(env, monkeypatch):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
     run = runner.invoke(cli.app, ["run", "--paste", "Keep functions small.", "--no-graph"])
     entry_id = run.output.strip().split("/")[-1].replace(".md", "").strip()
 
@@ -147,7 +150,7 @@ def test_c2_score_mutates_profile(env, monkeypatch):
 
 @pytest.mark.unit
 def test_c3_list_and_show(env, monkeypatch):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
     run = runner.invoke(cli.app, ["run", "--paste", "Keep functions small.", "--no-graph"])
     entry_id = run.output.strip().split("/")[-1].replace(".md", "").strip()
 

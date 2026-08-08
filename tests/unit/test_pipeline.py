@@ -1,4 +1,4 @@
-"""Phase 8 — pipeline.py orchestration. Tests T-PL1, T-PL2 (unit, FakeClient)."""
+"""Phase 8/15.3 — pipeline.py orchestration. Tests T-PL1, T-PL2, T-PL5, T-PL6 (unit, FakeClient)."""
 
 import json
 
@@ -58,6 +58,13 @@ _TRIAGE_LOW = json.dumps({
     "knowledge_types_present": [], "density": "low",
     "transcript_loss": {"level": "low", "evidence": []}, "verdict": "little_to_extract",
 })
+_CANON_NEW = json.dumps([{
+    "item_id": "k_01", "decision": "new",
+    "title": "Small Functions", "description": "Keep functions small and focused.",
+}])
+_SYNTH_CLAIMS = json.dumps([
+    {"text": "Keep functions small and focused on one job.", "item_ids": ["k_01"]}
+])
 
 
 # ---- T-PL1: end-to-end with FakeClient produces a complete, schema-valid KBEntry ----
@@ -69,7 +76,7 @@ def test_pl1_end_to_end_produces_valid_entry(profile, store):
     # graph disabled (no prior entries anyway) -> triage, extract, link, note = 4 calls
     client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     entry = run_pipeline(transcript, profile, store, client,
-                         source_title="A talk", config=PipelineConfig(enable_graph=False))
+                         source_title="A talk", config=PipelineConfig(enable_graph=False, enable_canonicalize=False))
     assert isinstance(entry, KBEntry)
     assert entry.triage.verdict == "rich"
     assert len(entry.knowledge_items) == 1
@@ -89,7 +96,7 @@ def test_pl1_respects_llm_budget(profile, store):
     transcript = ingest_text("Keep functions small.")
     client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     run_pipeline(transcript, profile, store, client, source_title="t",
-                 config=PipelineConfig(enable_graph=False))
+                 config=PipelineConfig(enable_graph=False, enable_canonicalize=False))
     assert client.call_count <= 4  # triage + extract + link + note
 
 
@@ -106,6 +113,7 @@ def test_pl1_reports_stage_timings(profile, store):
         source_title="t",
         config=PipelineConfig(
             enable_graph=False,
+            enable_canonicalize=False,
             timing_callback=lambda stage, seconds: timings.__setitem__(stage, seconds),
         ),
     )
@@ -136,7 +144,7 @@ def test_pl1_filing_exports_okf_pages(profile, store):
     transcript = ingest_text("Keep functions small and focused on one thing.")
     client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     entry = run_pipeline(transcript, profile, store, client,
-                         source_title="A talk", config=PipelineConfig(enable_graph=False))
+                         source_title="A talk", config=PipelineConfig(enable_graph=False, enable_canonicalize=False))
     from distil.okf import slug_for_entry
 
     slug = slug_for_entry(entry)
@@ -149,9 +157,49 @@ def test_pl_entry_id_is_unique_and_indexed(profile, store):
     t = ingest_text("Keep functions small.")
     e1 = run_pipeline(t, profile, store,
                       FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE]),
-                      source_title="t1", config=PipelineConfig(enable_graph=False))
+                      source_title="t1", config=PipelineConfig(enable_graph=False, enable_canonicalize=False))
     e2 = run_pipeline(t, profile, store,
                       FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE]),
-                      source_title="t2", config=PipelineConfig(enable_graph=False))
+                      source_title="t2", config=PipelineConfig(enable_graph=False, enable_canonicalize=False))
     assert e1.entry_id != e2.entry_id
     assert len(store.list_entries()) == 2
+
+
+# ---- T-PL5: canonicalize enabled produces concept pages under the okf_root ----
+
+
+@pytest.mark.unit
+def test_pl5_canonicalize_enabled_produces_concept_pages(profile, store):
+    transcript = ingest_text("Keep functions small and focused on one thing.")
+    client = FakeClient(
+        responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_NEW, _SYNTH_CLAIMS]
+    )
+    run_pipeline(
+        transcript, profile, store, client, source_title="A talk",
+        config=PipelineConfig(enable_graph=False, enable_canonicalize=True),
+    )
+    concepts_dir = store.okf_root / "concepts"
+    pages = [p for p in concepts_dir.glob("*.md") if p.name != "index.md"]
+    assert len(pages) == 1
+    text = pages[0].read_text()
+    assert "type: concept" in text
+    assert "## Sources" in text
+
+
+# ---- T-PL6: enable_canonicalize=False makes zero canonicalize-stage LLM calls -----------
+
+
+@pytest.mark.unit
+def test_pl6_canonicalize_disabled_makes_zero_canonicalize_calls(profile, store):
+    transcript = ingest_text("Keep functions small and focused on one thing.")
+    # Only the 4 core-stage responses; a canonicalize call would IndexError.
+    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    run_pipeline(
+        transcript, profile, store, client, source_title="A talk",
+        config=PipelineConfig(enable_graph=False, enable_canonicalize=False),
+    )
+    assert client.call_count == 4  # triage + extract + link + note; zero canonicalize calls
+    assert store.list_concepts() == []
+    concepts_dir = store.okf_root / "concepts"
+    pages = [p for p in concepts_dir.glob("*.md") if p.name != "index.md"]
+    assert pages == []

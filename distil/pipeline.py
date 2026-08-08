@@ -1,13 +1,14 @@
-"""Pipeline orchestration — wires stages 0→6. ARCHITECTURE.md §2; TESTING T-PL1, T-PL2.
+"""Pipeline orchestration — wires stages 0→8. ARCHITECTURE.md §2; TESTING T-PL1, T-PL2, T-PL5, T-PL6.
 
 One call turns a normalized transcript + profile into a filed, schema-valid :class:`KBEntry`:
 
     ingest (done by caller) → triage → [short-circuit] → extract → normalize → link
-    → note synthesis → graph → file
+    → note synthesis → graph → file → canonicalize
 
 The ``little_to_extract`` verdict short-circuits: a minimal entry is returned but **not filed**,
-and no extract/link/graph LLM calls are made (T-PL2). The LLM-call budget is kept bounded
-(triage + extract + link, plus capped graph calls).
+and no extract/link/graph/canonicalize LLM calls are made (T-PL2). The LLM-call budget is kept
+bounded (triage + extract + link, plus capped graph calls and capped canonicalize/synthesis
+calls — see ``canonicalize.py``'s module docstring and the OKF Phase 3 design report §6).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import perf_counter
 
+from .canonicalize import run_canonicalize_stage
 from .embed import Embedder
 from .extract import run_extraction
 from .graph import link_graph
@@ -35,6 +37,7 @@ from .triage import is_low_value, run_triage
 class PipelineConfig:
     novelty_ratio: float = 0.2
     enable_graph: bool = True
+    enable_canonicalize: bool = True
     model_version: str = ""
     timing_callback: Callable[[str, float], None] | None = None
 
@@ -115,6 +118,11 @@ def run_pipeline(
     _timed(
         "file", config, lambda: store.file_entry(entry, embedder=embedder, transcript=transcript)
     )
+
+    # Stage 8 — canonicalize against existing concepts (capped; embedding candidates first),
+    # then synthesize/export the touched concept pages (design report §5).
+    if config.enable_canonicalize:
+        _timed("canonicalize", config, lambda: run_canonicalize_stage(entry, store, client))
     return entry
 
 

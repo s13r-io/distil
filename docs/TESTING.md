@@ -128,6 +128,8 @@ that must abstain.
 - T-PL2: `little_to_extract` path returns a minimal result without filing and makes no extract/link calls.
 - T-PL3: useful transcript with graph disabled stays within four LLM calls: triage, extract, link, note.
 - T-PL4 (OKF, Phase 2): filing a useful transcript exports both OKF pages (`sources/<slug>.md`, `raw/<slug>.md`) via `store.file_entry`'s `transcript` kwarg.
+- T-PL5 (Phase 15.3): with `enable_canonicalize=True`, filing a useful transcript produces a concept page under `okf_root/concepts/` (`type: concept`, a "## Sources" section).
+- T-PL6 (Phase 15.3): with `enable_canonicalize=False`, the canonicalize stage makes zero LLM calls and creates no concepts or concept pages.
 
 ### okf.py (OKF export layer, Phase 2 — pure, no LLM)
 - T-OKF1: the export slug is derived from `source.title` (slugified); falls back to `entry_id` when the title yields nothing usable; stable across repeated calls.
@@ -147,7 +149,11 @@ that must abstain.
 - T-OKFL2 (E2): every relative markdown link must resolve to a file inside the bundle.
 - T-OKFL3 (E3): every `sources/<slug>.md` must appear in `sources/index.md`.
 - T-OKFL4 (E4): `sources/<slug>.md` and `raw/<slug>.md` must exist in pairs (checked in both directions).
-- A freshly generated bundle lints clean, and `main()` exits non-zero when any error is present.
+- T-OKFL5 (E5, Phase 15.3): every `concepts/<concept_id>.md` must have `type: concept` frontmatter and appear in `concepts/index.md`.
+- T-OKFL6 (E6, Phase 15.3): every source cited in a concept's "## Sources" section must be one of that concept's `videos:` frontmatter slugs.
+- T-OKFL7 (E7, Phase 15.3): concept<->source links must be bidirectional — a concept page's `videos:` slug must have a matching backlink on that source's "## Concepts covered" section, and vice versa.
+- T-OKFL8 (E8, Phase 15.3): no orphan concept pages — every `concepts/<concept_id>.md` must be linked from at least one source's "## Concepts covered" section (the `concepts/index.md` listing alone does not count).
+- A freshly generated bundle (including concept pages produced by `canonicalize.run_canonicalize_stage`) lints clean, and `main()` exits non-zero when any error is present.
 
 ### canonicalize.py (concept matching engine, Phase 15.1 — unit, FakeClient/FakeEmbedder)
 - T-CANON1: a near-match candidate returned as `match` appends the filing entry's item as a new member of the existing concept; no new concept is created.
@@ -159,6 +165,8 @@ that must abstain.
 - T-CANON7: two same-batch `new` proposals whose normalized titles collide are merged into a single concept instead of creating duplicates.
 - T-CANON9: `Store.delete_entry` cascades into `retract_entry_concept_memberships` — deleting an entry's sole source removes the concept entirely, while deleting one of several sources only retracts that entry's membership and leaves the concept intact for the rest.
 - T-CANON8 (Phase 15.2): `synthesize_touched_concepts` ranks a video's touched concepts by embedding similarity (`Store.concept_centroid`) and synthesizes only the top `MAX_CONCEPTS_TO_SYNTHESIZE_PER_VIDEO` (env `DISTIL_CONCEPTS_SYNTH_PER_VIDEO`, default 5); the rest are marked `pending_synthesis=True` and make no LLM call. A touched set within the cap synthesizes all of them.
+- T-CANON-EVAL1 (eval, Phase 15.3, §6 validation gate): against the real configured model + a real local embedder, 3 genuine paraphrases of the same idea ("traditional RAG") land in one concept, while a lexically-adjacent but distinct idea ("agentic RAG") does not merge into it.
+- T-CANON-EVAL2 (eval, Phase 15.3, §6 validation gate): under real model output, `synthesize_concept` produces at least one kept claim, and every claim's `item_ids` are non-empty and all resolve to real members of the concept.
 
 ### synthesize_concept.py (concept-page synthesis, Phase 15.2 — unit, FakeClient)
 - T-SYN1: valid claims JSON parses into cleaned `ConceptClaim`s.
