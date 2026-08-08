@@ -137,8 +137,9 @@ Parsed, structured view (not raw markdown). Rendered from real `KBEntry` fields.
    (`relevant | already_knew | bad_source | wrong_for_me | irrelevant_now`). Shows current
    score if already scored.
 
-- **No raw transcript/markdown view** (distilled view only; raw transcript isn't stored
-  separately anyway).
+- **Raw transcript view and contributed concepts:** added later (Phase B) once the OKF bundle
+  stored the raw transcript separately; see `AGENTS.md`'s "Concept layer surfaced in the web
+  app" entry for the current routes, not this v1 spec.
 - **After scoring:** inline confirmation ("Scored 5 · relevant ✓"), stay on the page; the
   profile updates in the background (FR10).
 - Sources in an Ask answer deep-link to the specific item on this page.
@@ -211,9 +212,10 @@ cookie login flow. New routes (`/ingest`, `/jobs`, `/entries/{id}`) sit behind t
 
 ## 12. Out of scope (v1)
 
-Profile editor; multi-page navigation beyond entry pages; settings beyond Sign out; raw
-transcript viewer; title/topic free-text search; parallel job processing; a second worker
-service.
+Profile editor; multi-page navigation beyond entry pages; settings beyond Sign out;
+title/topic free-text search; parallel job processing; a second worker service. (Raw
+transcript viewer and multi-page navigation via the `/concepts` pages shipped later, in
+Phase B — see `AGENTS.md`.)
 
 ## 13. Deploy
 
