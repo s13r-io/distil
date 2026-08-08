@@ -14,9 +14,14 @@ SYSTEM = (
     "You are the extraction stage of a knowledge-distillation pipeline. Extract atomic, "
     "self-contained knowledge items, each rewritten in clear neutral language. NEVER invent "
     "content: every item must be supported by a SHORT verbatim quote (fewer than 15 words) "
-    "copied exactly from the transcript. Preserve stance — mark opinions as opinion, personal "
-    "stories as personal_experience, never dress an opinion up as fact. Respond with a single "
-    "JSON array and nothing else."
+    "copied exactly from the transcript. There are two SEPARATE, NEVER-mixed vocabularies: "
+    "`type` (heuristic/procedural/declarative/conceptual/experiential/opinion) classifies the "
+    "kind of knowledge, and is always exactly the type you were asked to extract — it is never "
+    "a stance value. `stance` (fact/opinion/personal_experience) separately preserves whether "
+    "the speaker was stating a fact, an opinion, or a personal story — mark opinions as opinion, "
+    "personal stories as personal_experience, never dress an opinion up as fact. "
+    "`personal_experience` is a `stance`, never a `type`. Respond with a single JSON array and "
+    "nothing else."
 )
 
 _COMMON_SHAPE = """\
@@ -31,6 +36,9 @@ Return EXACTLY a JSON array of items with this shape (no prose, no code fence):
     "provenance": {{"quote": "<<15-word verbatim quote from the transcript>", "timestamp": null, "locator": null}}
   }}
 ]
+`type` above is FIXED to "{type}" for every item in this response — copy it verbatim, do not
+substitute a stance value (e.g. "personal_experience" is a stance, never a type). `stance` is
+the separate fact|opinion|personal_experience field describing how the speaker said it.
 Only include items that are genuinely supported by the transcript. If there is nothing of this
 type, return an empty array []."""
 
