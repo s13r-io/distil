@@ -299,7 +299,9 @@ def test_list_playlist_video_urls_omits_pot_provider_args_when_env_unset(monkeyp
 
 @pytest.mark.unit
 def test_list_playlist_video_urls_passes_pot_provider_url_when_env_set(monkeypatch):
-    monkeypatch.setenv("DISTIL_POT_PROVIDER_URL", "http://bgutil-pot-provider.railway.internal:4416")
+    monkeypatch.setenv(
+        "DISTIL_POT_PROVIDER_URL", "http://bgutil-pot-provider.railway.internal:4416"
+    )
     payload = json.dumps({"entries": [{"id": "abc"}]})
 
     def fake_run(cmd, **kwargs):
@@ -334,7 +336,9 @@ def test_fetch_video_transcript_omits_pot_provider_args_when_env_unset(monkeypat
 
 @pytest.mark.unit
 def test_fetch_video_transcript_passes_pot_provider_url_when_env_set(monkeypatch, tmp_path):
-    monkeypatch.setenv("DISTIL_POT_PROVIDER_URL", "http://bgutil-pot-provider.railway.internal:4416")
+    monkeypatch.setenv(
+        "DISTIL_POT_PROVIDER_URL", "http://bgutil-pot-provider.railway.internal:4416"
+    )
     srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
 
     def fake_run(cmd, **kwargs):
