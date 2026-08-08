@@ -95,6 +95,7 @@ distil/
   store.py           # SQLite (+ sqlite-vec vectors) + markdown filing
   pipeline.py        # orchestrates 1→7 (now also embeds items at the File stage)
   cli.py             # Typer commands (run, score, list, show, ask, reindex)
+  youtube.py         # fetch layer (Phase 1): yt-dlp playlist listing + caption fetch → Transcript (see AGENTS.md)
 web/                 # FastAPI app (v0.2): view/score/browse + ask box; auth middleware
 tests/
   fixtures/          # transcripts (rich/mixed/low-value/screen-share) + a query KB fixture
@@ -107,7 +108,8 @@ data/                # distil.db incl. vectors (gitignored)
 ## 4. Data flow & storage
 
 - **Profile**: single row (or JSON blob) in SQLite, schema per `SCHEMA.md` §1. Read at link stage, written at feedback stage.
-- **Source metadata**: uploaded filenames are cleaned before becoming fallback display titles, and an optional YouTube URL is stored in `source.url` for navigation back to the original video. When a YouTube URL is present, Distil fetches public oEmbed metadata without an API key and stores the video title, channel, channel URL, thumbnail URL, provider, and fetch timestamp. It still does not fetch transcripts or scrape video content in v0.
+- **Source metadata**: uploaded filenames are cleaned before becoming fallback display titles, and an optional YouTube URL is stored in `source.url` for navigation back to the original video. When a YouTube URL is present, Distil fetches public oEmbed metadata without an API key and stores the video title, channel, channel URL, thumbnail URL, provider, and fetch timestamp.
+- **YouTube transcript fetch (Phase 1)**: given a video or playlist URL (web UI ADD input), `youtube.py` shells out to `yt-dlp` to fetch English captions (or enumerate a playlist into one ingest job per video via the existing `web/jobs.py` Worker) and converts them to `.srt`, parsed by `ingest.ingest_srt_text` into the same `Transcript` shape as an uploaded file. A video with no captions or that fails to fetch is skipped and reported, not fatal to the rest of a playlist. See `AGENTS.md` for the fetch-layer invariants and `docs/TESTING.md` (T-Y*) for the test catalog.
 - **KBEntry**: the markdown file in `kb/<entry_id>.md` is the source of truth for human reading. New entries include a `distilled_note` (core takeaway, key points, applications, caveats, review questions) plus the atomic evidence items in a collapsed source-evidence block. A row in SQLite (`entries` table: id, title, topics, knowledge_types, score, created_at, file_path) is the index used for graph candidate lookup and browsing.
 - **Provenance** is stored inside each item; the transcript itself is not retained after processing unless the user opts in (privacy).
 

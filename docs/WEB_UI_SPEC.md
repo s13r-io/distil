@@ -149,8 +149,8 @@ Parsed, structured view (not raw markdown). Rendered from real `KBEntry` fields.
 
 Replaces the synchronous ingest with a non-blocking, restart-safe job queue.
 
-- **`jobs` table** in the existing SQLite DB: `job_id`, `kind` (paste/file), `title`,
-  `payload` (text or stored file path), `status`
+- **`jobs` table** in the existing SQLite DB: `job_id`, `kind` (paste/file/youtube), `title`,
+  `payload` (text, a stored file path, or a YouTube video URL), `status`
   (`queued|running|done|low_value|failed|removed`), `entry_id` (nullable), `verdict`/`items`
   summary, `error` (nullable), `created_at`, `updated_at`.
 - **In-process worker thread, serial.** One background thread inside the FastAPI app pulls one
@@ -159,8 +159,9 @@ Replaces the synchronous ingest with a non-blocking, restart-safe job queue.
 - **Restart-safe.** On startup, any job left `running` (interrupted by a restart) is re-queued
   so nothing silently vanishes.
 - **Routes:**
-  - `POST /ingest` — accepts paste text or file upload; inserts a `queued` job; returns job id
-    immediately (non-blocking).
+  - `POST /ingest` — accepts paste text, file upload, or a YouTube video/playlist URL (a
+    playlist enqueues one `youtube` job per video); inserts `queued` job(s); returns job id(s)
+    immediately (non-blocking). See `AGENTS.md` for the YouTube fetch layer.
   - `GET /jobs` — returns current jobs + statuses for the Activity poll.
   - `POST /jobs/{id}/remove` — removes a `queued` job.
   - `POST /jobs/{id}/retry` — re-queues a `failed` job.
