@@ -74,6 +74,7 @@ that must abstain.
 - T-M2: KnowledgeItem requires `provenance`; `quote` is mandatory, `timestamp` may be null.
 - T-M3: `stance` enum enforced; unknown value rejected.
 - T-M4: Round-trip serialize→deserialize is lossless.
+- T-M5 (Phase D, no-backfill): a `KnowledgeItem` JSON payload predating `entity_mentions` (the field simply absent) still validates, defaulting to an empty list — the shape of every entry filed before this phase.
 
 ### triage.py (unit, FakeClient)
 - T-T1: parses a well-formed model response into a TriageResult.
@@ -91,6 +92,7 @@ that must abstain.
 - T-E6: a response truncated before even its first item completes yields nothing recoverable → clean `ParseError`, not a crash; a non-array response is still rejected outright.
 - T-E7: a dropped connection (`client.complete` raises) retries and can still succeed; a persistent parse or connection failure raises after exhausting the bounded retry count; a schema-level failure in a fully-parsed item is never retried.
 - T-E8: an item whose `type` is a `stance` value (e.g. `personal_experience`) is repaired to the requested `KnowledgeType`; a `type` that's a different but still-valid `KnowledgeType` is left alone; an item that still fails validation after repair is dropped while valid siblings survive; an all-bad array, or a batch below the salvage floor, still raises — schema-level failures remain un-retried (T-E7 unchanged).
+- T-E9 (Phase D): a knowledge item's nested `entities` array rides back in the *same* extraction call/response (one `FakeClient` call) as `entity_mentions` on the item; a mention with an invalid `kind`, a missing `name`, or a wholesale-malformed `entities` value (not a list) is dropped in `extract._clean_entity_mentions` before the parent item is ever validated, leaving the item — and any valid sibling mention — intact; an over-long mention `quote` is truncated, not dropped; the item-level salvage floor (T-E7/T-E8) is unaffected by entities, which have no salvage floor of their own.
 
 ### normalize.py (PURE)
 - T-N1: near-duplicate items are merged.
@@ -146,12 +148,14 @@ that must abstain.
 - T-PL9 (Phase A, visible progress): `phase_callback` fires `(stage, "start")` before and `(stage, "finish")` after each stage, in pipeline order, without changing `timing_callback`'s existing behaviour.
 - T-PL10 (Phase A): the `little_to_extract` short-circuit reports only `("triage", "start")`, `("triage", "finish")`, `("triage", "short_circuit")` — no events for stages that never ran.
 - T-PL11 (Phase A): a disabled stage (`enable_graph`/`enable_canonicalize`/`enable_concept_edges=False`) emits no start/finish events, so a caller deriving the declared total from these events reflects only what will actually run.
+- T-PL12 (Phase D): an entity mentioned in the extract response flows end-to-end (canonicalized, synthesized, exported to `okf_root/entities/`) at the existing Stage 8 — the total LLM call count matches concepts-only-plus-entities exactly, with no extra call for a second transcript read.
+- T-PL13 (Phase D): with `enable_entities=False`, the entities stage makes zero LLM calls and creates no entities, even though the extract response still carries an `entities` array.
 
 ### okf.py (OKF export layer, Phase 2 — pure, no LLM)
 - T-OKF1: the export slug is derived from `source.title` (slugified); falls back to `entry_id` when the title yields nothing usable; stable across repeated calls.
 - T-OKF2: two distinct entries whose titles collide get distinct slugs — neither export overwrites the other's pages.
 - T-OKF3: `sources/<slug>.md` has YAML frontmatter (`type: source`, title, description, slug, published, duration, raw path, tags, created/updated) and a body with a thesis, a chronological "Key moments" section from knowledge-item provenance, and a link to the raw page.
-- T-OKF4: the source page omits an Entities section (not implemented until a later phase) and never includes `feedback` or `application_links` data (neutrality); see T-OKFC3 for the Phase 15.2 "## Concepts covered" backlink.
+- T-OKF4: the source page never includes `feedback` or `application_links` data (neutrality); see T-OKFC3 for the "## Concepts covered" backlink and T-OKFE3 for the "## Entities mentioned" backlink (Phase D).
 - T-OKF5: `raw/<slug>.md` has `type: raw-transcript`, `immutable: true`, and a timestamped body built from `Transcript` segments.
 - T-OKF6: `export_entry` regenerates `okf_root/index.md` and `okf_root/sources/index.md` deterministically; re-exporting the same entry is idempotent (no duplicate or orphaned files).
 - T-OKF7: `remove_entry` deletes both pages for an entry and refreshes both indexes; removing an entry with no exported pages is a no-op.
@@ -161,6 +165,10 @@ that must abstain.
 - T-OKFC4 (Phase 15.2): `remove_concept` deletes the concept page and regenerates `concepts/index.md` and the root index; a concept retracted to zero members is removable this way.
 - T-OKFC5 (Phase 16): `export_concept` renders `## Contrasts with`/`## Builds on`/`## Related` sections (same-directory links) only for the relations actually present in `concept.edges`; a concept with no edges renders none of them.
 - T-OKFC6 (Phase 16): claims render under a `## Claims` heading, and a claim whose cited members' `stance` values disagree gets a `> **Contradiction:**` line naming each disagreeing member by its resolved OKF slug and stance.
+- T-OKFE1 (Phase D): `export_entity` writes `entities/<entity_id>.md` with frontmatter (`type: entity`, `kind`, title, description, created/updated) and rendered claims with code-derived citations, mirroring `export_concept`'s shape one field (`kind`) richer; re-exporting an unchanged entity is byte-identical.
+- T-OKFE2 (Phase D): `remove_entity` deletes the entity page and regenerates `entities/index.md` and the root index.
+- T-OKFE3 (Phase D): `render_source_with_concepts` adds a source page's "## Entities mentioned" backlink section when the source has covering entities, and omits it when it has none.
+- T-OKFE4 (Phase D): a fully wired entity + source pair (export + backlink) lints clean; an entity page with no inbound source backlink fails E12.
 
 ### okf_lint.py (stdlib-only bundle validator, `python -m distil.okf_lint <okf_root>`)
 - T-OKFL1 (E1): every non-reserved `.md` file must have YAML frontmatter with a non-empty `type`.
@@ -171,7 +179,8 @@ that must abstain.
 - T-OKFL6 (E6, Phase 15.3): every source cited in a concept's "## Sources" section must be one of that concept's `videos:` frontmatter slugs.
 - T-OKFL7 (E7, Phase 15.3): concept<->source links must be bidirectional — a concept page's `videos:` slug must have a matching backlink on that source's "## Concepts covered" section, and vice versa.
 - T-OKFL8 (E8, Phase 15.3): no orphan concept pages — every `concepts/<concept_id>.md` must be linked from at least one source's "## Concepts covered" section (the `concepts/index.md` listing alone does not count); Phase 16 extends this to also recognize another concept's typed-edge link (`## Contrasts with`/`## Builds on`/`## Related`) as a valid inbound link.
-- A freshly generated bundle (including concept pages produced by `canonicalize.run_canonicalize_stage`) lints clean, and `main()` exits non-zero when any error is present.
+- T-OKFL9-12 (E9-E12, Phase D): the E5-E8 checks applied one-for-one to `entities/` — frontmatter (`type: entity`) + index coverage, entity<->source citation integrity, bidirectional entity<->source links, and no orphan entity pages (minus the typed-edge extension, since entities have no entity<->entity edges).
+- A freshly generated bundle (including concept and entity pages produced by `canonicalize.run_canonicalize_stage`) lints clean, and `main()` exits non-zero when any error is present. An entry with zero entities (no backfill, Phase D) lints clean with an empty `entities/index.md`.
 
 ### canonicalize.py (concept matching engine, Phase 15.1 — unit, FakeClient/FakeEmbedder)
 - T-CANON1: a near-match candidate returned as `match` appends the filing entry's item as a new member of the existing concept; no new concept is created.
@@ -186,10 +195,21 @@ that must abstain.
 - T-CANON-EVAL1 (eval, Phase 15.3, §6 validation gate): against the real configured model + a real local embedder, 3 genuine paraphrases of the same idea ("traditional RAG") land in one concept, while a lexically-adjacent but distinct idea ("agentic RAG") does not merge into it.
 - T-CANON-EVAL2 (eval, Phase 15.3, §6 validation gate): under real model output, `synthesize_concept` produces at least one kept claim, and every claim's `item_ids` are non-empty and all resolve to real members of the concept.
 
+### canonicalize.py — entity matching engine (Phase D — unit, FakeClient/FakeEmbedder)
+`canonicalize_entry_entities`/`synthesize_touched_entities` mirror T-CANON1-8 one granularity down (entity mentions instead of knowledge items), with `Store.find_entity_candidates` adding a hard `kind` pre-filter concepts don't have.
+- T-CANONE1: an item with no `entity_mentions` makes zero LLM calls and produces no entities.
+- T-CANONE2: a `new` decision creates a fresh `Entity` (kind taken from the mention) with the mention as its sole member.
+- T-CANONE3 (core acceptance criterion): the same tool mentioned across two videos merges into one `Entity` page with two members, rather than two separate entity pages.
+- T-CANONE4: a `reject` decision produces no entity.
+- T-CANONE5: a `match` naming an `entity_id` never offered as a candidate is dropped, not trusted (mirrors T-CANON5).
+- T-CANONE6: re-processing the same entry is idempotent — no duplicate entities, member list unchanged across repeated runs.
+- T-CANONE7: `synthesize_touched_entities` synthesizes only the top `MAX_ENTITIES_TO_SYNTHESIZE_PER_VIDEO` (env `DISTIL_ENTITIES_SYNTH_PER_VIDEO`, default 5) touched entities by embedding similarity; the rest are marked `pending_synthesis=True` and make no LLM call (mirrors T-CANON8).
+
 ### canonicalize.py — run_delete_entry_stage (delete-cascade orchestration — unit, FakeClient/FakeEmbedder)
 - T-DEL1: deleting an entry that was the sole source of a concept removes both the DB row (`Store.delete_entry`'s existing retraction) and the now-orphaned `concepts/<id>.md` page + index entries.
 - T-DEL2: deleting one of several sources of a surviving concept retracts only that membership and re-exports the concept's page, so it stops listing the deleted video (no stale back-reference).
 - T-DEL3/T-DEL4: when `kb/<id>.md` is missing or fails to parse, the entry's `sources/<slug>.md`/`raw/<slug>.md` pages are still removed — the slug is recovered from the source page's own `distil_entry_id` frontmatter (`okf.find_slug_for_entry_id`) rather than requiring a loadable `KBEntry`.
+- T-DELE1/T-DELE2 (Phase D): `run_delete_entry_stage` extends the same treatment to `entities/` — deleting an entry that was an entity's sole source removes the orphaned `entities/<id>.md` page + index entries, while deleting one of several sources retracts only that membership and re-exports the entity's page without the deleted video's backreference.
 - The reconciled/deleted bundle lints clean (`okf_lint.lint`) in every case above.
 
 ### reconcile.py (bundle drift repair — unit, FakeClient/FakeEmbedder)
@@ -198,6 +218,7 @@ that must abstain.
 - T-REC3: dry run (`apply=False`, the default) reports every file it would remove but deletes nothing.
 - T-REC4: a `sources/` page with no (or unparseable) `distil_entry_id`, or a `raw/` page with no matching `sources/` page, has an undeterminable owner — reported as skipped, never deleted.
 - T-REC5: reconcile never touches `kb/` or the database; the reconciled bundle passes `okf_lint.lint`.
+- T-REC6 (Phase D): an orphaned `entities/<id>.md` (entity_id not in the DB) is removed and indexes regenerated, mirroring T-REC2.
 
 ### synthesize_concept.py (concept-page synthesis, Phase 15.2 — unit, FakeClient)
 - T-SYN1: valid claims JSON parses into cleaned `ConceptClaim`s.
@@ -246,6 +267,7 @@ that must abstain.
 - T-Q15 (Phase C, regression): an abstained result carries `concepts == []`.
 - T-Q16 (Phase C): `DISTIL_CONCEPT_NOTE_DEPTH` (or the `concept_note_depth` kwarg, which wins over the env) controls whether a matched concept's member quotes reach the synthesis prompt — `"claims"` (default) sends claim text only, `"full"` inlines each cited member's quote; an unrecognized value degrades to the default rather than raising.
 - T-Q17 (Phase C, regression): `depth="full"`'s richer concept-notes block does not weaken citation validation — a fabricated citation is still stripped and reported as ungrounded.
+- T-QE1-4 (Phase D): `retrieve_entities`/`ask` gate entities through the exact same `threshold` as items/concepts (never an easier bar) — ranks relevant entities first, an entity clearing the gate alone avoids abstention, a low-similarity entity never bypasses it (zero synthesis calls), and recruited sources resolve from the live `KBEntry` rather than the entity's own stale copied quote/timestamp. Mirrors T-Q9/T-Q11/T-Q13/T-Q12 one granularity down.
 
 ### auth (web, hosted) — `web/`
 - T-A1: with `DISTIL_PUBLIC=true` and no `DISTIL_AUTH_SECRET` set, the app refuses to start/serve (fails closed).
