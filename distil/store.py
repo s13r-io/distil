@@ -559,9 +559,10 @@ class Store:
         concept_ids whose ``edges`` were actually modified, so callers know which OKF pages need
         re-exporting.
         """
-        existing_ids = {c.concept_id for c in self.list_concepts()}
+        concepts = self.list_concepts()
+        existing_ids = {c.concept_id for c in concepts}
         changed: set[str] = set()
-        for concept in self.list_concepts():
+        for concept in concepts:
             remaining = [e for e in concept.edges if e.target_concept_id in existing_ids]
             if len(remaining) != len(concept.edges):
                 concept.edges = remaining

@@ -28,7 +28,6 @@ from .models import Concept, ConceptEdge
 from .prompts.concept_graph import SYSTEM, build_concept_relation_prompt
 from .store import Store
 
-MAX_CONCEPT_EDGE_CANDIDATES = 3
 _ALLOWED = {"contrasts_with", "builds_on", "related"}
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 

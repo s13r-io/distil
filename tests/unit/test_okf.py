@@ -526,6 +526,8 @@ def test_okfc4_remove_concept_deletes_page_and_regenerates_indexes(concept_store
     assert not (concept_store.okf_root / "concepts" / "traditional-rag.md").exists()
     concepts_index = (concept_store.okf_root / "concepts" / "index.md").read_text()
     assert "traditional-rag" not in concepts_index
+    root_index = (concept_store.okf_root / "index.md").read_text()
+    assert "concepts/traditional-rag.md" not in root_index
 
 
 # ---- Phase 16 — typed-edge sections + contradiction flag (design report §9 item 4) -----------
