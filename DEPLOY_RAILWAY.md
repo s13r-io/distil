@@ -6,7 +6,7 @@ at the bottom before you start — they're the things that bite people.
 
 > **Read this first:** hosting puts the app on a public URL with your LLM API key attached.
 > Anyone who finds the URL could spend your budget and read/write your private notes. **Do not
-> generate a public domain until the auth gate is enabled** (Step 6). The app is built to
+> generate a public domain until the auth gate is enabled** (Step 7). The app is built to
 > refuse public serving without `DISTIL_AUTH_SECRET`, but don't rely on that as your only line.
 
 ## Prerequisites
