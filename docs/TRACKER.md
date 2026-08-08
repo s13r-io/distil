@@ -110,6 +110,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 | 12.1 | FastAPI list/view/score + ask box; auth middleware (T-A2) | done | ✅ | ✅ | ✅ | agent | web/app.py: index w/ ask box, /entries, /entries/{id}, score, /ask; auth middleware front of data routes. 9 web tests |
 
 ## Phase 13 — YouTube video/playlist ingest (OKF Phase 1) (T-Y*)
+
 | ID   | Task                                          | Status | T? | C? | P? | Owner | Notes |
 |------|------------------------------------------------|--------|----|----|----|-------|-------|
 | 13.1 | youtube.py fetch layer + web ADD-by-URL wiring | done   | ✅ | ✅ | ✅ | agent | distil/youtube.py (yt-dlp via injectable `run`): playlist enumeration + caption fetch → `ingest.ingest_srt_text`; web/app.py ADD input accepts a video/playlist URL, enqueues one `youtube` job per video through the existing web/jobs.py Worker; per-video failures skipped+reported, never fatal to the batch. `youtube` optional extra added. |
@@ -120,7 +121,7 @@ Legend: T? = tests written · C? = code done · P? = tests passing · ✅/⬜
 | #  | Question                                                            | Default                        | Owner decision |
 |----|---------------------------------------------------------------------|--------------------------------|----------------|
 | D1 | Score per-document or per-application-link?                         | per-document (per-link optional) | **per-document** |
-| D2 | Include YouTube URL fetch in MVP, or transcript text only?          | text only in MVP               | **text only; paste OR file upload (.srt/.txt/.md); handle transcripts with or without timestamps** (FR1, FR21, FR22) |
+| D2 | Include YouTube URL fetch in MVP, or transcript text only? *(superseded by Phase 13 — YouTube video/playlist fetch via yt-dlp shipped 2026-08-08)* | text only in MVP               | **MVP: text only; paste OR file upload (.srt/.txt/.md); handle transcripts with or without timestamps** (FR1, FR21, FR22). **Phase 13: YouTube video/playlist URL fetch added** (T-Y*). |
 | D3 | Commit generated `kb/` to git, or keep local/gitignored?           | gitignored (git-remote backup) | **gitignored; back up via scheduled push to a separate private repo** |
 | D4 | LLM provider/model to default to?                                   | Claude API, model via env      | **Claude API, model via env** |
 | D5 | Embeddings: local model or API?                                     | local (provider-independent)   | **local** (watch instance RAM when hosted — ARCH §8.4) |

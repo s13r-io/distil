@@ -74,7 +74,11 @@ def fetch_video_transcript(
 ) -> Transcript:
     """Fetch English captions (prefer ``json3``/native, converted to ``.srt``) for one video."""
     if workdir is not None:
-        return _fetch_into(video_url, run, Path(workdir), timeout)
+        # A caller-supplied workdir may be reused across fetches (e.g. tests sharing a
+        # tmp_path); scope this fetch to its own unique child directory so a stale caption
+        # file left behind by a previous invocation is never picked up by the glob below.
+        scoped = Path(tempfile.mkdtemp(dir=str(workdir)))
+        return _fetch_into(video_url, run, scoped, timeout)
     with tempfile.TemporaryDirectory() as tmp:
         return _fetch_into(video_url, run, Path(tmp), timeout)
 

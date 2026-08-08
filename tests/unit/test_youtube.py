@@ -7,6 +7,7 @@ these stay unit tests: no network, no subprocess, no real binary required.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -93,7 +94,7 @@ def test_fetch_video_transcript_parses_downloaded_srt(tmp_path):
         # yt-dlp writes the caption file next to the -o output template.
         out_index = cmd.index("-o") + 1
         out_prefix = cmd[out_index]
-        (tmp_path / f"{out_prefix.split('/')[-1]}.en.srt").write_text(srt_body, encoding="utf-8")
+        Path(f"{out_prefix}.en.srt").write_text(srt_body, encoding="utf-8")
         return _proc(returncode=0)
 
     transcript = fetch_video_transcript(
@@ -103,6 +104,35 @@ def test_fetch_video_transcript_parses_downloaded_srt(tmp_path):
     assert len(transcript.segments) == 2
     assert transcript.segments[0].text == "Welcome to the talk."
     assert transcript.segments[0].timestamp == "00:00:01"
+
+
+# ---- T-Y7: a reused workdir's stale caption file is never mistaken for current output ----
+
+
+@pytest.mark.unit
+def test_fetch_video_transcript_ignores_stale_srt_in_reused_workdir(tmp_path):
+    # Simulate a leftover caption file from a previous fetch that reused this same workdir.
+    stale = tmp_path / "captions.en.srt"
+    stale.write_text(
+        "1\n00:00:01,000 --> 00:00:02,000\nSTALE OLD CAPTION\n", encoding="utf-8"
+    )
+
+    fresh_srt = "1\n00:00:01,000 --> 00:00:03,000\nFresh caption for this fetch.\n"
+
+    def fake_run(cmd, **kwargs):
+        out_index = cmd.index("-o") + 1
+        out_prefix = cmd[out_index]
+        Path(f"{out_prefix}.en.srt").write_text(fresh_srt, encoding="utf-8")
+        return _proc(returncode=0)
+
+    transcript = fetch_video_transcript(
+        "https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path
+    )
+    assert len(transcript.segments) == 1
+    assert transcript.segments[0].text == "Fresh caption for this fetch."
+    assert "STALE" not in transcript.full_text()
+    # The stale file at the workdir root is untouched — the fetch was scoped to a subdirectory.
+    assert stale.read_text(encoding="utf-8").count("STALE") == 1
 
 
 # ---- T-Y4: no captions available -> clear, catchable error ----
