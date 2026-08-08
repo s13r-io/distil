@@ -390,6 +390,7 @@ def test_stream_ask_abstains_with_no_synthesis(monkeypatch):
     from distil import query as q
 
     monkeypatch.setattr(q, "retrieve", lambda *a, **k: [])  # nothing retrieved
+    monkeypatch.setattr(q, "retrieve_concepts", lambda *a, **k: [])  # nothing retrieved
     client = FakeClient(responses=["should-not-be-used"])
     events = list(stream_ask("anything", store=None, embedder=None, client=client))
     assert len(events) == 1 and events[0].kind == "abstain"
@@ -405,6 +406,7 @@ def test_stream_ask_streams_then_final(monkeypatch):
                         quote="qq", timestamp=None, similarity=0.9, score=0.9),
     ]
     monkeypatch.setattr(q, "retrieve", lambda *a, **k: fake_items)
+    monkeypatch.setattr(q, "retrieve_concepts", lambda *a, **k: [])
     monkeypatch.setattr(q, "_detect_contradiction", lambda *a, **k: None)
     client = FakeClient(responses=[
         '{"answer":"Use clear names [k_01] always.","cited_item_ids":["k_01"],"conflict":null}'

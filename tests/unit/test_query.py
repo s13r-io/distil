@@ -12,8 +12,8 @@ import pytest
 
 from distil.embed import FakeEmbedder
 from distil.llm import FakeClient
-from distil.models import KBEntry
-from distil.query import ask, retrieve
+from distil.models import Concept, ConceptClaim, ConceptMember, KBEntry
+from distil.query import ask, cosine, retrieve, retrieve_concepts
 from distil.store import Store
 
 
@@ -71,6 +71,14 @@ def store(tmp_path):
 @pytest.fixture
 def embedder():
     return FakeEmbedder(dim=64)
+
+
+def _concept(concept_id, title, description, members, claims=None) -> Concept:
+    return Concept(
+        concept_id=concept_id, title=title, description=description,
+        members=members, claims=claims or [],
+        created_at="2026-06-15T00:00:00", updated_at="2026-06-15T00:00:00",
+    )
 
 
 # ---- T-Q1: KNN ranked by similarity × feedback_score × recency ----
@@ -223,3 +231,137 @@ def test_q6_conflict_surfaced(tmp_path, embedder):
     client = FakeClient(responses=[synth])
     result = ask("are monoliths good for small teams", s, emb, client, threshold=0.0, top_k=3)
     assert result.conflict
+
+
+# ---- Phase 18 (T-Q9..T-Q13): query-over-concepts — a consumer of item retrieval, never a
+# replacement for it. The relevance gate and code-assembled citations must both survive intact.
+
+
+@pytest.mark.unit
+def test_q9_retrieve_concepts_ranks_relevant_first(store, embedder):
+    testing_concept = _concept(
+        "python-testing", "Python testing discipline",
+        "Write unit tests before implementation code.",
+        members=[ConceptMember(entry_id="e_py", item_id="k_py1", quote="q", timestamp=None)],
+    )
+    k8s_concept = _concept(
+        "kubernetes-networking", "Kubernetes networking",
+        "Kubernetes pods share a network namespace.",
+        members=[ConceptMember(entry_id="e_k8s", item_id="k_k1", quote="q", timestamp=None)],
+    )
+    store.save_concept(testing_concept)
+    store.save_concept(k8s_concept)
+
+    results = retrieve_concepts("unit tests before implementation", store, embedder, top_k=2)
+    assert results[0].concept_id == "python-testing"
+    assert results[0].similarity >= results[-1].similarity
+
+
+@pytest.mark.unit
+def test_q10_retrieve_concepts_blends_in_member_similarity(store, embedder):
+    # A concept whose two members point in very different directions dilutes the centroid;
+    # blending in per-member similarity should still surface it via its closest member.
+    mixed = _concept(
+        "mixed-topic", "Mixed topic", "covers both testing and kubernetes",
+        members=[
+            ConceptMember(entry_id="e_py", item_id="k_py1", quote="q", timestamp=None),
+            ConceptMember(entry_id="e_k8s", item_id="k_k1", quote="q", timestamp=None),
+        ],
+    )
+    store.save_concept(mixed)
+
+    question = "unit tests before implementation"
+    qvec = embedder.embed(question)
+    centroid_sim = cosine(qvec, store.concept_centroid("mixed-topic"))
+
+    [result] = retrieve_concepts(question, store, embedder, top_k=1)
+    assert result.concept_id == "mixed-topic"
+    # Blending picks up the near-identical member (k_py1), not just the diluted centroid.
+    assert result.similarity > centroid_sim
+
+
+@pytest.mark.unit
+def test_q11_concept_only_evidence_avoids_abstention(store, embedder, monkeypatch):
+    concept = _concept(
+        "solo-concept", "Solo Concept", "desc",
+        members=[ConceptMember(entry_id="e_k8s", item_id="k_k1", quote="q", timestamp=None)],
+        claims=[ConceptClaim(
+            text="Kubernetes networking is discussed across videos.", item_ids=["k_k1"],
+        )],
+    )
+    store.save_concept(concept)
+
+    # An unrelated phrasing: no raw item can clear a near-maximal threshold. Force this
+    # concept's centroid to match the question exactly (cosine == 1.0) to simulate many loosely
+    # related members whose combined topic centroid clears the gate on its own — isolating the
+    # GATE behavior (T-Q10 already covers the natural member-blending path).
+    question = "a completely unrelated phrasing sharing no vocabulary with any note"
+    qvec = embedder.embed(question)
+    real_centroid = store.concept_centroid
+    monkeypatch.setattr(
+        store, "concept_centroid",
+        lambda concept_id: qvec if concept_id == "solo-concept" else real_centroid(concept_id),
+    )
+
+    client = FakeClient(responses=[json.dumps({
+        "answer": "Kubernetes networking is discussed [k_k1].",
+        "cited_item_ids": ["k_k1"], "conflict": None,
+    })])
+    result = ask(question, store, embedder, client, threshold=0.99, top_k=3)
+
+    assert not result.abstained
+    assert any(s.item_id == "k_k1" for s in result.sources)
+    assert "k_k1" in result.cited_item_ids
+    assert result.ungrounded_citations == []
+
+
+@pytest.mark.unit
+def test_q12_concept_answer_sources_are_code_assembled_from_real_provenance(
+    store, embedder, monkeypatch
+):
+    # The ConceptMember's copied quote/timestamp deliberately mismatch the real item's
+    # provenance below, so a passing assertion proves Source data was resolved fresh from the
+    # live KBEntry (like a directly-retrieved item), never trusted from the concept's own copy
+    # or from model-authored text.
+    concept = _concept(
+        "solo-concept-2", "Solo Concept 2", "desc",
+        members=[ConceptMember(
+            entry_id="e_k8s", item_id="k_k1", quote="stale-copy", timestamp="99:99:99",
+        )],
+    )
+    store.save_concept(concept)
+
+    question = "another unrelated phrase with no vocabulary overlap"
+    qvec = embedder.embed(question)
+    monkeypatch.setattr(store, "concept_centroid", lambda concept_id: qvec)
+
+    result = ask(
+        question, store, embedder, FakeClient(responses=["SHOULD NOT BE CALLED"]),
+        threshold=0.99, top_k=3, lookup_only=True,
+    )
+    assert not result.abstained
+
+    real_item = next(
+        i for i in store.load_entry("e_k8s").knowledge_items if i.item_id == "k_k1"
+    )
+    src = next(s for s in result.sources if s.item_id == "k_k1")
+    assert src.entry_id == "e_k8s"
+    assert src.quote == real_item.provenance.quote
+    assert src.timestamp == real_item.provenance.timestamp
+    assert src.quote != "stale-copy"
+
+
+@pytest.mark.unit
+def test_q13_low_similarity_concept_does_not_bypass_gate(store, embedder):
+    concept = _concept(
+        "low-sim-concept", "Low Sim", "desc",
+        members=[ConceptMember(entry_id="e_k8s", item_id="k_k1", quote="q", timestamp=None)],
+    )
+    store.save_concept(concept)
+
+    client = FakeClient(responses=["SHOULD NOT BE CALLED"])
+    result = ask(
+        "medieval french history and gothic cathedrals", store, embedder, client, threshold=0.9,
+    )
+    assert result.abstained is True
+    assert client.call_count == 0
