@@ -33,7 +33,9 @@ web = ["fastapi>=0.111", "uvicorn[standard]>=0.30", "jinja2>=3.1", "python-multi
 # anyone touched this file again, whereas a floor lets `pip install` pick up newer fixes on
 # every image rebuild. The floor itself still needs bumping periodically since the deployed
 # image only ever gets what was current at build time; 2026.3.17 is the version distil/youtube.py's
-# client chain (Phase 21) was verified against.
+# client chain (Phase 21) was verified against — the Phase 23 fetch_pot/mweb/webpage_client
+# findings were re-checked directly against both 2026.3.17 (this floor) and 2026.7.4 (newer);
+# both have identical relevant behavior, so no floor bump was needed for that fix.
 # bgutil-ytdlp-pot-provider (Phase 22) is the pure-Python yt-dlp *plugin* half of the PO-token
 # pair: it lets yt-dlp discover and call out to a separately-run bgutil provider server (see
 # DISTIL_POT_PROVIDER_URL below) over HTTP. It needs no Node/Deno runtime itself — that only

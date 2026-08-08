@@ -7,6 +7,7 @@ these stay unit tests: no network, no subprocess, no real binary required.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,8 +15,11 @@ import pytest
 
 from distil.ingest import Transcript
 from distil.youtube import (
+    PotDiagnostic,
     YoutubeFetchError,
+    _redact_pot_diagnostic,
     _surface_error,
+    diagnose_pot,
     fetch_video_transcript,
     is_playlist_url,
     list_playlist_video_urls,
@@ -70,7 +74,7 @@ def test_list_playlist_video_urls_passes_player_client_fallback_chain(monkeypatc
 
     def fake_run(cmd, **kwargs):
         idx = cmd.index("--extractor-args")
-        assert cmd[idx + 1] == "youtube:player_client=android_vr,web_safari"
+        assert cmd[idx + 1] == "youtube:player_client=android_vr,web_safari,mweb"
         return _proc(returncode=0, stdout=payload)
 
     list_playlist_video_urls("https://www.youtube.com/playlist?list=PL1", run=fake_run)
@@ -165,7 +169,7 @@ def test_fetch_video_transcript_passes_player_client_fallback_chain(monkeypatch,
 
     def fake_run(cmd, **kwargs):
         idx = cmd.index("--extractor-args")
-        assert cmd[idx + 1] == "youtube:player_client=android_vr,web_safari"
+        assert cmd[idx + 1] == "youtube:player_client=android_vr,web_safari,mweb"
         out_index = cmd.index("-o") + 1
         out_prefix = cmd[out_index]
         Path(f"{out_prefix}.en.srt").write_text(srt_body, encoding="utf-8")
@@ -327,7 +331,7 @@ def test_list_playlist_video_urls_omits_pot_provider_args_when_env_unset(monkeyp
         # Byte-identical to pre-Phase-22 behavior: exactly one --extractor-args pair.
         assert cmd.count("--extractor-args") == 1
         idx = cmd.index("--extractor-args")
-        assert cmd[idx + 1] == "youtube:player_client=android_vr,web_safari"
+        assert cmd[idx + 1] == "youtube:player_client=android_vr,web_safari,mweb"
         return _proc(returncode=0, stdout=payload)
 
     list_playlist_video_urls("https://www.youtube.com/playlist?list=PL1", run=fake_run)
@@ -343,7 +347,7 @@ def test_list_playlist_video_urls_passes_pot_provider_url_when_env_set(monkeypat
     def fake_run(cmd, **kwargs):
         assert cmd.count("--extractor-args") == 2
         first = cmd.index("--extractor-args")
-        assert cmd[first + 1] == "youtube:player_client=android_vr,web_safari"
+        assert cmd[first + 1] == "youtube:player_client=android_vr,web_safari,mweb;fetch_pot=always"
         second = cmd.index("--extractor-args", first + 1)
         assert cmd[second + 1] == (
             "youtubepot-bgutilhttp:base_url=http://bgutil-pot-provider.railway.internal:4416"
@@ -361,7 +365,7 @@ def test_fetch_video_transcript_omits_pot_provider_args_when_env_unset(monkeypat
     def fake_run(cmd, **kwargs):
         assert cmd.count("--extractor-args") == 1
         idx = cmd.index("--extractor-args")
-        assert cmd[idx + 1] == "youtube:player_client=android_vr,web_safari"
+        assert cmd[idx + 1] == "youtube:player_client=android_vr,web_safari,mweb"
         out_index = cmd.index("-o") + 1
         out_prefix = cmd[out_index]
         Path(f"{out_prefix}.en.srt").write_text(srt_body, encoding="utf-8")
@@ -380,7 +384,7 @@ def test_fetch_video_transcript_passes_pot_provider_url_when_env_set(monkeypatch
     def fake_run(cmd, **kwargs):
         assert cmd.count("--extractor-args") == 2
         first = cmd.index("--extractor-args")
-        assert cmd[first + 1] == "youtube:player_client=android_vr,web_safari"
+        assert cmd[first + 1] == "youtube:player_client=android_vr,web_safari,mweb;fetch_pot=always"
         second = cmd.index("--extractor-args", first + 1)
         assert cmd[second + 1] == (
             "youtubepot-bgutilhttp:base_url=http://bgutil-pot-provider.railway.internal:4416"
@@ -391,6 +395,167 @@ def test_fetch_video_transcript_passes_pot_provider_url_when_env_set(monkeypatch
         return _proc(returncode=0)
 
     fetch_video_transcript("https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path)
+
+
+# ---- Phase 23: fetch_pot=always — the actual fix. yt-dlp's default `fetch_pot=auto` policy
+# never asks *any* provider for a player-context token on our client chain (see the module
+# docstring's Phase 23 paragraph) — `fetch_pot=always` forces the attempt. Only added when a
+# provider is configured; must live in the *same* youtube: extractor-args value as player_client,
+# never a separate --extractor-args pair, since yt-dlp replaces (not merges) repeated
+# --extractor-args for one extractor. ----
+
+
+@pytest.mark.unit
+def test_list_playlist_video_urls_omits_fetch_pot_when_env_unset(monkeypatch):
+    monkeypatch.delenv("DISTIL_POT_PROVIDER_URL", raising=False)
+    payload = json.dumps({"entries": [{"id": "abc"}]})
+
+    def fake_run(cmd, **kwargs):
+        idx = cmd.index("--extractor-args")
+        assert cmd[idx + 1] == "youtube:player_client=android_vr,web_safari,mweb"
+        assert "fetch_pot" not in cmd[idx + 1]
+        return _proc(returncode=0, stdout=payload)
+
+    list_playlist_video_urls("https://www.youtube.com/playlist?list=PL1", run=fake_run)
+
+
+@pytest.mark.unit
+def test_fetch_video_transcript_folds_fetch_pot_always_into_youtube_namespace(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "DISTIL_POT_PROVIDER_URL", "http://bgutil-pot-provider.railway.internal:4416"
+    )
+    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+
+    def fake_run(cmd, **kwargs):
+        # Exactly one youtube: pair (never two — the second would silently discard the first,
+        # dropping player_client entirely).
+        youtube_pairs = [
+            cmd[i + 1] for i, tok in enumerate(cmd) if tok == "--extractor-args" and cmd[i + 1].startswith("youtube:")
+        ]
+        assert youtube_pairs == ["youtube:player_client=android_vr,web_safari,mweb;fetch_pot=always"]
+        out_index = cmd.index("-o") + 1
+        out_prefix = cmd[out_index]
+        Path(f"{out_prefix}.en.srt").write_text(srt_body, encoding="utf-8")
+        return _proc(returncode=0)
+
+    fetch_video_transcript("https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path)
+
+
+# ---- Phase 23: diagnose_pot — the permanent diagnostic capability, and its redaction. ----
+
+
+@pytest.mark.unit
+def test_diagnose_pot_parses_provider_discovery_and_context_attempts(monkeypatch):
+    monkeypatch.delenv("DISTIL_POT_PROVIDER_URL", raising=False)
+    verbose_output = (
+        "[debug] Command-line config: ['-v', ...]\n"
+        "[youtube] [pot] PO Token Providers: bgutil:http-1.3.1 (external)\n"
+        "[youtube] abc12345678: Downloading webpage\n"
+        "[youtubepot-bgutilhttp] [debug] Generating a player PO Token for web_safari client "
+        "via bgutil HTTP server\n"
+        "[youtubepot-bgutilhttp] [debug] Generating a subs PO Token for web_safari client "
+        "via bgutil HTTP server\n"
+        "WARNING: No title found in player responses; falling back to title from initial data\n"
+    )
+
+    def fake_run(cmd, **kwargs):
+        assert "-v" in cmd
+        assert "--simulate" in cmd
+        return _proc(returncode=0, stdout=verbose_output, stderr="")
+
+    result = diagnose_pot("https://www.youtube.com/watch?v=abc12345678", run=fake_run)
+    assert isinstance(result, PotDiagnostic)
+    assert result.returncode == 0
+    assert result.provider_discovery == "[youtube] [pot] PO Token Providers: bgutil:http-1.3.1 (external)"
+    assert ("player", "web_safari") in result.context_attempts
+    assert ("subs", "web_safari") in result.context_attempts
+
+
+@pytest.mark.unit
+def test_diagnose_pot_reports_no_attempts_when_never_asked():
+    # Finding (a) from the task this closes: no provider line, no context attempts at all.
+    verbose_output = (
+        "[youtube] abc12345678: Downloading webpage\n"
+        "ERROR: [youtube] abc12345678: Sign in to confirm you're not a bot\n"
+    )
+
+    def fake_run(cmd, **kwargs):
+        return _proc(returncode=1, stdout="", stderr=verbose_output)
+
+    result = diagnose_pot("https://www.youtube.com/watch?v=abc12345678", run=fake_run)
+    assert result.provider_discovery is None
+    assert result.context_attempts == []
+    assert "Sign in to confirm you're not a bot" in result.raw_output
+
+
+@pytest.mark.unit
+def test_diagnose_pot_uses_pot_trace_and_extractor_args(monkeypatch):
+    monkeypatch.setenv(
+        "DISTIL_POT_PROVIDER_URL", "http://bgutil-pot-provider.railway.internal:4416"
+    )
+
+    def fake_run(cmd, **kwargs):
+        youtube_pairs = [
+            cmd[i + 1] for i, tok in enumerate(cmd) if tok == "--extractor-args" and cmd[i + 1].startswith("youtube:")
+        ]
+        # One combined youtube: value carrying player_client, fetch_pot, and pot_trace.
+        assert youtube_pairs == [
+            "youtube:player_client=android_vr,web_safari,mweb;fetch_pot=always;pot_trace=true"
+        ]
+        assert "--simulate" in cmd
+        return _proc(returncode=0, stdout="", stderr="")
+
+    diagnose_pot("https://www.youtube.com/watch?v=abc", run=fake_run)
+
+
+@pytest.mark.unit
+def test_redact_pot_diagnostic_strips_token_value_and_provider_url():
+    text = (
+        "[youtubepot-bgutilhttp] [trace] Generated POT: super-secret-token-value-123\n"
+        "PO Token response from \"bgutil:http\" provider: "
+        "PoTokenResponse(po_token='another-secret-abc', expires_at=1234567890)\n"
+        "extractor-args: youtubepot-bgutilhttp:base_url=http://bgutil-pot-provider.railway.internal:4416\n"
+    )
+    redacted = _redact_pot_diagnostic(
+        text, "http://bgutil-pot-provider.railway.internal:4416"
+    )
+    assert "super-secret-token-value-123" not in redacted
+    assert "another-secret-abc" not in redacted
+    assert "bgutil-pot-provider.railway.internal" not in redacted
+    assert "<redacted>" in redacted
+    assert "<redacted-provider-url>" in redacted
+
+
+@pytest.mark.unit
+def test_diagnose_pot_output_never_leaks_provider_url(monkeypatch):
+    provider_url = "http://bgutil-pot-provider.railway.internal:4416"
+    monkeypatch.setenv("DISTIL_POT_PROVIDER_URL", provider_url)
+
+    def fake_run(cmd, **kwargs):
+        # yt-dlp itself would echo the extractor-args it was given in -v output.
+        return _proc(
+            returncode=0,
+            stdout=f"[debug] Extractor Args: youtubepot-bgutilhttp:base_url={provider_url}\n",
+        )
+
+    result = diagnose_pot("https://www.youtube.com/watch?v=abc", run=fake_run)
+    assert provider_url not in result.raw_output
+
+
+@pytest.mark.unit
+def test_diagnose_pot_never_raises_and_redacts_url_on_timeout(monkeypatch):
+    provider_url = "http://bgutil-pot-provider.railway.internal:4416"
+    monkeypatch.setenv("DISTIL_POT_PROVIDER_URL", provider_url)
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=60.0)
+
+    result = diagnose_pot("https://www.youtube.com/watch?v=abc", run=fake_run, timeout=60.0)
+    assert isinstance(result, PotDiagnostic)
+    assert result.returncode != 0
+    assert result.provider_discovery is None
+    assert result.context_attempts == []
+    assert provider_url not in result.raw_output
 
 
 @pytest.mark.unit

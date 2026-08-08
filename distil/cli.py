@@ -30,9 +30,11 @@ from .source import (
     SourceUrlError,
     clean_source_title,
     fetch_youtube_oembed_metadata,
+    is_youtube_host,
     normalize_youtube_url,
 )
 from .store import Store
+from .youtube import diagnose_pot
 
 app = typer.Typer(add_completion=False, help="Distil — personal knowledge distiller.")
 
@@ -321,6 +323,29 @@ def reconcile(
             typer.echo(f"  - {path}")
     if report.dry_run and report.removed:
         typer.echo("\nDry run — no files were deleted. Re-run with --apply to remove them.")
+
+
+@app.command(name="youtube-diagnose-pot")
+def youtube_diagnose_pot(
+    url: str = typer.Argument(..., help="A YouTube video URL to run a verbose PO-token diagnostic fetch against."),
+):
+    """Run a verbose yt-dlp fetch for one video and report PO-token provider discovery and
+    per-context attempts — for answering "was a token even requested" without shell access
+    (see distil/youtube.py's module docstring, Phase 23)."""
+    if not is_youtube_host(url):
+        _fail("URL must be a YouTube URL.")
+        return
+    result = diagnose_pot(url)
+    typer.echo(f"Provider discovery: {result.provider_discovery or '(none — no provider registered)'}")
+    if result.context_attempts:
+        typer.echo("Context attempts:")
+        for context, client in result.context_attempts:
+            typer.echo(f"  - {context} PO token requested for {client} client")
+    else:
+        typer.echo("Context attempts: none (no PO token was requested for any context)")
+    typer.echo(f"\nyt-dlp exit code: {result.returncode}")
+    typer.echo("\n--- full output ---")
+    typer.echo(result.raw_output)
 
 
 def _safe_embedder() -> Embedder | None:
