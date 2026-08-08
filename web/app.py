@@ -272,16 +272,14 @@ def _load_job_transcript(job: jobsmod.Job, *, on_phase=None):
         on_phase("ingest", "start")
     if job.kind == "file":
         p = Path(job.payload)
-        try:
-            result = ingest_file(str(p))
-        finally:
-            p.unlink(missing_ok=True)
+        if not p.exists():
+            raise FileNotFoundError("Source content no longer available — please re-add.")
+        result = ingest_file(str(p))
     elif job.kind == jobsmod.KIND_YOUTUBE_STAGED:
         p = Path(job.payload)
-        try:
-            result = _load_staged_transcript(p)
-        finally:
-            p.unlink(missing_ok=True)
+        if not p.exists():
+            raise FileNotFoundError("Source content no longer available — please re-add.")
+        result = _load_staged_transcript(p)
     else:
         result = ingest_text(job.payload)
     if on_phase is not None:
@@ -665,7 +663,9 @@ def create_app() -> FastAPI:
     _STATIC_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
-    worker = jobsmod.Worker(_db_path(), _distill_job)
+    # on_finished only fires for a successful (done/low_value) terminal status — a failed job's
+    # staged file must stay on disk so a retry can still read it (see _load_job_transcript).
+    worker = jobsmod.Worker(_db_path(), _distill_job, on_finished=_cleanup_staged_file)
     # A second, independent single-worker thread (Phase E): fetches playlist videos'
     # transcripts up front, overlapping with `worker` distilling whatever's already staged —
     # they claim disjoint job statuses (pending_fetch/fetching vs queued/running), so neither
@@ -844,7 +844,12 @@ def create_app() -> FastAPI:
     # ---- jobs (Activity) ----
     @app.get("/jobs")
     def jobs_list():
-        return [j.to_dict() for j in jobsmod.JobStore(_db_path()).list_active()]
+        store_jobs = jobsmod.JobStore(_db_path())
+        # A failed job's staged file is kept for retry(), but must not accumulate on the volume
+        # forever if nobody retries or removes it — reap it once the job has sat failed past the
+        # same 24h bound list_active()'s autoclear already uses for finished rows.
+        store_jobs.autoclear(on_stale_failed=_cleanup_staged_file)
+        return [j.to_dict() for j in store_jobs.list_active()]
 
     @app.post("/jobs/{job_id}/remove")
     def jobs_remove(job_id: str):
@@ -870,9 +875,9 @@ def create_app() -> FastAPI:
             if scope == "finished"
             else {jobsmod.STATUS_FAILED} if scope == "failed" else set()
         )
-        # Belt-and-suspenders: a done/low_value/failed job's staged file was already unlinked
-        # when it was processed, and a removed one at removal time — this only matters for rows
-        # that somehow still carry a live staged path.
+        # A done/low_value job's staged file was already unlinked on success, and a removed one
+        # at removal time — but a failed job's file is deliberately kept for retry(), so clearing
+        # failed rows here is the one place that still needs to clean it up.
         for job in store_jobs.list_active():
             if job.status in statuses:
                 _cleanup_staged_file(job)

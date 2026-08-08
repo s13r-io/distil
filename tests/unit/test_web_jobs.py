@@ -6,6 +6,7 @@ fake distill_fn, and streaming is exercised via FakeClient.stream (zero network)
 
 import json
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -775,7 +776,10 @@ def test_load_job_transcript_dispatches_youtube_kind(monkeypatch):
 
 
 @pytest.mark.unit
-def test_load_job_transcript_dispatches_youtube_staged_kind_and_deletes_staged_file(tmp_path):
+def test_load_job_transcript_dispatches_youtube_staged_kind_and_keeps_staged_file(tmp_path):
+    """Reading must not delete: a downstream pipeline failure after this call still needs the
+    file on disk so JobStore.retry() can requeue a run that re-reads it (see the retry test
+    below) — cleanup happens only once the job reaches a real terminal outcome."""
     staged = tmp_path / "j1.json"
     staged.write_text(
         json.dumps({"segments": [{"text": "hi", "locator": "seg:0", "timestamp": None}]}),
@@ -788,7 +792,19 @@ def test_load_job_transcript_dispatches_youtube_staged_kind_and_deletes_staged_f
     )
     result = webapp._load_job_transcript(job)
     assert result.segments[0].text == "hi"
-    assert not staged.exists()  # consumed, not leaked
+    assert staged.exists()  # not deleted just from being read
+
+
+@pytest.mark.unit
+def test_load_job_transcript_raises_honest_error_when_staged_file_missing(tmp_path):
+    missing = tmp_path / "gone.json"
+    job = jobsmod.Job(
+        job_id="j1", kind=jobsmod.KIND_YOUTUBE_STAGED, title="t", payload=str(missing),
+        source_url=None, status="queued", entry_id=None, summary=None, error=None,
+        created_at="", updated_at="",
+    )
+    with pytest.raises(FileNotFoundError, match="no longer available"):
+        webapp._load_job_transcript(job)
 
 
 @pytest.mark.unit
@@ -925,6 +941,88 @@ def test_worker_reports_uncaptioned_video_failure_without_blocking_next_job(tmp_
     assert store.get(bad.job_id).status == jobsmod.STATUS_FAILED
     assert "captions" in store.get(bad.job_id).error
     assert store.get(good.job_id).status == jobsmod.STATUS_DONE
+
+
+# ---- staged-file lifecycle: kept across a downstream failure, reclaimed only on success ---
+
+
+@pytest.mark.unit
+def test_worker_on_finished_fires_only_for_success_not_failure(tmp_path):
+    db = tmp_path / "distil.db"
+    store = jobsmod.JobStore(db)
+    ok = store.enqueue(kind="paste", title="ok", payload="x")
+    bad = store.enqueue(kind="paste", title="bad", payload="y")
+
+    def fake_distill(job):
+        if job.title == "bad":
+            raise RuntimeError("boom")
+        return {"status": "done", "entry_id": "e_1", "summary": "s"}
+
+    finished = []
+    worker = jobsmod.Worker(db, fake_distill, on_finished=finished.append)
+    assert worker.process_once() and worker.process_once()
+    assert store.get(bad.job_id).status == jobsmod.STATUS_FAILED
+    assert store.get(ok.job_id).status == jobsmod.STATUS_DONE
+    assert [j.job_id for j in finished] == [ok.job_id]
+
+
+@pytest.mark.unit
+def test_failed_youtube_staged_job_keeps_file_for_retry_then_cleans_up_on_success(tmp_path):
+    """Reproduces the pre-fix bug: a downstream pipeline failure (after the staged transcript
+    was already read) used to leave the file deleted, so JobStore.retry() requeued a job whose
+    payload no longer existed and every subsequent retry crashed with FileNotFoundError. The
+    file must survive the failure, and be reclaimed only once a retry actually succeeds."""
+    db = tmp_path / "distil.db"
+    store = jobsmod.JobStore(db)
+    transcript = Transcript(segments=[Segment(text="hi", locator="seg:0", timestamp=None)])
+    staged_path = webapp._stage_transcript("j_retry_lifecycle", transcript)
+    job = store.enqueue(kind=jobsmod.KIND_YOUTUBE_STAGED, title="t", payload=str(staged_path))
+
+    attempts = []
+
+    def flaky_distill(job):
+        webapp._load_job_transcript(job)  # reads the staged file, no longer deletes it
+        attempts.append(job.job_id)
+        if len(attempts) == 1:
+            raise RuntimeError("LLM call failed")
+        return {"status": "done", "entry_id": "e_1", "summary": "kept 1 item"}
+
+    worker = jobsmod.Worker(db, flaky_distill, on_finished=webapp._cleanup_staged_file)
+    assert worker.process_once()
+    assert store.get(job.job_id).status == jobsmod.STATUS_FAILED
+    assert staged_path.exists()  # kept — a retry must still be able to read it
+
+    assert store.retry(job.job_id) is True
+    assert worker.process_once()
+    assert store.get(job.job_id).status == jobsmod.STATUS_DONE
+    assert not staged_path.exists()  # reclaimed now that the job is actually done
+
+
+@pytest.mark.unit
+def test_autoclear_reaps_stale_failed_jobs_staged_file(jobstore):
+    job = jobstore.enqueue(
+        kind=jobsmod.KIND_YOUTUBE_STAGED, title="t", payload="/staged/x.json"
+    )
+    jobstore.mark_failed(job.job_id, error="boom")
+    stale = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+    jobstore._conn.execute("UPDATE jobs SET updated_at=? WHERE job_id=?", (stale, job.job_id))
+    jobstore._conn.commit()
+
+    reaped = []
+    jobstore.autoclear(on_stale_failed=reaped.append)
+    assert [j.job_id for j in reaped] == [job.job_id]
+    assert jobstore.get(job.job_id).status == jobsmod.STATUS_FAILED  # row itself untouched
+
+
+@pytest.mark.unit
+def test_autoclear_does_not_reap_a_recently_failed_job(jobstore):
+    job = jobstore.enqueue(
+        kind=jobsmod.KIND_YOUTUBE_STAGED, title="t", payload="/staged/x.json"
+    )
+    jobstore.mark_failed(job.job_id, error="boom")
+    reaped = []
+    jobstore.autoclear(on_stale_failed=reaped.append)
+    assert reaped == []
 
 
 # ---- streaming ask: deltas then final; abstention makes zero synthesis calls -----------

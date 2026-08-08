@@ -349,8 +349,14 @@ class JobStore:
         self._conn.commit()
         return cur.rowcount
 
-    def autoclear(self) -> int:
-        """Delete done/low_value/removed rows older than 24h. Failed rows persist forever."""
+    def autoclear(self, *, on_stale_failed: Callable[[Job], None] | None = None) -> int:
+        """Delete done/low_value/removed rows older than 24h. Failed rows persist forever — but
+        a failed job's *staged file* (upload/prefetched transcript) is another matter: it has to
+        outlive the row for ``retry()`` to work, yet must not accumulate on the volume forever if
+        nobody ever retries or removes the job. If ``on_stale_failed`` is given, it's invoked once
+        per failed row that has sat untouched past the same 24h bound, so a caller can reap that
+        file (never the row, and never anything within the retry window) on the same cadence this
+        already runs on."""
         cutoff = time.time() - _AUTOCLEAR_AFTER_SECONDS
         removed = 0
         for r in self._conn.execute(
@@ -366,6 +372,13 @@ class JobStore:
                 removed += 1
         if removed:
             self._conn.commit()
+        if on_stale_failed is not None:
+            for r in self._conn.execute(
+                "SELECT * FROM jobs WHERE status=?", (STATUS_FAILED,)
+            ).fetchall():
+                job = self._row(r)
+                if job.age_seconds() > _AUTOCLEAR_AFTER_SECONDS:
+                    on_stale_failed(job)
         return removed
 
     def recover_interrupted(self) -> int:
@@ -391,6 +404,11 @@ class Worker:
     ``distill_fn(job)`` does the real pipeline work and returns a small result dict
     ``{"status", "entry_id", "summary"}``. It's injected so tests can drive the worker with a
     fake that makes no LLM calls.
+
+    ``on_finished(job)``, if given, fires only once a job reaches a *successful* terminal
+    status (done/low_value) — never on failed. This is where a caller reclaims resources the
+    job consumed (e.g. a staged upload/transcript file): a failed job's payload must stay on
+    disk so ``JobStore.retry()`` has something to re-read.
     """
 
     def __init__(
@@ -399,10 +417,12 @@ class Worker:
         distill_fn: Callable[[Job], dict],
         *,
         poll_seconds: float = 1.0,
+        on_finished: Callable[[Job], None] | None = None,
     ):
         self._db_path = db_path
         self._distill_fn = distill_fn
         self._poll = poll_seconds
+        self._on_finished = on_finished
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._store: JobStore | None = None
@@ -459,6 +479,9 @@ class Worker:
             )
         else:
             store.mark_failed(job.job_id, error=result.get("error", "unknown pipeline result"))
+            return
+        if self._on_finished is not None:
+            self._on_finished(job)
 
 
 class Fetcher:
