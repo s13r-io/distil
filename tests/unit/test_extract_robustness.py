@@ -7,11 +7,12 @@ away items that had already fully parsed.
 """
 
 import json
+import logging
 
 import pytest
 
 import distil.extract as extract
-from distil.extract import _parse_items_json, run_extraction
+from distil.extract import _parse_items_json, run_extraction, run_triage_extract
 from distil.ingest import Segment, Transcript
 from distil.llm import FakeClient
 from distil.models import Triage
@@ -42,6 +43,28 @@ _COMPLETE_ITEM = {
 }
 
 _VALID_SINGLE_ITEM_RESPONSE = json.dumps([_COMPLETE_ITEM])
+
+
+_TRIAGE_JSON = json.dumps({
+    "knowledge_types_present": [{"type": "conceptual", "share": 1.0}],
+    "density": "high", "transcript_loss": {"level": "low", "evidence": []}, "verdict": "rich",
+})
+
+
+def _merged_complete(items_json_array: str) -> str:
+    return f"<TRIAGE>\n{_TRIAGE_JSON}\n</TRIAGE>\n<ITEMS>\n{items_json_array}\n</ITEMS>"
+
+
+def _merged_truncated(head_obj: dict) -> str:
+    """A merged triage+extract response whose <ITEMS> array is cut off mid-object and never
+    closed — mirrors _truncated_array's shape (one complete leading item, then a second item
+    cut off mid-string) but wrapped in the two-section format run_triage_extract parses."""
+    items_text = (
+        "[\n"
+        + json.dumps(head_obj)
+        + ',\n  {\n    "type": "conceptual",\n    "statement": "Second item cut off mid'
+    )
+    return f"<TRIAGE>\n{_TRIAGE_JSON}\n</TRIAGE>\n<ITEMS>\n{items_text}"
 
 
 def _truncated_array(head_obj: dict) -> str:
@@ -88,6 +111,76 @@ def test_truncated_array_recovery_still_applies_quote_truncation_and_discipline(
     items = run_extraction(t, _triage("conceptual"), FakeClient(responses=[raw]))
     assert len(items) == 1
     assert len(items[0].provenance.quote.split()) <= 14
+
+
+# ---- T-E15: a salvaged/truncated response must never look identical to a complete one ----
+
+
+@pytest.mark.unit
+def test_parse_items_json_reports_truncated_true_only_when_salvaged():
+    data, truncated = _parse_items_json(_truncated_array(_COMPLETE_ITEM), kind="Extraction")
+    assert truncated is True
+    assert len(data) == 1
+
+
+@pytest.mark.unit
+def test_parse_items_json_reports_truncated_false_for_a_clean_response():
+    data, truncated = _parse_items_json(_VALID_SINGLE_ITEM_RESPONSE, kind="Extraction")
+    assert truncated is False
+    assert len(data) == 1
+
+
+@pytest.mark.unit
+def test_parse_items_json_reports_truncated_false_when_only_fence_stripping_was_needed():
+    """A complete array wrapped in a code fence (or surrounding prose) needed only cosmetic
+    stripping, not salvage — it must not be confused with a genuinely truncated response."""
+    fenced = "Sure, here you go:\n```json\n" + _VALID_SINGLE_ITEM_RESPONSE + "\n```"
+    data, truncated = _parse_items_json(fenced, kind="Extraction")
+    assert truncated is False
+    assert len(data) == 1
+
+
+@pytest.mark.unit
+def test_run_triage_extract_reports_truncated_when_salvaged():
+    t = _t("some transcript text about a concept")
+    fake = FakeClient(responses=[_merged_truncated(_COMPLETE_ITEM)])
+    result = run_triage_extract(t, fake)
+    assert result.truncated is True
+    assert len(result.items) == 1
+    assert result.items[0].statement == "First complete item."
+
+
+@pytest.mark.unit
+def test_run_triage_extract_complete_response_is_not_marked_truncated():
+    """A clean, complete response must never be falsely flagged as truncated — a salvage that
+    silently looks identical to success is the defect this flag exists to prevent, and the
+    inverse (crying wolf on a normal response) would be just as unacceptable."""
+    t = _t("some transcript text about a concept")
+    fake = FakeClient(responses=[_merged_complete(json.dumps([_COMPLETE_ITEM]))])
+    result = run_triage_extract(t, fake)
+    assert result.truncated is False
+    assert len(result.items) == 1
+
+
+@pytest.mark.unit
+def test_run_triage_extract_logs_a_clear_warning_when_truncated(caplog):
+    t = _t("some transcript text about a concept")
+    fake = FakeClient(responses=[_merged_truncated(_COMPLETE_ITEM)])
+    with caplog.at_level(logging.WARNING, logger="distil.extract"):
+        run_triage_extract(t, fake)
+    assert any(
+        "truncated" in record.getMessage().lower() and record.levelno == logging.WARNING
+        for record in caplog.records
+    )
+
+
+@pytest.mark.unit
+def test_run_triage_extract_does_not_log_a_truncation_warning_when_complete(caplog):
+    t = _t("some transcript text about a concept")
+    fake = FakeClient(responses=[_merged_complete(json.dumps([_COMPLETE_ITEM]))])
+    with caplog.at_level(logging.WARNING, logger="distil.extract"):
+        run_triage_extract(t, fake)
+    assert not any("truncated" in record.getMessage().lower() for record in caplog.records)
 
 
 # ---- T-E6: first object itself incomplete -> nothing recoverable, clean ParseError ----

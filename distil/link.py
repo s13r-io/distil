@@ -76,7 +76,9 @@ def _reserve_novelty(links: list[ApplicationLink], ratio: float) -> None:
 
 
 def _parse_links(raw: str) -> list[ApplicationLink]:
-    data = _parse_items_json(raw, kind="link")
+    # Links don't carry a truncation-visibility flag today (unlike extraction) — this stage's
+    # response is small and not scaled by transcript length, so the truncated bool is unused here.
+    data, _truncated = _parse_items_json(raw, kind="link")
     links: list[ApplicationLink] = []
     for i, obj in enumerate(data):
         if not isinstance(obj, dict):

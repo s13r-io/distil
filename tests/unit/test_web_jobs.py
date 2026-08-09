@@ -524,7 +524,9 @@ def test_web_distill_job_skips_inline_graph_and_reports_timings(tmp_path, monkey
 def test_distill_job_persists_phase_durations_and_current_phase(tmp_path, monkeypatch):
     monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
     monkeypatch.setenv("DISTIL_KB_DIR", str(tmp_path / "kb"))
+    monkeypatch.setenv("DISTIL_MODEL", "test-model")
     monkeypatch.setattr(webapp, "_make_client", lambda: object())
+    monkeypatch.setattr(webapp, "_make_extract_client", lambda: object())
     monkeypatch.setattr(webapp, "_cached_safe_embedder", lambda: None)
     monkeypatch.setattr(webapp, "_fetch_source_metadata", lambda _url: webapp.SourceMetadata())
     monkeypatch.setattr(webapp, "_schedule_graph_link", lambda entry_id: False)

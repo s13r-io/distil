@@ -126,6 +126,37 @@ def test_pl1_end_to_end_produces_valid_entry(profile, store):
 
 
 @pytest.mark.unit
+def test_extraction_truncated_flag_propagates_to_the_filed_entry(profile, store):
+    """A merged triage+extract response salvaged from a truncated <ITEMS> array must be
+    recorded on the filed entry, not silently indistinguishable from a complete extraction."""
+    transcript = _t("Keep functions small and focused on one thing.")
+    truncated_items = (
+        "[\n"
+        + _EXTRACT.strip("[]\n")
+        + ',\n  {\n    "type": "heuristic", "statement": "Second item cut off mid'
+    )
+    raw = f"<TRIAGE>\n{_TRIAGE_RICH}\n</TRIAGE>\n<ITEMS>\n{truncated_items}"
+    client = FakeClient(responses=[raw, _LINK, _NOTE])
+    entry = run_pipeline(
+        transcript, profile, store, client, source_title="t",
+        config=PipelineConfig(enable_graph=False, enable_canonicalize=False),
+    )
+    assert entry.extraction_truncated is True
+    assert len(entry.knowledge_items) == 1  # the one complete item still survives
+
+
+@pytest.mark.unit
+def test_extraction_not_truncated_flag_is_false_for_a_complete_response(profile, store):
+    transcript = _t("Keep functions small and focused on one thing.")
+    client = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
+    entry = run_pipeline(
+        transcript, profile, store, client, source_title="t",
+        config=PipelineConfig(enable_graph=False, enable_canonicalize=False),
+    )
+    assert entry.extraction_truncated is False
+
+
+@pytest.mark.unit
 def test_pl1_respects_llm_budget(profile, store):
     transcript = _t("Keep functions small.")
     client = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])

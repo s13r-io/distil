@@ -63,9 +63,13 @@ def env(tmp_path, monkeypatch):
 
 
 def _seed_entry(monkeypatch):
-    monkeypatch.setattr(
-        cli, "_make_client", lambda: FakeClient(responses=[_merged(_TRIAGE, _EXTRACT), _LINK, _NOTE])
-    )
+    fake = FakeClient(responses=[_merged(_TRIAGE, _EXTRACT), _LINK, _NOTE])
+    monkeypatch.setattr(cli, "_make_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_extract_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_link_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_note_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_graph_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_canonicalize_client", lambda: fake)
     runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
 
 
@@ -112,9 +116,13 @@ def test_c4_ask_lookup_only_lists_sources(env, monkeypatch):
 @pytest.mark.unit
 def test_c5_reindex_backfills(env, monkeypatch):
     # file an entry WITHOUT embedding (simulate pre-read-layer) by disabling the embedder
-    monkeypatch.setattr(
-        cli, "_make_client", lambda: FakeClient(responses=[_merged(_TRIAGE, _EXTRACT), _LINK, _NOTE])
-    )
+    fake = FakeClient(responses=[_merged(_TRIAGE, _EXTRACT), _LINK, _NOTE])
+    monkeypatch.setattr(cli, "_make_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_extract_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_link_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_note_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_graph_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_canonicalize_client", lambda: fake)
     monkeypatch.setattr(cli, "_safe_embedder", lambda: None)
     runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
     assert cli._make_store().vector_count() == 0

@@ -15,6 +15,9 @@
       {% if thin_source %}
       <span class="badge warn" title="Built from only {{ e.source.transcript_word_count }} transcript words — unusually little for a source. If the fetch may have been cut short, consider re-adding it.">thin source</span>
       {% endif %}
+      {% if e.extraction_truncated %}
+      <span class="badge warn" title="The model's response was cut off (output-token cap or a dropped connection) and only partially recovered — this entry's knowledge items do not represent everything in the transcript.">extraction truncated</span>
+      {% endif %}
     </div>
     {% if mix %}
     <p class="muted" style="margin:0;">Mix: {% for t, pct in mix %}{{ t }} {{ pct }}%{% if not loop.last %} / {% endif %}{% endfor %}</p>

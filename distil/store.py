@@ -774,6 +774,7 @@ class Store:
             f"*Captured:* {entry.source.captured_at}"
         )
         Store._append_thin_material_note(lines, entry)
+        Store._append_extraction_truncated_note(lines, entry)
         if entry.source.url:
             lines.append("")
             lines.append(f"*Source:* [Watch on YouTube]({entry.source.url})")
@@ -832,6 +833,11 @@ class Store:
             lines.append(
                 f"- Thin material: only {entry.source.transcript_word_count} transcript words"
             )
+        if entry.extraction_truncated:
+            lines.append(
+                "- Extraction truncated: the model's response was cut off and only partially "
+                "recovered — this entry's knowledge is incomplete"
+            )
         if note.topics:
             lines.append("- Tags: " + ", ".join(Store._display_tag(topic) for topic in note.topics))
         lines.append("")
@@ -872,6 +878,7 @@ class Store:
             f"*Captured:* {entry.source.captured_at}"
         )
         Store._append_thin_material_note(lines, entry)
+        Store._append_extraction_truncated_note(lines, entry)
         if entry.source.url:
             lines.append("")
             lines.append(f"*Source:* [Watch on YouTube]({entry.source.url})")
@@ -973,6 +980,19 @@ class Store:
             f"*Thin material:* only {entry.source.transcript_word_count} transcript words to "
             "work from — unusually little for a source. If the fetch may have been cut short, "
             "consider re-adding it."
+        )
+
+    @staticmethod
+    def _append_extraction_truncated_note(lines: list[str], entry: KBEntry) -> None:
+        """Visible advisory when extraction's response had to be salvaged from an incomplete
+        array (the output-token cap was hit, or the connection dropped mid-stream) — see
+        ``models.KBEntry.extraction_truncated``. Silent when extraction completed cleanly."""
+        if not entry.extraction_truncated:
+            return
+        lines.append(
+            "*Extraction truncated:* the model's response was cut off (output-token cap or a "
+            "dropped connection) and only partially recovered — this entry's knowledge_items "
+            "do not represent everything in the transcript."
         )
 
     @staticmethod

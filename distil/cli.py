@@ -67,6 +67,40 @@ def _make_summary_client() -> LLMClient:
     return make_stage_client("summary")
 
 
+def _make_extract_client() -> LLMClient:
+    """The extraction stage's client — same model as ``_make_client()`` (``DISTIL_MODEL``,
+    unless ``DISTIL_MODEL_EXTRACT`` overrides it) but with its own resolved ``max_tokens``
+    ceiling (``model_config.resolve_stage_max_tokens("extract")``), sized to the model's real
+    output ceiling rather than the flat default every other stage still uses. This is what
+    actually wires the per-stage ceiling fix into the pipeline — building it via
+    ``make_stage_client`` rather than ``_make_client()`` is the whole point."""
+    return make_stage_client("extract")
+
+
+# The remaining four strong-tier stages get the same treatment as _make_extract_client, for the
+# same reason: DISTIL_MODEL_<STAGE> has resolved correctly in model_config.py since it was
+# introduced, but nothing actually constructed a client from it here — every call site still
+# shared one `_make_client()` object across link/note/graph/canonicalize, so the env var was
+# inert for those four stages. Each of these still resolves to DISTIL_MODEL by default (they're
+# all in STRONG_TIER_STAGES) with the default 4096 max_tokens (none of them are in
+# model_config._UNCAPPED_STAGES) — today's behavior is unchanged unless a DISTIL_MODEL_<STAGE>
+# override is actually set.
+def _make_link_client() -> LLMClient:
+    return make_stage_client("link")
+
+
+def _make_note_client() -> LLMClient:
+    return make_stage_client("note")
+
+
+def _make_graph_client() -> LLMClient:
+    return make_stage_client("graph")
+
+
+def _make_canonicalize_client() -> LLMClient:
+    return make_stage_client("canonicalize")
+
+
 def _make_embedder() -> Embedder:
     return make_embedder()
 
@@ -163,6 +197,11 @@ def run(
             ),
             embedder=embedder,
             summary_client=_make_summary_client(),
+            extract_client=_make_extract_client(),
+            link_client=_make_link_client(),
+            note_client=_make_note_client(),
+            graph_client=_make_graph_client(),
+            canonicalize_client=_make_canonicalize_client(),
         )
     except RuntimeError as exc:
         # e.g. missing ANTHROPIC_API_KEY / DISTIL_MODEL
