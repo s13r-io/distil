@@ -144,6 +144,23 @@ service itself, with no shell access to the container required.
 
 Speech-to-text (Whisper) for uncaptioned videos is out of scope; those videos raise
 :class:`YoutubeFetchError` so callers can skip + report them without failing a whole playlist.
+
+**External collector (Helper 2): shared fetch core, no parsing.** :func:`_fetch_into` (used by
+the server's own fetch paths) and :func:`fetch_raw_captions` (used by ``distil/collector.py``,
+the program that runs on a trusted machine elsewhere and fetches videos this server's bot-checked
+address cannot) both call the same :func:`_fetch_captions_raw` — identical client chain, PO-token
+wiring, retry/backoff, and error surfacing; only what happens to the caption text afterward
+differs (parsed into a :class:`Transcript` here vs. handed to the collector's caller, who submits
+the raw text to the server's own ``ingest_srt_text``-validated ``/collector/jobs/{id}/transcript``
+route, so it's validated exactly once, server-side). ``cookies_from_browser`` (a yt-dlp
+``--cookies-from-browser`` spec, e.g. ``"chrome"``) is the collector's whole reason to exist: a
+signed-in browser session is only meaningful on a machine that actually has the browser, never on
+this server. When given, it's paired with ``--cookies <workdir>/cookies.txt`` so the exported jar
+can be inspected once, locally, by :func:`_detect_browser_session` — a heuristic (presence of a
+Google auth cookie like ``LOGIN_INFO``/``SAPISID`` vs. only consent/analytics cookies) reported via
+``on_session`` (mirroring ``on_phase``'s fire-and-forget shape) so a caller never has to *assume*
+which mode a fetch used. The exported cookie file is read once and deleted immediately after;
+its contents never appear in a log, an exception, or anything returned from this module.
 """
 
 from __future__ import annotations
@@ -352,45 +369,129 @@ def fetch_video_transcript(
         return _fetch_into(video_url, run, Path(tmp), timeout, sleep, on_phase)
 
 
-def _fetch_into(
+def fetch_raw_captions(
+    video_url: str,
+    *,
+    run=subprocess.run,
+    workdir: str | Path | None = None,
+    timeout: float = 120.0,
+    sleep=time.sleep,
+    on_phase: Callable[[str, str], None] | None = None,
+    cookies_from_browser: str | None = None,
+    on_session: Callable[[str], None] | None = None,
+) -> str:
+    """Fetch English captions as raw ``srt`` text, without parsing them into a
+    :class:`Transcript` — for the collector program, which hands the text straight to the
+    server's own ``ingest_srt_text``-validated submit route rather than parsing locally (see
+    the module docstring's "External collector" paragraph). Shares every fetch mechanic with
+    :func:`fetch_video_transcript` via :func:`_fetch_captions_raw`.
+
+    ``cookies_from_browser`` and ``on_session`` are documented on :func:`_fetch_captions_raw`.
+    """
+    if workdir is not None:
+        scoped = Path(tempfile.mkdtemp(dir=str(workdir)))
+        return _fetch_captions_raw(
+            video_url, run, scoped, timeout, sleep, on_phase, cookies_from_browser, on_session
+        )
+    with tempfile.TemporaryDirectory() as tmp:
+        return _fetch_captions_raw(
+            video_url, run, Path(tmp), timeout, sleep, on_phase, cookies_from_browser, on_session
+        )
+
+
+_SIGNED_IN_COOKIE_NAMES = {
+    "SID", "SSID", "HSID", "APISID", "SAPISID", "LOGIN_INFO",
+    "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PAPISID", "__Secure-3PAPISID",
+}
+
+
+def _detect_browser_session(cookie_jar_path: Path) -> str:
+    """Heuristic "signed_in" / "anonymous" / "unknown" signal from a yt-dlp-exported
+    (Netscape-format) cookie jar for a ``--cookies-from-browser`` fetch.
+
+    Presence of a Google auth cookie (``LOGIN_INFO``, or any ``SID``/``SAPISID``-family cookie)
+    for a google.com/youtube.com domain is a reliable signed-in signal in practice: a signed-out
+    browser only ever carries consent/analytics cookies for those domains (``CONSENT``,
+    ``VISITOR_INFO1_LIVE``, ``YSC``, ``PREF``), never these. Like :func:`is_bot_check_refusal`,
+    this is a heuristic on external, non-contractual naming, not a structural guarantee — the
+    failure mode if Google ever changes this scheme is a downgrade to "unknown", never a wrong
+    answer reported as certain.
+
+    Reads the file once and deletes it immediately after, success or failure — its contents
+    (real session cookies) must never persist longer than this one local check, and never appear
+    in anything this module logs or returns.
+    """
+    try:
+        text = cookie_jar_path.read_text(encoding="utf-8")
+    except OSError:
+        return "unknown"
+    finally:
+        cookie_jar_path.unlink(missing_ok=True)
+    saw_relevant_domain = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            if not line.startswith("#HttpOnly_"):
+                continue
+            line = line.removeprefix("#HttpOnly_")
+        fields = line.split("\t")
+        if len(fields) != 7:
+            continue
+        domain, _include_subdomains, _path, _secure, _expiry, name, _value = fields
+        if "google.com" not in domain and "youtube.com" not in domain:
+            continue
+        saw_relevant_domain = True
+        if name in _SIGNED_IN_COOKIE_NAMES:
+            return "signed_in"
+    return "anonymous" if saw_relevant_domain else "unknown"
+
+
+def _fetch_captions_raw(
     video_url: str,
     run,
     workdir: Path,
     timeout: float,
     sleep=time.sleep,
     on_phase: Callable[[str, str], None] | None = None,
-) -> Transcript:
+    cookies_from_browser: str | None = None,
+    on_session: Callable[[str], None] | None = None,
+) -> str:
+    """Run yt-dlp and return the raw caption text it wrote, without parsing it. Shared core for
+    :func:`_fetch_into` and :func:`fetch_raw_captions` — see the module docstring."""
     if on_phase is not None:
         on_phase("transcript_fetch", "start")
     out_prefix = workdir / "captions"
-    proc = _run_yt_dlp(
-        [
-            _YT_DLP,
-            "--no-update",
-            *_extractor_args(),
-            "--skip-download",
-            "--write-subs",
-            "--write-auto-subs",
-            # Exact "en" only — a wildcard like "en.*" also matches yt-dlp's auto-translated
-            # variants (e.g. "en-de", "en-fr" translated *into* English), which are lower
-            # quality than the original/auto-generated English track and would be picked up
-            # by the sort-and-take-first below.
-            "--sub-langs",
-            "en",
-            # srt natively — never json3/vtt/etc with --convert-subs: ffmpeg isn't installed
-            # in the Dockerfile image, and ffmpeg can't parse yt-dlp's json3 format at all
-            # (only ttml/dfxp convert without it). YouTube's timedtext endpoint serves srt
-            # directly for both manual and auto-generated tracks, so no conversion is needed.
-            "--sub-format",
-            "srt/best",
-            "-o",
-            str(out_prefix),
-            video_url,
-        ],
-        run,
-        timeout,
-        sleep,
-    )
+    cookie_jar_path = workdir / "cookies.txt"
+    cmd = [
+        _YT_DLP,
+        "--no-update",
+        *_extractor_args(),
+        "--skip-download",
+        "--write-subs",
+        "--write-auto-subs",
+        # Exact "en" only — a wildcard like "en.*" also matches yt-dlp's auto-translated
+        # variants (e.g. "en-de", "en-fr" translated *into* English), which are lower
+        # quality than the original/auto-generated English track and would be picked up
+        # by the sort-and-take-first below.
+        "--sub-langs",
+        "en",
+        # srt natively — never json3/vtt/etc with --convert-subs: ffmpeg isn't installed
+        # in the Dockerfile image, and ffmpeg can't parse yt-dlp's json3 format at all
+        # (only ttml/dfxp convert without it). YouTube's timedtext endpoint serves srt
+        # directly for both manual and auto-generated tracks, so no conversion is needed.
+        "--sub-format",
+        "srt/best",
+        "-o",
+        str(out_prefix),
+    ]
+    if cookies_from_browser:
+        cmd += ["--cookies-from-browser", cookies_from_browser, "--cookies", str(cookie_jar_path)]
+    cmd.append(video_url)
+    proc = _run_yt_dlp(cmd, run, timeout, sleep)
+    if cookies_from_browser and on_session is not None:
+        on_session(_detect_browser_session(cookie_jar_path))
     if proc.returncode != 0:
         _logger.error("yt-dlp fetch failed for %s:\n%s", video_url, proc.stderr)
         raise YoutubeFetchError(f"yt-dlp failed: {_surface_error(proc.stderr)}")
@@ -399,7 +500,18 @@ def _fetch_into(
     srt_files = sorted(workdir.glob("*.srt"))
     if not srt_files:
         raise YoutubeFetchError("No English captions available for this video.")
-    raw = srt_files[0].read_text(encoding="utf-8")
+    return srt_files[0].read_text(encoding="utf-8")
+
+
+def _fetch_into(
+    video_url: str,
+    run,
+    workdir: Path,
+    timeout: float,
+    sleep=time.sleep,
+    on_phase: Callable[[str, str], None] | None = None,
+) -> Transcript:
+    raw = _fetch_captions_raw(video_url, run, workdir, timeout, sleep, on_phase)
     if on_phase is not None:
         on_phase("caption_parse", "start")
     try:

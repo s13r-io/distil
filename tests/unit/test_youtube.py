@@ -17,9 +17,11 @@ from distil.ingest import Transcript
 from distil.youtube import (
     PotDiagnostic,
     YoutubeFetchError,
+    _detect_browser_session,
     _redact_pot_diagnostic,
     _surface_error,
     diagnose_pot,
+    fetch_raw_captions,
     fetch_video_transcript,
     is_bot_check_refusal,
     is_playlist_url,
@@ -749,3 +751,192 @@ def test_is_bot_check_refusal_false_for_playlist_listing_failure():
 @pytest.mark.unit
 def test_is_bot_check_refusal_accepts_a_plain_string_too():
     assert is_bot_check_refusal("Sign in to confirm you're not a bot") is True
+
+
+# ---- Helper 2 (collector): fetch_raw_captions shares _fetch_captions_raw with _fetch_into ----
+
+
+@pytest.mark.unit
+def test_fetch_raw_captions_returns_unparsed_srt_text(tmp_path):
+    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nWelcome to the talk.\n"
+
+    def fake_run(cmd, **kwargs):
+        out_index = cmd.index("-o") + 1
+        Path(f"{cmd[out_index]}.en.srt").write_text(srt_body, encoding="utf-8")
+        return _proc(returncode=0)
+
+    raw = fetch_raw_captions("https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path)
+    assert raw == srt_body
+
+
+@pytest.mark.unit
+def test_fetch_raw_captions_raises_on_yt_dlp_failure(tmp_path):
+    def fake_run(cmd, **kwargs):
+        return _proc(returncode=1, stderr="Video unavailable")
+
+    with pytest.raises(YoutubeFetchError, match="Video unavailable"):
+        fetch_raw_captions("https://www.youtube.com/watch?v=gone", run=fake_run, workdir=tmp_path)
+
+
+@pytest.mark.unit
+def test_fetch_raw_captions_passes_cookies_from_browser_to_yt_dlp(tmp_path):
+    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHi.\n"
+    seen_cmds = []
+
+    def fake_run(cmd, **kwargs):
+        seen_cmds.append(cmd)
+        out_index = cmd.index("-o") + 1
+        Path(f"{cmd[out_index]}.en.srt").write_text(srt_body, encoding="utf-8")
+        return _proc(returncode=0)
+
+    fetch_raw_captions(
+        "https://www.youtube.com/watch?v=abc",
+        run=fake_run,
+        workdir=tmp_path,
+        cookies_from_browser="chrome",
+    )
+    cmd = seen_cmds[0]
+    idx = cmd.index("--cookies-from-browser")
+    assert cmd[idx + 1] == "chrome"
+    assert "--cookies" in cmd
+
+
+@pytest.mark.unit
+def test_fetch_raw_captions_never_passes_cookies_flags_when_unset(tmp_path):
+    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHi.\n"
+
+    def fake_run(cmd, **kwargs):
+        assert "--cookies-from-browser" not in cmd
+        assert "--cookies" not in cmd
+        out_index = cmd.index("-o") + 1
+        Path(f"{cmd[out_index]}.en.srt").write_text(srt_body, encoding="utf-8")
+        return _proc(returncode=0)
+
+    fetch_raw_captions("https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path)
+
+
+@pytest.mark.unit
+def test_fetch_raw_captions_reports_signed_in_session(tmp_path):
+    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHi.\n"
+
+    def fake_run(cmd, **kwargs):
+        out_index = cmd.index("-o") + 1
+        Path(f"{cmd[out_index]}.en.srt").write_text(srt_body, encoding="utf-8")
+        cookies_index = cmd.index("--cookies") + 1
+        Path(cmd[cookies_index]).write_text(
+            "# Netscape HTTP Cookie File\n"
+            ".youtube.com\tTRUE\t/\tTRUE\t0\tCONSENT\tYES+1\n"
+            "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tsecret-value\n",
+            encoding="utf-8",
+        )
+        return _proc(returncode=0)
+
+    sessions = []
+    fetch_raw_captions(
+        "https://www.youtube.com/watch?v=abc",
+        run=fake_run,
+        workdir=tmp_path,
+        cookies_from_browser="chrome",
+        on_session=sessions.append,
+    )
+    assert sessions == ["signed_in"]
+
+
+@pytest.mark.unit
+def test_fetch_raw_captions_reports_anonymous_session(tmp_path):
+    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHi.\n"
+
+    def fake_run(cmd, **kwargs):
+        out_index = cmd.index("-o") + 1
+        Path(f"{cmd[out_index]}.en.srt").write_text(srt_body, encoding="utf-8")
+        cookies_index = cmd.index("--cookies") + 1
+        Path(cmd[cookies_index]).write_text(
+            "# Netscape HTTP Cookie File\n"
+            ".youtube.com\tTRUE\t/\tTRUE\t0\tCONSENT\tYES+1\n"
+            ".youtube.com\tTRUE\t/\tTRUE\t0\tYSC\tabc\n",
+            encoding="utf-8",
+        )
+        return _proc(returncode=0)
+
+    sessions = []
+    fetch_raw_captions(
+        "https://www.youtube.com/watch?v=abc",
+        run=fake_run,
+        workdir=tmp_path,
+        cookies_from_browser="chrome",
+        on_session=sessions.append,
+    )
+    assert sessions == ["anonymous"]
+
+
+@pytest.mark.unit
+def test_fetch_raw_captions_reports_unknown_session_when_no_jar_written(tmp_path):
+    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHi.\n"
+
+    def fake_run(cmd, **kwargs):
+        # Simulates a yt-dlp version/config that never wrote the cookie jar at all.
+        out_index = cmd.index("-o") + 1
+        Path(f"{cmd[out_index]}.en.srt").write_text(srt_body, encoding="utf-8")
+        return _proc(returncode=0)
+
+    sessions = []
+    fetch_raw_captions(
+        "https://www.youtube.com/watch?v=abc",
+        run=fake_run,
+        workdir=tmp_path,
+        cookies_from_browser="chrome",
+        on_session=sessions.append,
+    )
+    assert sessions == ["unknown"]
+
+
+@pytest.mark.unit
+def test_fetch_raw_captions_never_calls_on_session_when_cookies_from_browser_unset(tmp_path):
+    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHi.\n"
+
+    def fake_run(cmd, **kwargs):
+        out_index = cmd.index("-o") + 1
+        Path(f"{cmd[out_index]}.en.srt").write_text(srt_body, encoding="utf-8")
+        return _proc(returncode=0)
+
+    sessions = []
+    fetch_raw_captions(
+        "https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path,
+        on_session=sessions.append,
+    )
+    assert sessions == []
+
+
+@pytest.mark.unit
+def test_fetch_raw_captions_reports_session_even_when_fetch_ultimately_fails(tmp_path):
+    def fake_run(cmd, **kwargs):
+        cookies_index = cmd.index("--cookies") + 1
+        Path(cmd[cookies_index]).write_text(
+            "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tsecret-value\n",
+            encoding="utf-8",
+        )
+        return _proc(returncode=1, stderr="Sign in to confirm you're not a bot")
+
+    sessions = []
+    with pytest.raises(YoutubeFetchError):
+        fetch_raw_captions(
+            "https://www.youtube.com/watch?v=abc",
+            run=fake_run,
+            workdir=tmp_path,
+            cookies_from_browser="chrome",
+            on_session=sessions.append,
+        )
+    assert sessions == ["signed_in"]
+
+
+@pytest.mark.unit
+def test_detect_browser_session_deletes_the_cookie_file_after_reading(tmp_path):
+    jar = tmp_path / "cookies.txt"
+    jar.write_text(".youtube.com\tTRUE\t/\tTRUE\t0\tYSC\tabc\n", encoding="utf-8")
+    assert _detect_browser_session(jar) == "anonymous"
+    assert not jar.exists()
+
+
+@pytest.mark.unit
+def test_detect_browser_session_unknown_when_jar_missing(tmp_path):
+    assert _detect_browser_session(tmp_path / "missing-cookies.txt") == "unknown"

@@ -55,9 +55,11 @@ fetches). Never commit these — they live only in Railway.
 `DISTIL_COLLECTOR_TOKEN`, `DISTIL_COLLECTOR_LEASE_SECONDS` (default 600), and
 `DISTIL_COLLECTOR_EXPIRY_SECONDS` (default 7 days) configure the external-collector queue that
 lets a bot-checked video be fetched from a trusted machine elsewhere instead — see `AGENTS.md`'s
-"External-collector queue" entry. There is no collector program to use this queue yet (a later
-piece), so leave `DISTIL_COLLECTOR_TOKEN` unset until one exists; a bot-checked video just waits
-up to its expiry instead of failing.
+"External-collector queue" entry. The collector program that actually does the fetching
+(`distil collector-run`) runs on your own machine, not here — set `DISTIL_COLLECTOR_TOKEN` here
+to a real secret and follow RUNBOOK.md's "Run the external collector" section there. Leave it
+unset to keep the queue unusable (fails closed); a bot-checked video then just waits up to its
+expiry instead of failing.
 
 > **Local embeddings + Railway:** with `DISTIL_EMBEDDER=local` (the chosen default) a small
 > embedding model loads into the service's RAM and should be baked into the image at build

@@ -10,12 +10,14 @@ an unknown entry should read as guidance, not a crash.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
 import typer
 
 from .canonicalize import run_delete_entry_stage
+from .collector import CollectorConfigError, config_from_env, run_collector
 from .embed import Embedder, make_embedder
 from .ingest import IngestError, Transcript, ingest_file, ingest_text
 from .llm import AnthropicClient, LLMClient
@@ -346,6 +348,30 @@ def youtube_diagnose_pot(
     typer.echo(f"\nyt-dlp exit code: {result.returncode}")
     typer.echo("\n--- full output ---")
     typer.echo(result.raw_output)
+
+
+@app.command(name="collector-run")
+def collector_run():
+    """Run the external collector: ask the server (DISTIL_COLLECTOR_SERVER_URL) for YouTube
+    videos it lost to a bot-check, fetch them here with this machine's own browser session
+    (DISTIL_COLLECTOR_BROWSER), and submit the captions back. Pull-based and long-running —
+    stays connected outbound only, never reachable from the server; stop with Ctrl-C. See
+    distil/collector.py's module docstring and AGENTS.md's "External-collector queue" entry.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    try:
+        config = config_from_env()
+    except CollectorConfigError as exc:
+        _fail(str(exc))
+        return
+    typer.echo(
+        f"Collector starting — server={config.server_url}, "
+        f"browser={config.browser or '(none configured — fetches will be anonymous)'}"
+    )
+    try:
+        run_collector(config)
+    except KeyboardInterrupt:
+        typer.echo("Collector stopped.")
 
 
 def _safe_embedder() -> Embedder | None:
