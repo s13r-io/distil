@@ -899,7 +899,14 @@ def create_app() -> FastAPI:
         # forever if nobody retries or removes it — reap it once the job has sat failed past the
         # same 24h bound list_active()'s autoclear already uses for finished rows.
         store_jobs.autoclear(on_stale_failed=_cleanup_staged_file)
-        return [j.to_dict() for j in store_jobs.list_active()]
+        # A global signal, not a per-job one — attached to every row so the Activity view can
+        # render an honest "is anything actually coming for this?" for a parked video without a
+        # second round trip or changing /jobs from a bare array into an object.
+        last_collector_checkin = store_jobs.last_collector_checkin()
+        return [
+            {**j.to_dict(), "collector_last_seen": last_collector_checkin}
+            for j in store_jobs.list_active()
+        ]
 
     @app.post("/jobs/{job_id}/remove")
     def jobs_remove(job_id: str):
@@ -951,6 +958,9 @@ def create_app() -> FastAPI:
             return unauthorized
         bounded_limit = max(1, min(limit, _COLLECTOR_CLAIM_LIMIT_MAX))
         store_jobs = jobsmod.JobStore(_db_path())
+        # Recorded even when nothing is claimed below — an empty claim still proves a collector
+        # process is alive and polling, which is the one signal the owner's Activity view needs.
+        store_jobs.record_collector_checkin()
         claimed = store_jobs.claim_for_collection(
             limit=bounded_limit, lease_seconds=_collector_lease_seconds(),
         )
