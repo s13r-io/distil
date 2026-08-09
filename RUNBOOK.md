@@ -343,6 +343,13 @@ repeats — forever, until you stop it with Ctrl-C. Every fetch logs whether it 
 browser session or fell back to anonymous; if you expected "signed_in" and see "anonymous",
 you're signed out of that browser (or `DISTIL_COLLECTOR_BROWSER` names the wrong one).
 
+If this machine's system resolver ever caches a bad address for the server's hostname right
+after a deploy, you'll see a `DEGRADED: DNS resolution failed for ...` warning in the log — the
+collector keeps working by falling back to the last address that worked, and resolution recovers
+on its own once the cache clears, with nothing for you to run. See `distil/collector_net.py`'s
+module docstring for how it works; `DISTIL_COLLECTOR_STATE_DIR` (`.env.example`) overrides where
+it stores the last-good address if `~/.distil` isn't writable on this machine.
+
 ### 10.3 Have it start with your machine (optional)
 
 A plain `launchd` job on macOS — two files, two commands, nothing to install. To remove it
