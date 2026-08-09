@@ -74,7 +74,7 @@ def test_merged_call_extraction_is_conditioned_on_its_own_stated_dominant_type(f
 
     dominant = dominant_type(result.triage)
     item_types = {item.type for item in result.items}
-    assert dominant in item_types or len(item_types) > 0, (
+    assert dominant in item_types, (
         f"{fixture}: merged call's stated dominant type {dominant!r} is absent from its own "
         f"extracted item types {item_types!r} — looks decided independently, not conditioned"
     )
