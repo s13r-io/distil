@@ -37,6 +37,12 @@ always claims exactly one job at a time and finishes (submits or reports unfetch
 claiming another, so it never holds a video it isn't actively fetching and never claims more than
 it can plausibly finish before the lease expires.
 
+``CollectorClient``'s default opener rides out the owner's Mac's system resolver caching a bad
+answer for the server's hostname right after a deploy (observed repeatedly: ``getaddrinfo`` fails
+while ``dig``/``curl --resolve`` both prove the name and the server are fine) — see
+:mod:`distil.collector_net` for the fallback-to-last-good-address mechanism and why it never
+weakens TLS verification or outlives real DNS recovering.
+
 Nothing here reads the knowledge base, and nothing here can act on anything the server sends
 back beyond a job id and a video URL — nothing is ever executed, only fetched and returned as
 text. Cookies extracted from the browser never leave this machine: only derived facts (raw
@@ -59,6 +65,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .collector_net import DNSFallbackStore, default_state_path, open_with_dns_fallback
 from .youtube import YoutubeFetchError, fetch_raw_captions
 
 _logger = logging.getLogger(__name__)
@@ -126,10 +133,6 @@ def config_from_env() -> CollectorConfig:
     )
 
 
-def _default_opener(request: urllib.request.Request, timeout: float):
-    return urllib.request.urlopen(request, timeout=timeout)
-
-
 def _read_error_detail(exc: urllib.error.HTTPError) -> str:
     try:
         raw = exc.read()
@@ -149,8 +152,9 @@ class CollectorClient:
     """Thin HTTP client for the server's ``/collector/*`` routes.
 
     Uses :mod:`urllib.request` only — no new runtime dependency; ``distil/source.py`` already
-    uses ``urllib.request.urlopen`` for the same reason. ``opener`` is injectable (default
-    :func:`_default_opener`) so tests can fake the entire network boundary, mirroring
+    uses ``urllib.request.urlopen`` for the same reason. ``opener`` is injectable (default is the
+    DNS-resilient opener, :func:`~distil.collector_net.open_with_dns_fallback` — see that
+    module's docstring) so tests can fake the entire network boundary, mirroring
     ``distil/youtube.py``'s injectable ``run``.
     """
 
@@ -158,12 +162,17 @@ class CollectorClient:
         self,
         config: CollectorConfig,
         *,
-        opener: Callable[[urllib.request.Request, float], Any] = _default_opener,
+        opener: Callable[[urllib.request.Request, float], Any] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        dns_store: DNSFallbackStore | None = None,
     ) -> None:
         self._config = config
-        self._opener = opener
         self._sleep = sleep
+        self._dns_store = dns_store or DNSFallbackStore(default_state_path())
+        self._opener = opener if opener is not None else self._resilient_default_opener
+
+    def _resilient_default_opener(self, request: urllib.request.Request, timeout: float) -> Any:
+        return open_with_dns_fallback(request, timeout, dns_store=self._dns_store)
 
     def claim(self, *, limit: int) -> list[dict]:
         data = self._request("POST", f"/collector/jobs/claim?limit={limit}")
