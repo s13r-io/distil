@@ -41,10 +41,6 @@ _NOTE = json.dumps({
 })
 
 
-def _merged(triage_json: str, items_json: str) -> str:
-    return f"<TRIAGE>\n{triage_json}\n</TRIAGE>\n<ITEMS>\n{items_json}\n</ITEMS>"
-
-
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
@@ -63,8 +59,9 @@ def env(tmp_path, monkeypatch):
 
 
 def _seed_entry(monkeypatch):
-    fake = FakeClient(responses=[_merged(_TRIAGE, _EXTRACT), _LINK, _NOTE])
+    fake = FakeClient(responses=[_TRIAGE, _EXTRACT, _LINK, _NOTE])
     monkeypatch.setattr(cli, "_make_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_triage_client", lambda: fake)
     monkeypatch.setattr(cli, "_make_extract_client", lambda: fake)
     monkeypatch.setattr(cli, "_make_link_client", lambda: fake)
     monkeypatch.setattr(cli, "_make_note_client", lambda: fake)
@@ -116,8 +113,9 @@ def test_c4_ask_lookup_only_lists_sources(env, monkeypatch):
 @pytest.mark.unit
 def test_c5_reindex_backfills(env, monkeypatch):
     # file an entry WITHOUT embedding (simulate pre-read-layer) by disabling the embedder
-    fake = FakeClient(responses=[_merged(_TRIAGE, _EXTRACT), _LINK, _NOTE])
+    fake = FakeClient(responses=[_TRIAGE, _EXTRACT, _LINK, _NOTE])
     monkeypatch.setattr(cli, "_make_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_triage_client", lambda: fake)
     monkeypatch.setattr(cli, "_make_extract_client", lambda: fake)
     monkeypatch.setattr(cli, "_make_link_client", lambda: fake)
     monkeypatch.setattr(cli, "_make_note_client", lambda: fake)

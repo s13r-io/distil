@@ -1,8 +1,8 @@
 """Narrative summary stage wired into pipeline.py — additive, cheap-tier, opt-in via
-``summary_client``, and running CONCURRENTLY with the merged triage+extract call (owner
-decision, addendum Part 2 — supersedes an earlier "runs after note" placement). Proves the
-model-tier split by counting calls on two distinct FakeClient instances (one per tier), never
-by inspecting configuration."""
+``summary_client``, and running CONCURRENTLY with triage+extract (owner decision, addendum
+Part 2 — supersedes an earlier "runs after note" placement). Proves the model-tier split by
+counting calls on two distinct FakeClient instances (one per tier), never by inspecting
+configuration."""
 
 import json
 import time
@@ -33,10 +33,6 @@ _NOTE = json.dumps({
 })
 
 
-def _merged(triage_json: str, items_json: str) -> str:
-    return f"<TRIAGE>\n{triage_json}\n</TRIAGE>\n<ITEMS>\n{items_json}\n</ITEMS>"
-
-
 def _t(text: str) -> Transcript:
     return Transcript(segments=[Segment(text=text, locator="seg:0")])
 
@@ -60,7 +56,7 @@ def store(tmp_path):
 @pytest.mark.unit
 def test_narrative_summary_runs_on_a_separate_cheap_client(profile, store):
     transcript = _t(_TRANSCRIPT_TEXT)
-    strong = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
+    strong = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     narrative_text = "N" * 600
     cheap = FakeClient(responses=[narrative_text])
 
@@ -72,11 +68,11 @@ def test_narrative_summary_runs_on_a_separate_cheap_client(profile, store):
 
     assert entry.narrative_summary is not None
     assert entry.narrative_summary.text == narrative_text
-    # Strong client did exactly one merged triage+extract call, plus link+note — zero
+    # Strong client did exactly one triage call + one extract call, plus link+note — zero
     # narrative-summary calls landed on it, and the cheap client did exactly the one
     # narrative-summary call — zero triage/extract/link/note calls landed on it. This is the
     # call-count proof, not a configuration inspection.
-    assert strong.call_count == 3
+    assert strong.call_count == 4
     assert cheap.call_count == 1
 
 
@@ -85,19 +81,19 @@ def test_narrative_summary_skipped_without_a_summary_client(profile, store):
     """Every caller that existed before this stage was added omits summary_client — behavior
     must reproduce exactly: no extra call, entry.narrative_summary stays None."""
     transcript = _t(_TRANSCRIPT_TEXT)
-    strong = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
+    strong = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     entry = run_pipeline(
         transcript, profile, store, strong, source_title="t",
         config=PipelineConfig(enable_graph=False, enable_canonicalize=False),
     )
     assert entry.narrative_summary is None
-    assert strong.call_count == 3
+    assert strong.call_count == 4
 
 
 @pytest.mark.unit
 def test_narrative_summary_respects_its_own_enable_flag(profile, store):
     transcript = _t(_TRANSCRIPT_TEXT)
-    strong = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
+    strong = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     cheap = FakeClient(responses=[])  # would IndexError if ever called
     entry = run_pipeline(
         transcript, profile, store, strong, source_title="t",
@@ -115,7 +111,7 @@ def test_narrative_summary_failure_does_not_block_filing(profile, store):
     """A cheap client that only ever returns too-thin output exhausts its retries and fails
     internally — the pipeline must still file the entry, just without a narrative summary."""
     transcript = _t(_TRANSCRIPT_TEXT)
-    strong = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
+    strong = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     cheap = FakeClient(responses=["x", "x", "x"])  # always too short; 3 == default max_retries
 
     entry = run_pipeline(
@@ -132,7 +128,7 @@ def test_narrative_summary_failure_does_not_block_filing(profile, store):
 @pytest.mark.unit
 def test_narrative_summary_dropped_connection_does_not_block_filing(profile, store):
     transcript = _t(_TRANSCRIPT_TEXT)
-    strong = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
+    strong = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     cheap = FakeClient(responses=[ConnectionError("dropped")])
 
     entry = run_pipeline(
@@ -150,12 +146,12 @@ def test_narrative_summary_dropped_connection_does_not_block_filing(profile, sto
 
 @pytest.mark.unit
 def test_narrative_summary_phase_events_start_at_front_and_finish_after_note(profile, store):
-    """narrative_summary's "start" fires before extract's "start" (it kicks off the front of
+    """narrative_summary's "start" fires before triage's "start" (it kicks off the front of
     the pipeline); its "finish" fires only once joined, after note — everything else remains a
     strictly sequential start/finish stream from the phase_callback's point of view, since it is
     only ever invoked from the main thread."""
     transcript = _t(_TRANSCRIPT_TEXT)
-    strong = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
+    strong = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     cheap = FakeClient(responses=["N" * 600])
     events: list[tuple[str, str]] = []
     run_pipeline(
@@ -168,6 +164,7 @@ def test_narrative_summary_phase_events_start_at_front_and_finish_after_note(pro
     )
     assert events == [
         ("narrative_summary", "start"),
+        ("triage", "start"), ("triage", "finish"),
         ("extract", "start"), ("extract", "finish"),
         ("normalize", "start"), ("normalize", "finish"),
         ("link", "start"), ("link", "finish"),
@@ -210,7 +207,7 @@ def test_narrative_summary_actually_overlaps_extraction_in_wall_clock_time(profi
     starts at the same time and finishes well before note does."""
     transcript = _t(_TRANSCRIPT_TEXT)
     delay = 0.2
-    strong = _DelayedClient([_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE], delay_seconds=delay)
+    strong = _DelayedClient([_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE], delay_seconds=delay)
     cheap = _DelayedClient(["N" * 600], delay_seconds=delay)
 
     start = time.perf_counter()
@@ -222,9 +219,9 @@ def test_narrative_summary_actually_overlaps_extraction_in_wall_clock_time(profi
     elapsed = time.perf_counter() - start
 
     assert entry.narrative_summary is not None
-    # Sequential would take >= 4 * delay (3 strong calls + 1 cheap call); concurrent should stay
-    # well under 3 * delay plus generous scheduling slack.
-    assert elapsed < delay * 3.5, f"elapsed {elapsed:.2f}s looks sequential, not concurrent"
+    # Sequential would take >= 5 * delay (4 strong calls + 1 cheap call); concurrent should stay
+    # well under 4 * delay plus generous scheduling slack.
+    assert elapsed < delay * 4.5, f"elapsed {elapsed:.2f}s looks sequential, not concurrent"
     # The cheap call started at essentially the same time as the first strong call — proof the
     # summary genuinely starts at the front rather than being merely scheduled "eventually".
     assert abs(cheap.calls[0] - strong.calls[0]) < delay
@@ -236,7 +233,7 @@ def test_narrative_summary_timeout_leaves_a_clear_not_generated_state(monkeypatc
     indefinitely, and its absence must be logged honestly rather than silent."""
     monkeypatch.setenv("DISTIL_SUMMARY_JOIN_TIMEOUT_SECONDS", "0.05")
     transcript = _t(_TRANSCRIPT_TEXT)
-    strong = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
+    strong = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     cheap = _DelayedClient(["N" * 600], delay_seconds=1.0)  # far longer than the 0.05s bound
 
     import logging
@@ -275,7 +272,7 @@ def test_summary_failure_is_not_masked_by_extraction_succeeding(profile, store):
     """The reverse: a failing summary must be reported (as "no summary", logged) independently
     of extraction's own success — extraction succeeding must not swallow the summary's outcome."""
     transcript = _t(_TRANSCRIPT_TEXT)
-    strong = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
+    strong = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
     cheap = FakeClient(responses=[RuntimeError("boom"), RuntimeError("boom"), RuntimeError("boom")])
 
     entry = run_pipeline(

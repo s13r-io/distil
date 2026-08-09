@@ -2,7 +2,7 @@
 
 One call turns a normalized transcript + profile into a filed, schema-valid :class:`KBEntry`:
 
-    ingest (done by caller) → triage+extract MERGED → normalize → link
+    ingest (done by caller) → triage → chunked extract → normalize → link
     → note synthesis → graph → file → canonicalize → concept edges
                         (narrative summary starts at the front, runs concurrently, joins before filing)
 
@@ -13,55 +13,60 @@ rejection rule — a transcript below a word-count floor — is enforced earlier
 this function, it is always worth filing, and every entry that starts this pipeline finishes it
 filed (Stage 7 always runs; T-PL2). Triage's ``verdict`` is still computed and stored (other code
 and stored data depend on its shape) but nothing here acts on it — only
-``knowledge_types_present`` (routes what ``extract.run_triage_extract`` looks for), ``density``,
-and ``transcript_loss`` (informational) matter downstream.
+``knowledge_types_present`` (routes what ``extract.run_chunked_extraction`` looks for),
+``density``, and ``transcript_loss`` (informational) matter downstream.
 
-**Triage and extraction are merged into one strong-tier call** (``extract.run_triage_extract``):
-the old two-call design (a cheap classification pass, then extraction) existed only so the
-classification could veto extraction before it ran — and that veto is gone (previous paragraph),
-so the split now buys nothing but a second full read of the transcript. The merged call still
-decides-then-acts within one response: it states its classification first, then extracts
-conditioned on it — see ``extract.py``'s and ``distil/prompts/triage_extract.py``'s module
-docstrings. The LLM-call budget is kept bounded (one merged triage+extract call + link + note,
-plus capped graph calls and capped canonicalize/synthesis/concept-edge calls — see
+**Triage and extraction are two separate calls, on two different tiers (owner decision).** They
+were briefly merged into one strong-tier call; that merge is undone here because it is
+incompatible with chunked extraction (several per-chunk calls cannot produce one
+whole-transcript classification without disagreeing verdicts — see ``extract.py``'s module
+docstring). ``triage.run_triage`` classifies the whole transcript once, on the cheap tier (a
+coarse categorical judgement, not the faithfulness-critical work); its dominant type then steers
+``extract.run_chunked_extraction``, on the strong tier, preserving decide-then-act across the two
+calls via that data dependency. Chunking a long transcript instead of extracting it in one
+whole-transcript call is itself measured to find materially more faithful items — see
+``extract.py``'s module docstring for the measurement and how boundary damage/duplication are
+handled. The LLM-call budget scales with chunk count for extraction specifically (one call per
+chunk instead of one call for the whole transcript) but stays otherwise bounded (one triage call
++ link + note, plus capped graph calls and capped canonicalize/synthesis/concept-edge calls — see
 ``canonicalize.py``'s and ``concept_graph.py``'s module docstrings and the OKF Phase 3 design
 report §6, §9 item 4).
 
-**The narrative summary runs concurrently with triage+extract, not before or after it**
+**The narrative summary runs concurrently with triage+extract, not before or after them**
 (``distil/summary.py``). It is additive and optional: it only runs when a caller passes
 ``summary_client`` (a *separate*, cheap-tier client — never ``client``, which stays on the
-strong model for extract/link/note/canonicalize/concept-edges unchanged) and
-``config.enable_narrative_summary`` is true. It shares no data with triage+extract (both read
-only the transcript), so there is no ordering dependency to preserve by blocking — starting it
-at the front means the owner sees a readable account sooner, and finishing early on a cheap tier
-means it survives a later extraction failure instead of dying behind it. It runs on a plain
-daemon ``threading.Thread`` (stdlib, no new dependency) started right after the merged call is
-dispatched, and is joined — bounded by ``DISTIL_SUMMARY_JOIN_TIMEOUT_SECONDS`` (default 60s) —
-only once the rest of the pipeline (triage+extract, normalize, link, note) has already produced
-``entry``, so the common case pays no extra wall-clock time at all. A summary that fails (a
-thin-output-after-retries failure, or a dropped connection) or that is still running past the
-bound both leave ``entry.narrative_summary`` ``None`` — logged either way (never silently) —
-rather than ever blocking filing or turning a would-have-succeeded run into a failed one; the
-owner's existing refresh action can always generate it later. A failure or timeout in the
-summary never masks, delays, or is masked by an extraction failure: they are independent stages
-evaluated on separate threads, and either one's outcome is reported on its own terms. The thread
-is deliberately plain and daemonic rather than a ``concurrent.futures.ThreadPoolExecutor``: that
-class registers an ``atexit`` hook that blocks interpreter shutdown until every worker thread
-finishes, even after ``shutdown(wait=False)`` — which would silently defeat the whole point of
-the bound for a one-shot CLI run (`distil run` would hang at process exit waiting for an
-abandoned, already-timed-out-and-ignored summary call). A daemon thread is simply killed when
-the process exits, with no such wait.
+strong model for extract/canonicalize unless overridden) and ``config.enable_narrative_summary``
+is true. It shares no data with triage/extract (all three read only the transcript), so there is
+no ordering dependency to preserve by blocking — starting it at the front means the owner sees a
+readable account sooner, and finishing early on a cheap tier means it survives a later extraction
+failure instead of dying behind it. It runs on a plain daemon ``threading.Thread`` (stdlib, no
+new dependency) started right before triage is dispatched, and is joined — bounded by
+``DISTIL_SUMMARY_JOIN_TIMEOUT_SECONDS`` (default 60s) — only once the rest of the pipeline
+(triage, extract, normalize, link, note) has already produced ``entry``, so the common case pays
+no extra wall-clock time at all. A summary that fails (a thin-output-after-retries failure, or a
+dropped connection) or that is still running past the bound both leave ``entry.narrative_summary``
+``None`` — logged either way (never silently) — rather than ever blocking filing or turning a
+would-have-succeeded run into a failed one; the owner's existing refresh action can always
+generate it later. A failure or timeout in the summary never masks, delays, or is masked by an
+extraction failure: they are independent stages evaluated on separate threads, and either one's
+outcome is reported on its own terms. The thread is deliberately plain and daemonic rather than a
+``concurrent.futures.ThreadPoolExecutor``: that class registers an ``atexit`` hook that blocks
+interpreter shutdown until every worker thread finishes, even after ``shutdown(wait=False)`` —
+which would silently defeat the whole point of the bound for a one-shot CLI run (`distil run`
+would hang at process exit waiting for an abandoned, already-timed-out-and-ignored summary
+call). A daemon thread is simply killed when the process exits, with no such wait.
 
 Per-stage model selection (``distil/model_config.py``) is a general mechanism, not something
-built one-off for the narrative summary: ``extract_client``/``link_client``/``note_client``/
-``graph_client``/``canonicalize_client`` let a caller inject a distinct client per stage, each
-defaulting to ``None`` — meaning "use ``client``". ``cli.py`` and ``web/app.py`` both construct
-all six via ``model_config.make_stage_client(stage)`` (each stage's own ``_make_<stage>_client``
-seam) and pass them through these kwargs, so setting ``DISTIL_MODEL_<STAGE>`` in the environment
-genuinely changes only that stage's model — no further ``pipeline.py`` change required, and no
-caller needs to pass these explicitly to get today's defaults (every stage still resolves to
-``DISTIL_MODEL`` unless overridden). A settings UI for editing these values is a deliberate
-follow-up; the wiring itself is not.
+built one-off for the narrative summary: ``triage_client``/``extract_client``/``link_client``/
+``note_client``/``graph_client``/``canonicalize_client`` let a caller inject a distinct client
+per stage, each defaulting to ``None`` — meaning "use ``client``". ``cli.py`` and ``web/app.py``
+both construct all six via ``model_config.make_stage_client(stage)`` (each stage's own
+``_make_<stage>_client`` seam) and pass them through these kwargs, so setting
+``DISTIL_MODEL_<STAGE>`` in the environment genuinely changes only that stage's model — no
+further ``pipeline.py`` change required, and no caller needs to pass these explicitly to get
+today's defaults (every stage still resolves to its tier default unless overridden — see
+``model_config.py``'s ``STRONG_TIER_STAGES``/``CHEAP_TIER_STAGES``). A settings UI for editing
+these values is a deliberate follow-up; the wiring itself is not.
 """
 
 from __future__ import annotations
@@ -78,7 +83,7 @@ from time import perf_counter
 from .canonicalize import run_canonicalize_stage
 from .concept_graph import run_concept_edges_stage
 from .embed import Embedder
-from .extract import run_triage_extract
+from .extract import run_chunked_extraction
 from .graph import link_graph
 from .ingest import Transcript
 from .link import generate_links
@@ -88,6 +93,7 @@ from .normalize import normalize_items
 from .note import synthesize_note
 from .store import Store
 from .summary import NarrativeSummaryError, synthesize_narrative_summary
+from .triage import run_triage
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +139,7 @@ def run_pipeline(
     config: PipelineConfig | None = None,
     embedder: Embedder | None = None,
     summary_client: LLMClient | None = None,
+    triage_client: LLMClient | None = None,
     extract_client: LLMClient | None = None,
     link_client: LLMClient | None = None,
     note_client: LLMClient | None = None,
@@ -155,8 +162,8 @@ def run_pipeline(
     )
     meta = EntryMeta(created_at=now, model_version=config.model_version)
 
-    # Narrative summary starts at the FRONT, concurrently with the merged triage+extract call
-    # below — see module docstring. Never blocks anything here; joined only once entry exists.
+    # Narrative summary starts at the FRONT, concurrently with triage+extraction below — see
+    # module docstring. Never blocks anything here; joined only once entry exists.
     summary_run: _SummaryRun | None = None
     summary_thread: threading.Thread | None = None
     summary_started_at = 0.0
@@ -172,14 +179,20 @@ def run_pipeline(
         )
         summary_thread.start()
 
-    # Stage 1+2 merged — triage + extraction in one full-transcript read (strong tier). See
-    # module docstring and extract.run_triage_extract's own docstring for why.
-    triage_extract_result = _timed(
-        "extract", config, lambda: run_triage_extract(transcript, extract_client or client)
+    # Stage 1 — triage (cheap tier): classifies the whole transcript once.
+    triage = _timed(
+        "triage", config, lambda: run_triage(transcript, triage_client or client).triage
     )
-    triage = triage_extract_result.triage
-    raw_items = triage_extract_result.items
-    extraction_truncated = triage_extract_result.truncated
+
+    # Stage 2 — extraction (strong tier), chunked: see module docstring and
+    # extract.run_chunked_extraction's own docstring for why.
+    extraction_result = _timed(
+        "extract",
+        config,
+        lambda: run_chunked_extraction(transcript, triage, extract_client or client),
+    )
+    raw_items = extraction_result.items
+    extraction_truncated = extraction_result.truncated
 
     # Stage 3 — normalize (pure faithfulness gate).
     items = _timed("normalize", config, lambda: normalize_items(raw_items, transcript))

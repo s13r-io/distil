@@ -4,22 +4,35 @@ setting an environment variable, never a code change.
 
 Every stage that makes a model call resolves its own model independently, by name:
 ``DISTIL_MODEL_<STAGE>`` (the stage name upper-cased) wins if set; otherwise the stage falls
-back to its tier default. Today every stage in :data:`STRONG_TIER_STAGES` falls back to
-``DISTIL_MODEL`` — the existing, single strong-tier setting, so this preserves current
-behavior byte-for-byte for every stage that isn't individually overridden. Only
-:data:`CHEAP_TIER_STAGES` (currently just ``"summary"``) falls back to a cheap tier default
-instead — see ``distil/summary.py``'s module docstring for why that layer is deliberately
-cheaper. The credential is unaffected either way: every stage still reads
-``ANTHROPIC_API_KEY`` the same way (:class:`distil.llm.AnthropicClient` does that lazily,
-regardless of which model string it was constructed with).
+back to its tier default. Every stage in :data:`STRONG_TIER_STAGES` falls back to
+``DISTIL_MODEL`` — the existing, single strong-tier setting — while every stage in
+:data:`CHEAP_TIER_STAGES` falls back to a hardcoded cheap-tier default instead. The credential is
+unaffected either way: every stage still reads ``ANTHROPIC_API_KEY`` the same way
+(:class:`distil.llm.AnthropicClient` does that lazily, regardless of which model string it was
+constructed with).
+
+**Tier assignment is measured, not assumed (owner decision).** On a real ~11,719-word
+transcript: model tier decided faithfulness at extraction and only at extraction — all-Sonnet
+kept 19/19 extracted items as faithful, all-Haiku kept only 8/16 (half dropped as unfaithful
+quotes) — so **extraction** stays strong-tier; that same measurement showed a mixed
+strong-extract/cheap-elsewhere run kept faithfulness (19/21) at roughly a third of the
+all-Sonnet cost. **Triage** is a coarse categorical judgement (dominant type / density /
+transcript-loss), not the verbatim-quote-faithfulness work — cheap-tier. **Link** and **note**
+synthesize from already-extracted, already-faithful items rather than re-reading the raw
+transcript for quotable provenance — cheap-tier, same reasoning as ``summary`` (see
+``distil/summary.py``'s module docstring). **Canonicalize** stays strong-tier: it makes the
+match/new/reject judgement call for each item against the existing knowledge base, a decision
+closer in kind to extraction's than to link/note's templated synthesis. ``graph`` was not
+covered by this measurement and is left on its prior default (strong) rather than downgraded
+without evidence.
 
 This module replaces the one-off ``DISTIL_SUMMARY_MODEL`` global with the same
 ``DISTIL_MODEL_<STAGE>`` convention every other stage now uses — a second ad hoc global
 variable per new cheap-tier stage would not have generalized.
 
 Scope note: this is the resolution mechanism plus a client factory (:func:`make_stage_client`)
-built on it. ``cli.py`` and ``web/app.py`` each construct every strong-tier stage's client via
-its own ``_make_<stage>_client()`` seam on top of :func:`make_stage_client` and pass it into
+built on it. ``cli.py`` and ``web/app.py`` each construct every stage's client via its own
+``_make_<stage>_client()`` seam on top of :func:`make_stage_client` and pass it into
 ``pipeline.run_pipeline``'s matching per-stage keyword argument — see ``run_pipeline``'s
 docstring. A settings UI for editing these values is a deliberate follow-up; the wiring itself
 is not.
@@ -32,20 +45,25 @@ import os
 from .llm import AnthropicClient, LLMClient
 
 # Current Haiku-tier model (resolved from Anthropic's own catalogue, not guessed — see the PR
-# that introduced the narrative summary layer for the lookup).
+# that introduced the narrative summary layer for the lookup). Kept as the name every cheap-tier
+# stage's default resolves to, not just summary's — see DEFAULT_CHEAP_TIER_MODEL below.
 DEFAULT_SUMMARY_MODEL = "claude-haiku-4-5"
+
+# Same value, generalized name — every CHEAP_TIER_STAGES member defaults to this, not just
+# "summary" (kept as the one constant so a future retune of the cheap tier is one edit).
+DEFAULT_CHEAP_TIER_MODEL = DEFAULT_SUMMARY_MODEL
 
 # Stages that share today's single strong-tier default (DISTIL_MODEL) unless individually
 # overridden via DISTIL_MODEL_<STAGE>. Kept as an explicit tuple — not "anything not cheap" —
-# so adding a stage here is a deliberate decision, not an accident of exclusion. "triage" is not
-# a stage of its own anymore: triage and extraction are merged into one call, resolved as
-# "extract" (see pipeline.py's and extract.py's module docstrings).
-STRONG_TIER_STAGES = ("extract", "link", "note", "graph", "canonicalize")
+# so adding a stage here is a deliberate decision, not an accident of exclusion. See the module
+# docstring's "Tier assignment is measured, not assumed" section for why each stage landed here.
+STRONG_TIER_STAGES = ("extract", "canonicalize", "graph")
 
-# Stages that default to a cheaper tier unless individually overridden.
-CHEAP_TIER_STAGES = ("summary",)
+# Stages that default to a cheaper tier unless individually overridden. See the module
+# docstring for the measurement behind each of these.
+CHEAP_TIER_STAGES = ("summary", "triage", "link", "note")
 
-_CHEAP_TIER_DEFAULTS = {"summary": DEFAULT_SUMMARY_MODEL}
+_CHEAP_TIER_DEFAULTS = {stage: DEFAULT_CHEAP_TIER_MODEL for stage in CHEAP_TIER_STAGES}
 
 
 def resolve_stage_model(stage: str) -> str:
@@ -70,7 +88,7 @@ def resolve_stage_model(stage: str) -> str:
 
 # Per-stage max_tokens ceiling — the same "resolve per stage by name" mechanism as
 # resolve_stage_model, not a second global constant. AnthropicClient.complete() previously
-# hardcoded max_tokens=4096 for every stage; on a real ~1,455-word transcript the merged
+# hardcoded max_tokens=4096 for every stage; on a real ~1,455-word transcript the (then-merged)
 # triage+extract call hit that ceiling *exactly* and silently lost items to the salvage path
 # (see the PR that introduced this mechanism for the measurement). max_tokens is an output
 # *ceiling*, not a spend — the API only bills for tokens actually generated, so raising it here
@@ -91,9 +109,9 @@ MODEL_MAX_OUTPUT_TOKENS = {
 # Every stage except "extract" keeps the pre-existing flat 4096 ceiling — a triage classification,
 # a handful of application links, or a short synthesized note doesn't need headroom that scales
 # with transcript length. "extract" is the one stage whose output is genuinely one JSON object per
-# extracted knowledge item across a merged triage+extraction call spanning the *whole* transcript
-# (see extract.py's module docstring) — its ceiling instead resolves to the model's own real
-# maximum, so a long video's full item list is never silently cut off again.
+# extracted knowledge item (per chunk, when extraction is chunked — see extract.py's module
+# docstring) — its ceiling instead resolves to the model's own real maximum, so a dense chunk's
+# full item list is never silently cut off, costing nothing on a typical chunk that needs far less.
 _DEFAULT_STAGE_MAX_TOKENS = 4096
 _UNCAPPED_STAGES = ("extract",)
 

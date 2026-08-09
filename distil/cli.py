@@ -67,6 +67,13 @@ def _make_summary_client() -> LLMClient:
     return make_stage_client("summary")
 
 
+def _make_triage_client() -> LLMClient:
+    """The triage stage's client — cheap tier by default (``model_config.CHEAP_TIER_STAGES``),
+    unless ``DISTIL_MODEL_TRIAGE`` overrides it. See ``model_config.py``'s module docstring for
+    the measurement behind putting classification on the cheap tier."""
+    return make_stage_client("triage")
+
+
 def _make_extract_client() -> LLMClient:
     """The extraction stage's client — same model as ``_make_client()`` (``DISTIL_MODEL``,
     unless ``DISTIL_MODEL_EXTRACT`` overrides it) but with its own resolved ``max_tokens``
@@ -77,14 +84,12 @@ def _make_extract_client() -> LLMClient:
     return make_stage_client("extract")
 
 
-# The remaining four strong-tier stages get the same treatment as _make_extract_client, for the
-# same reason: DISTIL_MODEL_<STAGE> has resolved correctly in model_config.py since it was
-# introduced, but nothing actually constructed a client from it here — every call site still
-# shared one `_make_client()` object across link/note/graph/canonicalize, so the env var was
-# inert for those four stages. Each of these still resolves to DISTIL_MODEL by default (they're
-# all in STRONG_TIER_STAGES) with the default 4096 max_tokens (none of them are in
-# model_config._UNCAPPED_STAGES) — today's behavior is unchanged unless a DISTIL_MODEL_<STAGE>
-# override is actually set.
+# link/note/graph/canonicalize each get the same treatment as _make_extract_client/
+# _make_triage_client: DISTIL_MODEL_<STAGE> has resolved correctly in model_config.py since it
+# was introduced, but nothing actually constructed a client from it here before — every call
+# site used to share one `_make_client()` object across them, so the env var was inert. link and
+# note default to the cheap tier now (model_config.py's module docstring); graph and
+# canonicalize default to DISTIL_MODEL (STRONG_TIER_STAGES) exactly as before.
 def _make_link_client() -> LLMClient:
     return make_stage_client("link")
 
@@ -197,6 +202,7 @@ def run(
             ),
             embedder=embedder,
             summary_client=_make_summary_client(),
+            triage_client=_make_triage_client(),
             extract_client=_make_extract_client(),
             link_client=_make_link_client(),
             note_client=_make_note_client(),
