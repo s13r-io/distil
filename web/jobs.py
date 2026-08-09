@@ -95,6 +95,12 @@ class Job:
     # the whole 7-day wait, not any one collector's lease.
     lease_expires_at: str | None = None
     collection_deadline: str | None = None
+    # Set exactly once, by the first successful submit_collected_transcript() call for this
+    # job_id, and never cleared afterward — the one status-independent signal that a collector's
+    # transcript was already accepted, so a retry landing after the job has progressed past
+    # STATUS_QUEUED (claimed by the distill worker, run, even finished) is still recognized as
+    # "already done" instead of falling through to "not_leased".
+    collected_at: str | None = None
 
     def age_seconds(self) -> float:
         try:
@@ -122,6 +128,7 @@ class Job:
             "phase_durations": self.phase_durations,
             "lease_expires_at": self.lease_expires_at,
             "collection_deadline": self.collection_deadline,
+            "collected_at": self.collected_at,
         }
 
 
@@ -174,6 +181,8 @@ class JobStore:
         if "lease_expires_at" not in cols:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN lease_expires_at TEXT")
             self._conn.execute("ALTER TABLE jobs ADD COLUMN collection_deadline TEXT")
+        if "collected_at" not in cols:
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN collected_at TEXT")
         self._conn.commit()
 
     def _row(self, r: sqlite3.Row) -> Job:
@@ -196,6 +205,7 @@ class JobStore:
             collection_deadline=(
                 r["collection_deadline"] if "collection_deadline" in r.keys() else None
             ),
+            collected_at=r["collected_at"] if "collected_at" in r.keys() else None,
         )
 
     def enqueue(
@@ -551,22 +561,32 @@ class JobStore:
 
     def submit_collected_transcript(self, job_id: str, *, staged_path: str) -> str:
         """Move a leased job to ``queued`` with its collected transcript staged — from here it's
-        indistinguishable from a playlist prefetch. Idempotent: a job already moved past
-        COLLECTING (a previous call already succeeded) reports ``"already_submitted"`` rather
-        than erroring, so a collector retrying after a lost HTTP response sees success, not a
-        spurious failure, and never double-queues the same video.
+        indistinguishable from a playlist prefetch. Idempotent against a collector retrying after
+        a lost HTTP response two ways: a job still sitting at ``STATUS_QUEUED`` is treated as
+        already-submitted (indistinguishable from a duplicate submission either way, so the safe
+        answer is the same), and ``collected_at`` — set exactly once, by this method, and never
+        cleared afterward — catches a retry that lands *after* the distill worker has already
+        claimed/finished the job (running/done/low_value/failed), which a current-status check
+        alone would otherwise misreport as ``"not_leased"``.
         """
-        r = self._conn.execute("SELECT status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        r = self._conn.execute(
+            "SELECT status, collected_at FROM jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
         if not r:
             return "not_found"
-        if r["status"] == STATUS_QUEUED:
+        if r["status"] == STATUS_QUEUED or r["collected_at"] is not None:
             return "already_submitted"
         if r["status"] != STATUS_COLLECTING:
             return "not_leased"
+        now = _now()
         self._conn.execute(
             "UPDATE jobs SET status=?, kind=?, payload=?, lease_expires_at=NULL, "
-            "collection_deadline=NULL, error=NULL, updated_at=? WHERE job_id=? AND status=?",
-            (STATUS_QUEUED, KIND_YOUTUBE_STAGED, staged_path, _now(), job_id, STATUS_COLLECTING),
+            "collection_deadline=NULL, error=NULL, collected_at=?, updated_at=? "
+            "WHERE job_id=? AND status=?",
+            (
+                STATUS_QUEUED, KIND_YOUTUBE_STAGED, staged_path, now, now, job_id,
+                STATUS_COLLECTING,
+            ),
         )
         self._conn.commit()
         return "accepted"

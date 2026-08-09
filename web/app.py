@@ -116,37 +116,29 @@ def _transcript_stage_dir() -> Path:
     return d
 
 
-def _playlist_fetch_delay_seconds() -> float:
-    raw = os.environ.get("DISTIL_PLAYLIST_FETCH_DELAY_SECONDS")
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
     if not raw:
-        return _PLAYLIST_FETCH_DELAY_DEFAULT
+        return default
     try:
         return float(raw)
     except ValueError:
-        return _PLAYLIST_FETCH_DELAY_DEFAULT
+        return default
+
+
+def _playlist_fetch_delay_seconds() -> float:
+    return _env_float("DISTIL_PLAYLIST_FETCH_DELAY_SECONDS", _PLAYLIST_FETCH_DELAY_DEFAULT)
 
 
 def _collector_lease_seconds() -> float:
-    raw = os.environ.get("DISTIL_COLLECTOR_LEASE_SECONDS")
-    if not raw:
-        return _COLLECTOR_LEASE_SECONDS_DEFAULT
-    try:
-        return float(raw)
-    except ValueError:
-        return _COLLECTOR_LEASE_SECONDS_DEFAULT
+    return _env_float("DISTIL_COLLECTOR_LEASE_SECONDS", _COLLECTOR_LEASE_SECONDS_DEFAULT)
 
 
 def _collector_expiry_seconds() -> float:
     """How long a video waits for external collection before failing cleanly — default 7 days
     (WEB_UI_SPEC collector queue), configurable via ``DISTIL_COLLECTOR_EXPIRY_SECONDS`` the same
     way ``DISTIL_PLAYLIST_FETCH_DELAY_SECONDS`` already is."""
-    raw = os.environ.get("DISTIL_COLLECTOR_EXPIRY_SECONDS")
-    if not raw:
-        return _COLLECTOR_EXPIRY_SECONDS_DEFAULT
-    try:
-        return float(raw)
-    except ValueError:
-        return _COLLECTOR_EXPIRY_SECONDS_DEFAULT
+    return _env_float("DISTIL_COLLECTOR_EXPIRY_SECONDS", _COLLECTOR_EXPIRY_SECONDS_DEFAULT)
 
 
 def _default_profile():
@@ -983,11 +975,23 @@ def create_app() -> FastAPI:
                 {"detail": f"Not parseable as captions: {exc}"}, status_code=400
             )
         store_jobs = jobsmod.JobStore(_db_path())
+        # Validate the job against the DB before ever writing to a path built from the raw,
+        # collector-controlled job_id — mirrors jobs_remove's get-then-touch-file ordering rather
+        # than staging first and cleaning up after the fact.
+        job = store_jobs.get(job_id)
+        if job is None:
+            return JSONResponse({"detail": "job not found"}, status_code=404)
+        already_submitted = job.status == jobsmod.STATUS_QUEUED or job.collected_at is not None
+        if job.status != jobsmod.STATUS_COLLECTING and not already_submitted:
+            return JSONResponse(
+                {"detail": "job is not currently leased to a collector"}, status_code=409
+            )
         staged_path = _stage_transcript(job_id, transcript)
         outcome = store_jobs.submit_collected_transcript(job_id, staged_path=str(staged_path))
         if outcome in ("not_found", "not_leased"):
-            # Nothing owns this file (the job never reached queued/KIND_YOUTUBE_STAGED for it) —
-            # remove it now or it leaks on the volume forever under this job_id's deterministic path.
+            # The DB state moved between the check above and the guarded update (e.g. the lease
+            # expired mid-request) — nothing owns this file, so remove it rather than leak it on
+            # the volume forever under this job_id's deterministic path.
             staged_path.unlink(missing_ok=True)
             status_code = 404 if outcome == "not_found" else 409
             detail = "job not found" if outcome == "not_found" else (
