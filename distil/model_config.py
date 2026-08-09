@@ -17,11 +17,12 @@ This module replaces the one-off ``DISTIL_SUMMARY_MODEL`` global with the same
 ``DISTIL_MODEL_<STAGE>`` convention every other stage now uses — a second ad hoc global
 variable per new cheap-tier stage would not have generalized.
 
-Scope note: this is the resolution *mechanism* plus a client factory built on it. Actually
-wiring distinct per-stage clients into ``pipeline.run_pipeline`` for the six existing strong-
-tier stages (today they still share one injected client, unchanged), and any settings UI for
-editing these values, are deliberate follow-ups — see ``run_pipeline``'s docstring for the
-optional per-stage keyword arguments this mechanism is meant to feed.
+Scope note: this is the resolution mechanism plus a client factory (:func:`make_stage_client`)
+built on it. ``cli.py`` and ``web/app.py`` each construct every strong-tier stage's client via
+its own ``_make_<stage>_client()`` seam on top of :func:`make_stage_client` and pass it into
+``pipeline.run_pipeline``'s matching per-stage keyword argument — see ``run_pipeline``'s
+docstring. A settings UI for editing these values is a deliberate follow-up; the wiring itself
+is not.
 """
 
 from __future__ import annotations

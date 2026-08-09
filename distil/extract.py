@@ -285,9 +285,9 @@ def _recover_truncated_leading_objects(text: str) -> list:
 
     Walks the text after the opening ``[`` and greedily decodes each complete leading JSON
     value, stopping at the first value that fails to parse (the truncated tail — e.g. the
-    4,096-token output cap cut it off, or the connection dropped). Returns whatever complete
-    objects were recovered, possibly none; never fabricates or completes a partial object —
-    items that would have needed the cut-off tail are simply absent.
+    stage's output-token ceiling cut it off, or the connection dropped). Returns whatever
+    complete objects were recovered, possibly none; never fabricates or completes a partial
+    object — items that would have needed the cut-off tail are simply absent.
     """
     if not text.startswith("["):
         return []

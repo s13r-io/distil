@@ -71,6 +71,11 @@ the structured fields; body is the human-readable rendering) and indexed in SQLi
               "metadata_fetched_at": "ts|null",
               "duration_sec": 0, "transcript_word_count": 0, "captured_at": "ts" },
 
+  // True only when the extraction response had to be salvaged from an incomplete array (the
+  // model's output-token ceiling was hit, or the connection dropped mid-stream) — knowledge_items
+  // below is then a partial recovery, not a complete list. Default false.
+  "extraction_truncated": false,
+
   // TRIAGE — runs first. knowledge_types_present routes stage 2; density/transcript_loss are
   // informational. verdict is stored but never gates filing — ingest's word-count floor is
   // the pipeline's only rejection rule (owner decision; ARCHITECTURE.md §2).
