@@ -5,7 +5,8 @@ deterministic glue is unit-tested against a FakeClient returning canned response
 model behaviour is exercised only in the gated eval suite.
 """
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -94,11 +95,13 @@ def test_anthropic_client_accepts_an_explicit_max_tokens(monkeypatch):
     assert AnthropicClient(max_tokens=128_000).max_tokens == 128_000
 
 
-def _fake_anthropic_module(calls: list[tuple[str, dict]]):
-    """A minimal stand-in for the ``anthropic`` package's client, recording which of
+def _fake_anthropic_module(calls: list[tuple[str, dict]]) -> ModuleType:
+    """A minimal stand-in for the ``anthropic`` package, recording which of
     ``messages.create`` (non-streaming) / ``messages.stream`` (streaming) was invoked and with
     what kwargs — enough to verify AnthropicClient's internal streaming-threshold routing
-    without a real network call or the real SDK's request validation."""
+    without a real network call, the real SDK's request validation, or the SDK even being
+    installed (``llm.py`` imports it lazily inside the function, so it's not a hard test
+    dependency — install a fake module rather than requiring the real package in CI)."""
 
     class _FakeMessage:
         def __init__(self, text: str):
@@ -130,7 +133,9 @@ def _fake_anthropic_module(calls: list[tuple[str, dict]]):
         def __init__(self, api_key=None):
             self.messages = _FakeMessagesAPI()
 
-    return _FakeAnthropic
+    module = ModuleType("anthropic")
+    module.Anthropic = _FakeAnthropic
+    return module
 
 
 @pytest.mark.unit
@@ -138,7 +143,7 @@ def test_anthropic_client_complete_uses_non_streaming_below_the_threshold(monkey
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setenv("DISTIL_MODEL", "claude-test-model")
     calls: list[tuple[str, dict]] = []
-    monkeypatch.setattr("anthropic.Anthropic", _fake_anthropic_module(calls))
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic_module(calls))
     client = AnthropicClient(max_tokens=4096)
     assert client.complete("hi") == "non-streamed response"
     assert [kind for kind, _ in calls] == ["create"]
@@ -154,7 +159,7 @@ def test_anthropic_client_complete_streams_above_the_threshold(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setenv("DISTIL_MODEL", "claude-test-model")
     calls: list[tuple[str, dict]] = []
-    monkeypatch.setattr("anthropic.Anthropic", _fake_anthropic_module(calls))
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic_module(calls))
     client = AnthropicClient(max_tokens=128_000)
     assert client.complete("hi") == "streamed response"
     assert [kind for kind, _ in calls] == ["stream"]
