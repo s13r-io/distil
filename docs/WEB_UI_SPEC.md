@@ -181,6 +181,10 @@ Replaces the synchronous ingest with a non-blocking, restart-safe job queue.
   video, fetched inline at distill time" — see `AGENTS.md`'s "Playlist up-front fetch + staging"
   entry for the current two-worker (`Worker` + `Fetcher`) design, the `pending_fetch`/`fetching`
   statuses, and where staged content lives, not this v1 spec.
+- **External collector queue:** the `status` enum above and "env vars unchanged" (§13) are both
+  superseded — see `AGENTS.md`'s "External-collector queue" entry for the `awaiting_collection`/
+  `collecting` lifecycle, the `/collector/*` routes, and the `DISTIL_COLLECTOR_*` env vars
+  (documented in `.env.example`), not this v1 spec.
 
 ## 9. Backend: streaming Ask
 

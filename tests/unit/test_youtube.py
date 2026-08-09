@@ -21,6 +21,7 @@ from distil.youtube import (
     _surface_error,
     diagnose_pot,
     fetch_video_transcript,
+    is_bot_check_refusal,
     is_playlist_url,
     list_playlist_video_urls,
 )
@@ -720,3 +721,31 @@ def test_fetch_video_transcript_requests_srt_natively_without_convert_subs(tmp_p
         return _proc(returncode=0)
 
     fetch_video_transcript("https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path)
+
+
+# ---- bot-check refusal detection (collector queue) ----
+
+
+@pytest.mark.unit
+def test_is_bot_check_refusal_true_for_youtube_identity_challenge():
+    exc = YoutubeFetchError(
+        "yt-dlp failed: ERROR: [youtube] abc12345678: Sign in to confirm you're not a bot"
+    )
+    assert is_bot_check_refusal(exc) is True
+
+
+@pytest.mark.unit
+def test_is_bot_check_refusal_false_for_no_captions():
+    exc = YoutubeFetchError("No English captions available for this video.")
+    assert is_bot_check_refusal(exc) is False
+
+
+@pytest.mark.unit
+def test_is_bot_check_refusal_false_for_playlist_listing_failure():
+    exc = YoutubeFetchError("Could not list playlist: playlist does not exist")
+    assert is_bot_check_refusal(exc) is False
+
+
+@pytest.mark.unit
+def test_is_bot_check_refusal_accepts_a_plain_string_too():
+    assert is_bot_check_refusal("Sign in to confirm you're not a bot") is True

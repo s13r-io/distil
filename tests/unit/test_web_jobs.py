@@ -6,6 +6,7 @@ fake distill_fn, and streaming is exercised via FakeClient.stream (zero network)
 
 import json
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from distil.ingest import Segment, Transcript
 from distil.llm import FakeClient
 from distil.models import KBEntry
 from distil.query import AskResult, ConceptRef, Source, stream_ask
+from distil.youtube import YoutubeFetchError
 from web import app as webapp
 from web import jobs as jobsmod
 from web.app import _ask_payload
@@ -1075,3 +1077,430 @@ def test_stream_ask_streams_then_final(monkeypatch):
     final = events[-1].result
     assert final.abstained is False
     assert "k_01" in final.cited_item_ids  # grounded citation preserved
+
+
+# ---- External-collector queue: bot-check refusals park instead of failing -----------------
+
+
+@pytest.mark.unit
+def test_mark_awaiting_collection_sets_status_and_collection_deadline(jobstore):
+    job = jobstore.enqueue(kind="youtube", title="t", payload="https://x/1")
+    jobstore.mark_awaiting_collection(job.job_id, error="Sign in to confirm you're not a bot")
+    got = jobstore.get(job.job_id)
+    assert got.status == jobsmod.STATUS_AWAITING_COLLECTION
+    assert got.error == "Sign in to confirm you're not a bot"
+    assert got.collection_deadline is not None
+    deadline = datetime.fromisoformat(got.collection_deadline)
+    delta = (deadline - datetime.now(timezone.utc)).total_seconds()
+    assert 6 * 24 * 3600 < delta <= 7 * 24 * 3600  # defaults to 7 days
+
+
+@pytest.mark.unit
+def test_mark_awaiting_collection_honors_custom_expiry_seconds(jobstore):
+    job = jobstore.enqueue(kind="youtube", title="t", payload="https://x/1")
+    jobstore.mark_awaiting_collection(job.job_id, error="bot check", expiry_seconds=3600)
+    got = jobstore.get(job.job_id)
+    deadline = datetime.fromisoformat(got.collection_deadline)
+    delta = (deadline - datetime.now(timezone.utc)).total_seconds()
+    assert 3500 < delta <= 3600
+
+
+@pytest.mark.unit
+def test_worker_parks_bot_check_refusal_as_awaiting_collection_not_failed(tmp_path):
+    db = tmp_path / "distil.db"
+    store = jobsmod.JobStore(db)
+    job = store.enqueue(kind="youtube", title="t", payload="https://x/1")
+
+    def fake_distill(job):
+        return {"status": "awaiting_collection", "error": "Sign in to confirm you're not a bot"}
+
+    finished = []
+    worker = jobsmod.Worker(db, fake_distill, on_finished=finished.append)
+    assert worker.process_once()
+    got = store.get(job.job_id)
+    assert got.status == jobsmod.STATUS_AWAITING_COLLECTION
+    assert got.collection_deadline is not None
+    assert finished == []  # not a successful terminal status — no staged-file cleanup fires
+
+
+@pytest.mark.unit
+def test_fetcher_parks_bot_check_refusal_as_awaiting_collection_not_failed(tmp_path):
+    db = tmp_path / "distil.db"
+    store = jobsmod.JobStore(db)
+    job = store.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_PENDING_FETCH,
+    )
+
+    def fake_fetch(job):
+        return {"status": "awaiting_collection", "error": "Sign in to confirm you're not a bot"}
+
+    fetcher = jobsmod.Fetcher(db, fake_fetch, sleep=lambda s: None)
+    assert fetcher.process_once()
+    assert store.get(job.job_id).status == jobsmod.STATUS_AWAITING_COLLECTION
+
+
+@pytest.mark.unit
+def test_distill_job_routes_bot_check_refusal_to_awaiting_collection(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
+    monkeypatch.setenv("DISTIL_KB_DIR", str(tmp_path / "kb"))
+    monkeypatch.setattr(webapp, "_make_client", lambda: object())
+    monkeypatch.setattr(webapp, "_cached_safe_embedder", lambda: None)
+
+    def boom(url, **kw):
+        raise YoutubeFetchError(
+            "yt-dlp failed: ERROR: [youtube] abc: Sign in to confirm you're not a bot"
+        )
+
+    monkeypatch.setattr(webapp.youtube, "fetch_video_transcript", boom)
+    job = jobsmod.JobStore(tmp_path / "distil.db").enqueue(
+        kind="youtube", title="t", payload="https://x/1"
+    )
+    result = webapp._distill_job(job)
+    assert result["status"] == "awaiting_collection"
+    assert "not a bot" in result["error"]
+
+
+@pytest.mark.unit
+def test_distill_job_still_fails_immediately_for_non_bot_check_youtube_errors(tmp_path, monkeypatch):
+    """A genuinely uncaptioned/private/missing video must not be parked — only a bot-check
+    refusal is worth waiting on."""
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
+    monkeypatch.setenv("DISTIL_KB_DIR", str(tmp_path / "kb"))
+    monkeypatch.setattr(webapp, "_make_client", lambda: object())
+    monkeypatch.setattr(webapp, "_cached_safe_embedder", lambda: None)
+
+    def boom(url, **kw):
+        raise YoutubeFetchError("No English captions available for this video.")
+
+    monkeypatch.setattr(webapp.youtube, "fetch_video_transcript", boom)
+    job = jobsmod.JobStore(tmp_path / "distil.db").enqueue(
+        kind="youtube", title="t", payload="https://x/1"
+    )
+    with pytest.raises(YoutubeFetchError, match="captions"):
+        webapp._distill_job(job)
+
+
+@pytest.mark.unit
+def test_fetch_playlist_video_routes_bot_check_refusal_to_awaiting_collection(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
+
+    def boom(url, **kw):
+        raise YoutubeFetchError("yt-dlp failed: ERROR: Sign in to confirm you're not a bot")
+
+    monkeypatch.setattr(webapp.youtube, "fetch_video_transcript", boom)
+    job = jobsmod.JobStore(tmp_path / "distil.db").enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_PENDING_FETCH,
+    )
+    result = webapp._fetch_playlist_video(job)
+    assert result["status"] == "awaiting_collection"
+
+
+@pytest.mark.unit
+def test_fetch_playlist_video_still_fails_immediately_for_no_captions(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
+
+    def boom(url, **kw):
+        raise YoutubeFetchError("No English captions available for this video.")
+
+    monkeypatch.setattr(webapp.youtube, "fetch_video_transcript", boom)
+    job = jobsmod.JobStore(tmp_path / "distil.db").enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_PENDING_FETCH,
+    )
+    result = webapp._fetch_playlist_video(job)
+    assert result["status"] == "failed"
+
+
+# ---- External-collector queue: leased claim/release, submit, report-unfetchable ----------
+
+
+@pytest.mark.unit
+def test_claim_for_collection_leases_and_marks_collecting(jobstore):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    claimed = jobstore.claim_for_collection(limit=5)
+    assert [j.job_id for j in claimed] == [job.job_id]
+    got = jobstore.get(job.job_id)
+    assert got.status == jobsmod.STATUS_COLLECTING
+    assert got.lease_expires_at is not None
+
+
+@pytest.mark.unit
+def test_claim_for_collection_ignores_jobs_in_other_states(jobstore):
+    jobstore.enqueue(kind="paste", title="t", payload="hello")  # ordinary queued job
+    jobstore.enqueue(kind="youtube", title="t2", payload="https://x/2")  # ordinary queued
+    assert jobstore.claim_for_collection(limit=5) == []
+
+
+@pytest.mark.unit
+def test_claim_for_collection_respects_limit(jobstore):
+    for i in range(3):
+        jobstore.enqueue(
+            kind="youtube", title=f"v{i}", payload=f"https://x/{i}",
+            status=jobsmod.STATUS_AWAITING_COLLECTION,
+        )
+    claimed = jobstore.claim_for_collection(limit=2)
+    assert len(claimed) == 2
+
+
+@pytest.mark.unit
+def test_claim_for_collection_never_hands_same_video_to_two_sequential_claims(jobstore):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    first = jobstore.claim_for_collection(limit=5)
+    second = jobstore.claim_for_collection(limit=5)
+    assert [j.job_id for j in first] == [job.job_id]
+    assert second == []
+
+
+@pytest.mark.unit
+def test_claim_for_collection_never_hands_same_video_to_two_concurrent_collectors(tmp_path):
+    """The core safety property, proved under real concurrent threads: N videos, M collector
+    threads each hitting their own JobStore connection against the same db file — every video is
+    claimed by exactly one collector, never zero, never two."""
+    db = tmp_path / "distil.db"
+    seed_store = jobsmod.JobStore(db)
+    job_ids = [
+        seed_store.enqueue(
+            kind="youtube", title=f"v{i}", payload=f"https://x/{i}",
+            status=jobsmod.STATUS_AWAITING_COLLECTION,
+        ).job_id
+        for i in range(20)
+    ]
+
+    results: list[list[str]] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(5)
+
+    def collector():
+        store = jobsmod.JobStore(db)  # a separate connection, simulating a separate process
+        barrier.wait()
+        claimed = [j.job_id for j in store.claim_for_collection(limit=20)]
+        with lock:
+            results.append(claimed)
+
+    threads = [threading.Thread(target=collector) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    all_claimed = [jid for r in results for jid in r]
+    assert sorted(all_claimed) == sorted(job_ids)  # every video claimed, exactly once total
+
+
+@pytest.mark.unit
+def test_expired_lease_returns_job_to_the_waiting_pool(jobstore):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    jobstore.claim_for_collection(limit=5)
+    assert jobstore.get(job.job_id).status == jobsmod.STATUS_COLLECTING
+
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    jobstore._conn.execute(
+        "UPDATE jobs SET lease_expires_at=? WHERE job_id=?", (past, job.job_id)
+    )
+    jobstore._conn.commit()
+
+    reclaimed = jobstore.claim_for_collection(limit=5)
+    assert [j.job_id for j in reclaimed] == [job.job_id]  # released, then re-leased
+
+
+@pytest.mark.unit
+def test_release_expired_leases_does_not_touch_an_unexpired_lease(jobstore):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    jobstore.claim_for_collection(limit=5, lease_seconds=600)
+    assert jobstore.release_expired_leases() == 0
+    assert jobstore.get(job.job_id).status == jobsmod.STATUS_COLLECTING
+
+
+@pytest.mark.unit
+def test_submit_collected_transcript_validates_and_queues(jobstore, tmp_path):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    jobstore.claim_for_collection(limit=5)
+    staged = tmp_path / f"{job.job_id}.json"
+    staged.write_text("{}", encoding="utf-8")
+    outcome = jobstore.submit_collected_transcript(job.job_id, staged_path=str(staged))
+    assert outcome == "accepted"
+    got = jobstore.get(job.job_id)
+    assert got.status == jobsmod.STATUS_QUEUED
+    assert got.kind == jobsmod.KIND_YOUTUBE_STAGED
+    assert got.payload == str(staged)
+    assert got.lease_expires_at is None
+    assert got.collection_deadline is None
+
+
+@pytest.mark.unit
+def test_submit_collected_transcript_rejects_when_not_leased(jobstore, tmp_path):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )  # waiting, but never claimed — no collector holds a lease on it
+    outcome = jobstore.submit_collected_transcript(job.job_id, staged_path="/x.json")
+    assert outcome == "not_leased"
+    assert jobstore.get(job.job_id).status == jobsmod.STATUS_AWAITING_COLLECTION  # untouched
+
+
+@pytest.mark.unit
+def test_submit_collected_transcript_treats_an_already_queued_job_as_submitted(jobstore):
+    """An ordinary (never-collected) youtube job is already ``queued`` — submitting against it
+    is indistinguishable from a duplicate collector submission, and the safe answer either way is
+    the same: it's already in the distill pipeline, so report success rather than erroring."""
+    job = jobstore.enqueue(kind="youtube", title="t", payload="https://x/1")
+    outcome = jobstore.submit_collected_transcript(job.job_id, staged_path="/x.json")
+    assert outcome == "already_submitted"
+    assert jobstore.get(job.job_id).status == jobsmod.STATUS_QUEUED  # untouched
+
+
+@pytest.mark.unit
+def test_submit_collected_transcript_not_found_for_unknown_job(jobstore):
+    assert jobstore.submit_collected_transcript("j_missing", staged_path="/x.json") == "not_found"
+
+
+@pytest.mark.unit
+def test_submit_collected_transcript_is_idempotent_on_retry(jobstore, tmp_path):
+    """A collector retrying after a lost HTTP response must see success again, not an error, and
+    must not corrupt state (double-queue, clobber a different job, etc.)."""
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    jobstore.claim_for_collection(limit=5)
+    staged = tmp_path / f"{job.job_id}.json"
+    staged.write_text("{}", encoding="utf-8")
+    first = jobstore.submit_collected_transcript(job.job_id, staged_path=str(staged))
+    assert first == "accepted"
+    second = jobstore.submit_collected_transcript(job.job_id, staged_path=str(staged))
+    assert second == "already_submitted"
+    got = jobstore.get(job.job_id)
+    assert got.status == jobsmod.STATUS_QUEUED  # still exactly one queued job, not corrupted
+
+
+@pytest.mark.unit
+def test_report_uncollectable_marks_failed(jobstore):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    jobstore.claim_for_collection(limit=5)
+    ok = jobstore.report_uncollectable(job.job_id, error="private video")
+    assert ok is True
+    got = jobstore.get(job.job_id)
+    assert got.status == jobsmod.STATUS_FAILED
+    assert got.error == "private video"
+
+
+@pytest.mark.unit
+def test_report_uncollectable_rejects_when_not_leased(jobstore):
+    job = jobstore.enqueue(kind="youtube", title="t", payload="https://x/1")  # ordinary queued
+    assert jobstore.report_uncollectable(job.job_id, error="private video") is False
+    assert jobstore.get(job.job_id).status == jobsmod.STATUS_QUEUED
+
+
+@pytest.mark.unit
+def test_report_uncollectable_is_idempotent_on_retry(jobstore):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    jobstore.claim_for_collection(limit=5)
+    assert jobstore.report_uncollectable(job.job_id, error="private video") is True
+    assert jobstore.report_uncollectable(job.job_id, error="private video") is True  # retry, no error
+
+
+# ---- External-collector queue: 7-day expiry with cleanup ----------------------------------
+
+
+@pytest.mark.unit
+def test_awaiting_collection_expires_after_seven_days(jobstore):
+    job = jobstore.enqueue(kind="youtube", title="t", payload="https://x/1")
+    jobstore.mark_awaiting_collection(job.job_id, error="Sign in to confirm you're not a bot")
+    stale_deadline = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    jobstore._conn.execute(
+        "UPDATE jobs SET collection_deadline=? WHERE job_id=?", (stale_deadline, job.job_id)
+    )
+    jobstore._conn.commit()
+
+    expired = jobstore.expire_stale_awaiting_collection()
+    assert expired == 1
+    got = jobstore.get(job.job_id)
+    assert got.status == jobsmod.STATUS_FAILED
+    assert "7 days" in got.error
+    # No staged file was ever created for a job still in this lifecycle — kind is untouched, so
+    # there is nothing for _staged_path_for_job to find and nothing to leak.
+    assert got.kind == "youtube"
+
+
+@pytest.mark.unit
+def test_awaiting_collection_not_expired_before_its_deadline(jobstore):
+    job = jobstore.enqueue(kind="youtube", title="t", payload="https://x/1")
+    jobstore.mark_awaiting_collection(job.job_id, error="bot check")
+    assert jobstore.expire_stale_awaiting_collection() == 0
+    assert jobstore.get(job.job_id).status == jobsmod.STATUS_AWAITING_COLLECTION
+
+
+@pytest.mark.unit
+def test_a_leased_but_stale_job_also_expires(jobstore):
+    """collection_deadline governs COLLECTING too — a collector holding a lease past the overall
+    7-day window must not keep the job alive forever."""
+    job = jobstore.enqueue(kind="youtube", title="t", payload="https://x/1")
+    jobstore.mark_awaiting_collection(job.job_id, error="bot check")
+    jobstore.claim_for_collection(limit=5)
+    assert jobstore.get(job.job_id).status == jobsmod.STATUS_COLLECTING
+    stale_deadline = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    jobstore._conn.execute(
+        "UPDATE jobs SET collection_deadline=? WHERE job_id=?", (stale_deadline, job.job_id)
+    )
+    jobstore._conn.commit()
+    assert jobstore.expire_stale_awaiting_collection() == 1
+    assert jobstore.get(job.job_id).status == jobsmod.STATUS_FAILED
+
+
+@pytest.mark.unit
+def test_lease_release_never_resets_the_collection_deadline(jobstore):
+    """The 7-day clock is set once on first entry into awaiting_collection and must survive any
+    number of lease claims/releases — otherwise a churn of short-lived collector attempts could
+    keep a video waiting indefinitely."""
+    job = jobstore.enqueue(kind="youtube", title="t", payload="https://x/1")
+    jobstore.mark_awaiting_collection(job.job_id, error="bot check", expiry_seconds=100)
+    original_deadline = jobstore.get(job.job_id).collection_deadline
+
+    jobstore.claim_for_collection(limit=5, lease_seconds=1)
+    past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    jobstore._conn.execute(
+        "UPDATE jobs SET lease_expires_at=? WHERE job_id=?", (past, job.job_id)
+    )
+    jobstore._conn.commit()
+    jobstore.release_expired_leases()
+
+    assert jobstore.get(job.job_id).status == jobsmod.STATUS_AWAITING_COLLECTION
+    assert jobstore.get(job.job_id).collection_deadline == original_deadline
+
+
+@pytest.mark.unit
+def test_list_active_sweeps_expired_leases_and_stale_waits(jobstore):
+    """The Activity poll (WEB_UI_SPEC) already calls list_active() every ~2s — this is what
+    keeps the collector queue bounded with no collector background thread at all."""
+    leased = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    jobstore.claim_for_collection(limit=5)
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    jobstore._conn.execute(
+        "UPDATE jobs SET lease_expires_at=? WHERE job_id=?", (past, leased.job_id)
+    )
+    jobstore._conn.commit()
+
+    stale = jobstore.enqueue(kind="youtube", title="t2", payload="https://x/2")
+    jobstore.mark_awaiting_collection(stale.job_id, error="bot check")
+    stale_deadline = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    jobstore._conn.execute(
+        "UPDATE jobs SET collection_deadline=? WHERE job_id=?", (stale_deadline, stale.job_id)
+    )
+    jobstore._conn.commit()
+
+    jobstore.list_active()
+    assert jobstore.get(leased.job_id).status == jobsmod.STATUS_AWAITING_COLLECTION
+    assert jobstore.get(stale.job_id).status == jobsmod.STATUS_FAILED
