@@ -1428,6 +1428,10 @@ def test_awaiting_collection_expires_after_seven_days(jobstore):
     got = jobstore.get(job.job_id)
     assert got.status == jobsmod.STATUS_FAILED
     assert "7 days" in got.error
+    # The expiry must explain itself in owner terms, not turn into a bare "failed" — it names
+    # both why (YouTube's refusal) and what happened (nobody collected it in time).
+    assert "YouTube" in got.error
+    assert "collect" in got.error.lower()
     # No staged file was ever created for a job still in this lifecycle — kind is untouched, so
     # there is nothing for _staged_path_for_job to find and nothing to leak.
     assert got.kind == "youtube"
@@ -1504,3 +1508,284 @@ def test_list_active_sweeps_expired_leases_and_stale_waits(jobstore):
     jobstore.list_active()
     assert jobstore.get(leased.job_id).status == jobsmod.STATUS_AWAITING_COLLECTION
     assert jobstore.get(stale.job_id).status == jobsmod.STATUS_FAILED
+
+
+# ---- Waiting-state presentation (Helper 3): checkin signal + removability ----------------
+
+
+@pytest.mark.unit
+def test_last_collector_checkin_is_none_until_recorded(jobstore):
+    """The honest "nothing has ever come for this" case: a fresh database has no checkin at
+    all, which the Activity view must be able to tell apart from a stale/absent one."""
+    assert jobstore.last_collector_checkin() is None
+    jobstore.record_collector_checkin()
+    checkin = jobstore.last_collector_checkin()
+    assert checkin is not None
+    assert (datetime.now(timezone.utc) - datetime.fromisoformat(checkin)).total_seconds() < 5
+
+
+@pytest.mark.unit
+def test_record_collector_checkin_overwrites_the_previous_one(jobstore):
+    jobstore.record_collector_checkin()
+    first = jobstore.last_collector_checkin()
+    later = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    jobstore._conn.execute(
+        "UPDATE collector_meta SET value=? WHERE key='last_checkin'", (later,)
+    )
+    jobstore._conn.commit()
+    jobstore.record_collector_checkin()
+    assert jobstore.last_collector_checkin() != later
+    assert jobstore.last_collector_checkin() is not None
+    assert first is not None
+
+
+@pytest.mark.unit
+def test_remove_allowed_while_awaiting_collection(jobstore):
+    """A parked, waiting-for-collector video must be giveupable exactly like a queued one
+    (Required work item 4) — never stranded because it moved to a third lifecycle."""
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1",
+        status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    assert jobstore.remove_queued(job.job_id) is True
+    assert jobstore.get(job.job_id).status == jobsmod.STATUS_REMOVED
+
+
+@pytest.mark.unit
+def test_remove_not_allowed_while_actively_collecting(jobstore):
+    """Unlike AWAITING_COLLECTION, COLLECTING has a lease a collector may be mid-fetch against —
+    removing it would orphan that in-flight work, so it's excluded like RUNNING/FETCHING are."""
+    jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1",
+        status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    [claimed] = jobstore.claim_for_collection(limit=1)
+    assert jobstore.remove_queued(claimed.job_id) is False
+    assert jobstore.get(claimed.job_id).status == jobsmod.STATUS_COLLECTING
+
+
+@pytest.fixture
+def collector_client(tmp_path, monkeypatch):
+    """Same shape as the ``client`` fixture above, plus a configured collector credential — for
+    tests that exercise ``/collector/*`` routes rather than just the JSON they leave behind."""
+    from fastapi.testclient import TestClient
+
+    from distil.models import Profile
+    from distil.store import Store
+    from web.app import create_app
+
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
+    monkeypatch.setenv("DISTIL_KB_DIR", str(tmp_path / "kb"))
+    monkeypatch.setenv("DISTIL_MODEL", "test")
+    monkeypatch.setenv("DISTIL_PUBLIC", "false")
+    monkeypatch.setenv("DISTIL_COLLECTOR_TOKEN", "collector-secret")
+    Store(db_path=tmp_path / "distil.db", kb_dir=tmp_path / "kb").save_profile(
+        Profile(user_id="owner")
+    )
+    return TestClient(create_app())
+
+
+@pytest.mark.unit
+def test_collector_claim_records_a_checkin_even_with_nothing_to_claim(collector_client, tmp_path):
+    """A collector polling with nothing to do still proves it's alive — that's the whole point
+    of using this as the "is anything coming" signal rather than only recording it on a claim
+    that actually finds work."""
+    store = jobsmod.JobStore(tmp_path / "distil.db")
+    assert store.last_collector_checkin() is None
+
+    r = collector_client.post(
+        "/collector/jobs/claim", headers={"Authorization": "Bearer collector-secret"}
+    )
+    assert r.status_code == 200
+    assert r.json()["jobs"] == []
+    checkin = store.last_collector_checkin()
+    assert checkin is not None
+    assert (datetime.now(timezone.utc) - datetime.fromisoformat(checkin)).total_seconds() < 5
+
+
+@pytest.mark.unit
+def test_jobs_endpoint_reports_no_collector_seen_when_none_ever_checked_in(client, tmp_path):
+    store = jobsmod.JobStore(tmp_path / "distil.db")
+    job = store.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    jobs = client.get("/jobs", headers={"accept": "application/json"}).json()
+    row = next(j for j in jobs if j["job_id"] == job.job_id)
+    # Plainly none, not a stale/old timestamp that could be misread as "something is coming".
+    assert row["collector_last_seen"] is None
+
+
+@pytest.mark.unit
+def test_jobs_endpoint_reports_a_recent_collector_checkin(client, tmp_path):
+    store = jobsmod.JobStore(tmp_path / "distil.db")
+    job = store.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    store.record_collector_checkin()
+    jobs = client.get("/jobs", headers={"accept": "application/json"}).json()
+    row = next(j for j in jobs if j["job_id"] == job.job_id)
+    assert row["collector_last_seen"] is not None
+    age = (datetime.now(timezone.utc) - datetime.fromisoformat(row["collector_last_seen"]))
+    assert age.total_seconds() < 5
+
+
+@pytest.mark.unit
+def test_awaiting_collection_job_removable_through_the_route(client, tmp_path):
+    store = jobsmod.JobStore(tmp_path / "distil.db")
+    job = store.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    r = client.post(f"/jobs/{job.job_id}/remove")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert store.get(job.job_id).status == jobsmod.STATUS_REMOVED
+
+
+@pytest.mark.unit
+def test_collecting_job_not_removable_through_the_route(client, tmp_path):
+    store = jobsmod.JobStore(tmp_path / "distil.db")
+    store.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    [claimed] = store.claim_for_collection(limit=1)
+    r = client.post(f"/jobs/{claimed.job_id}/remove")
+    assert r.status_code == 409
+    assert store.get(claimed.job_id).status == jobsmod.STATUS_COLLECTING
+
+
+@pytest.mark.unit
+def test_status_presentation_gives_every_activity_status_its_own_distinct_badge():
+    """Each status the Activity view actually shows (WEB_UI_SPEC §6) must map to its own
+    badge/label, never silently falling through to the generic "Unknown" default — that's what
+    happened to awaiting_collection/collecting before this phase."""
+    statuses = [
+        jobsmod.STATUS_QUEUED, jobsmod.STATUS_RUNNING, jobsmod.STATUS_PENDING_FETCH,
+        jobsmod.STATUS_FETCHING, jobsmod.STATUS_AWAITING_COLLECTION, jobsmod.STATUS_COLLECTING,
+        jobsmod.STATUS_DONE, jobsmod.STATUS_LOW_VALUE, jobsmod.STATUS_FAILED,
+    ]
+    presentations = [jobsmod.status_presentation(s) for s in statuses]
+    labels = [p["badge_text"] for p in presentations]
+    assert "Unknown" not in labels
+    assert len(set(labels)) == len(labels)  # every status reads distinctly
+
+
+@pytest.mark.unit
+def test_status_presentation_keeps_waiting_states_live_and_distinct_from_queued_running_failed():
+    waiting = jobsmod.status_presentation(jobsmod.STATUS_AWAITING_COLLECTION)
+    collecting = jobsmod.status_presentation(jobsmod.STATUS_COLLECTING)
+    queued = jobsmod.status_presentation(jobsmod.STATUS_QUEUED)
+    running = jobsmod.status_presentation(jobsmod.STATUS_RUNNING)
+    failed = jobsmod.status_presentation(jobsmod.STATUS_FAILED)
+    assert waiting["live"] is True
+    assert collecting["live"] is True
+    assert failed["live"] is False
+    for other in (queued, running, failed):
+        assert waiting["badge_text"] != other["badge_text"]
+        assert collecting["badge_text"] != other["badge_text"]
+
+
+@pytest.mark.unit
+def test_status_presentation_unknown_status_falls_back_honestly():
+    p = jobsmod.status_presentation("some_future_status_nobody_wired_yet")
+    assert p["badge_text"] == "Unknown"
+    assert p["live"] is False
+
+
+@pytest.mark.unit
+def test_collector_status_reports_nothing_coming_when_never_checked_in(jobstore):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1",
+        status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    status = jobsmod.collector_status_for_job(jobstore.get(job.job_id), None)
+    assert status["seen_recently"] is False
+    assert "Nothing is currently collecting" in status["checkin_message"]
+    assert "checked in" not in status["checkin_message"]
+
+
+@pytest.mark.unit
+def test_collector_status_reports_seen_when_checkin_is_recent(jobstore):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1",
+        status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    now = datetime.now(timezone.utc)
+    recent = (now - timedelta(seconds=30)).isoformat()
+    status = jobsmod.collector_status_for_job(jobstore.get(job.job_id), recent, now=now)
+    assert status["seen_recently"] is True
+    assert "checked in" in status["checkin_message"]
+    assert "Nothing is currently collecting" not in status["checkin_message"]
+
+
+@pytest.mark.unit
+def test_collector_status_does_not_claim_a_collector_is_coming_when_checkin_is_stale(jobstore):
+    """A checkin that happened once, long ago, must not read as "seen" just because a timestamp
+    exists somewhere in the past — this is the exact honesty gap the checkin signal exists to
+    close (WEB_UI_SPEC required work item 3)."""
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1",
+        status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    now = datetime.now(timezone.utc)
+    stale = (now - timedelta(hours=6)).isoformat()
+    status = jobsmod.collector_status_for_job(jobstore.get(job.job_id), stale, now=now)
+    assert status["seen_recently"] is False
+    assert "Nothing is currently collecting" in status["checkin_message"]
+    assert "last seen" in status["checkin_message"]
+
+
+@pytest.mark.unit
+def test_collector_status_marks_awaiting_collection_removable_but_not_collecting(jobstore):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1",
+        status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    waiting_status = jobsmod.collector_status_for_job(jobstore.get(job.job_id), None)
+    assert waiting_status["removable"] is True
+    assert waiting_status["active_message"] is None
+
+    [claimed] = jobstore.claim_for_collection(limit=1)
+    collecting_status = jobsmod.collector_status_for_job(claimed, None)
+    assert collecting_status["removable"] is False
+    assert collecting_status["active_message"] is not None
+
+
+@pytest.mark.unit
+def test_collector_status_deadline_message_reflects_time_remaining_and_expiry(jobstore):
+    job = jobstore.enqueue(
+        kind="youtube", title="t", payload="https://x/1",
+        status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    now = datetime.now(timezone.utc)
+    jobstore.mark_awaiting_collection(job.job_id, error="bot check", expiry_seconds=86400)
+    status = jobsmod.collector_status_for_job(jobstore.get(job.job_id), None, now=now)
+    assert "Gives up in" in status["deadline_message"]
+
+    job_row = jobstore.get(job.job_id)
+    job_row.collection_deadline = (now - timedelta(seconds=1)).isoformat()
+    expired_status = jobsmod.collector_status_for_job(job_row, None, now=now)
+    assert "Past its collection deadline" in expired_status["deadline_message"]
+
+
+@pytest.mark.unit
+def test_jobs_endpoint_attaches_presentation_and_collector_status_for_waiting_job(client, tmp_path):
+    store = jobsmod.JobStore(tmp_path / "distil.db")
+    job = store.enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    jobs = client.get("/jobs", headers={"accept": "application/json"}).json()
+    row = next(j for j in jobs if j["job_id"] == job.job_id)
+    assert row["presentation"]["badge_text"] == "Waiting for collector"
+    assert row["presentation"]["live"] is True
+    assert row["collector_status"]["removable"] is True
+    assert "Nothing is currently collecting" in row["collector_status"]["checkin_message"]
+
+
+@pytest.mark.unit
+def test_jobs_endpoint_omits_collector_status_for_non_parked_jobs(client, tmp_path):
+    store = jobsmod.JobStore(tmp_path / "distil.db")
+    job = store.enqueue(kind="paste", title="t", payload="hello")
+    jobs = client.get("/jobs", headers={"accept": "application/json"}).json()
+    row = next(j for j in jobs if j["job_id"] == job.job_id)
+    assert row["collector_status"] is None
+    assert row["presentation"]["badge_text"] == "Queued"

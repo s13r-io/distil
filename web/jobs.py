@@ -183,6 +183,11 @@ class JobStore:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN collection_deadline TEXT")
         if "collected_at" not in cols:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN collected_at TEXT")
+        # One-row key/value table for signals that aren't about any single job — currently just
+        # "when did a collector last contact us at all", independent of whether it found work.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS collector_meta (key TEXT PRIMARY KEY, value TEXT)"
+        )
         self._conn.commit()
 
     def _row(self, r: sqlite3.Row) -> Job:
@@ -363,10 +368,15 @@ class JobStore:
         self._conn.commit()
 
     def remove_queued(self, job_id: str) -> bool:
-        """Remove a job from the queue — only legal while still waiting in line, either queued
-        for distill or (Phase E) queued for its up-front fetch (WEB_UI_SPEC §6)."""
+        """Remove a job from the queue — only legal while still waiting in line: queued for
+        distill, (Phase E) queued for its up-front fetch, or parked waiting for an external
+        collector (WEB_UI_SPEC §6). Not legal while ``COLLECTING`` — a collector may already be
+        mid-fetch for it, so there's real in-flight work elsewhere not to orphan; it naturally
+        becomes removable again if that lease expires and it falls back to AWAITING_COLLECTION."""
         r = self._conn.execute("SELECT status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
-        if not r or r["status"] not in (STATUS_QUEUED, STATUS_PENDING_FETCH):
+        if not r or r["status"] not in (
+            STATUS_QUEUED, STATUS_PENDING_FETCH, STATUS_AWAITING_COLLECTION,
+        ):
             return False
         self._set_status(job_id, STATUS_REMOVED)
         return True
@@ -447,6 +457,26 @@ class JobStore:
         return cur1.rowcount + cur2.rowcount
 
     # ---- External-collector queue (bot-check refusals only) ----------------------------
+
+    def record_collector_checkin(self) -> None:
+        """Record that a collector process contacted us just now. Called on every authenticated
+        ``/collector/jobs/claim`` request, whether or not it actually found a job to lease — an
+        empty claim still proves the collector is alive and polling, which is exactly the signal
+        the Activity view needs to tell "waiting, and something is coming" apart from "waiting,
+        and nothing is" for a parked video."""
+        self._conn.execute(
+            "INSERT INTO collector_meta (key, value) VALUES ('last_checkin', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (_now(),),
+        )
+        self._conn.commit()
+
+    def last_collector_checkin(self) -> str | None:
+        """``None`` if no collector has ever checked in since this database existed."""
+        r = self._conn.execute(
+            "SELECT value FROM collector_meta WHERE key='last_checkin'"
+        ).fetchone()
+        return r["value"] if r else None
 
     def mark_awaiting_collection(
         self, job_id: str, *, error: str, expiry_seconds: float = _DEFAULT_COLLECTOR_EXPIRY_SECONDS,
@@ -549,8 +579,8 @@ class JobStore:
                 "WHERE job_id=?",
                 (
                     STATUS_FAILED,
-                    "Nobody collected this video within 7 days; it will not be retried "
-                    "automatically.",
+                    "YouTube blocked this fetch and nobody collected it within 7 days, so it "
+                    "expired. It will not be retried automatically.",
                     _now(),
                     job_id,
                 ),
@@ -628,6 +658,115 @@ class JobStore:
             r2 = self._conn.execute("SELECT status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
             return bool(r2) and r2["status"] == STATUS_FAILED
         return True
+
+
+# A collector polls every ~30s even when there's nothing to claim (that's the honest liveness
+# signal - see JobStore.record_collector_checkin). Anything older than this is treated the same
+# as "never checked in": stale enough that nothing should be assumed to be coming.
+COLLECTOR_STALE_SECONDS = 5 * 60.0
+
+
+def _format_duration(seconds: float) -> str:
+    """One duration-formatting rule for the whole Activity view (deadlines, checkin age) so
+    every duration reads consistently - kept in Python (not client-side JS) so it's unit-testable
+    and can't drift from the decision that produced the seconds value in the first place."""
+    seconds = max(0, round(seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m"
+    return f"{secs}s"
+
+
+def seconds_until(deadline_iso: str | None, *, now: datetime | None = None) -> float | None:
+    """``None`` if there's no deadline at all; otherwise how many seconds remain (negative once
+    past). Used for both the collector 7-day ``collection_deadline`` and, indirectly, the
+    checkin-age math below."""
+    if not deadline_iso:
+        return None
+    try:
+        deadline = datetime.fromisoformat(deadline_iso)
+    except ValueError:
+        return None
+    return (deadline - (now or datetime.now(timezone.utc))).total_seconds()
+
+
+def collector_status_for_job(
+    job: Job, last_checkin_iso: str | None, *, now: datetime | None = None,
+) -> dict:
+    """The owner-facing explanation of why a parked (AWAITING_COLLECTION/COLLECTING) job is
+    waiting, and - the part most worth getting right - whether anything is actually coming for
+    it. Computed here, server-side, so the decision ("recently seen" vs "effectively absent") and
+    the wording it produces are both directly unit-testable, rather than re-derived from a raw
+    timestamp diff in client-side JS where nothing in this suite could ever exercise it."""
+    now = now or datetime.now(timezone.utc)
+    seconds_since_checkin: float | None = None
+    if last_checkin_iso:
+        try:
+            seconds_since_checkin = (now - datetime.fromisoformat(last_checkin_iso)).total_seconds()
+        except ValueError:
+            seconds_since_checkin = None
+    seen_recently = (
+        seconds_since_checkin is not None and seconds_since_checkin <= COLLECTOR_STALE_SECONDS
+    )
+    if seen_recently:
+        checkin_message = f"A collector checked in {_format_duration(seconds_since_checkin)} ago."
+    elif seconds_since_checkin is not None:
+        checkin_message = (
+            "Nothing is currently collecting (last seen "
+            f"{_format_duration(seconds_since_checkin)} ago) - start the collector, or this "
+            "video will expire."
+        )
+    else:
+        checkin_message = (
+            "Nothing is currently collecting - start the collector, or this video will expire."
+        )
+    active_message = (
+        "It has been picked up and is being fetched right now."
+        if job.status == STATUS_COLLECTING else None
+    )
+    deadline_left = seconds_until(job.collection_deadline, now=now)
+    if deadline_left is None:
+        deadline_message = None
+    elif deadline_left > 0:
+        deadline_message = f"Gives up in {_format_duration(deadline_left)} if still uncollected."
+    else:
+        deadline_message = "Past its collection deadline; it will be marked failed shortly."
+    return {
+        "seen_recently": seen_recently,
+        "checkin_message": checkin_message,
+        "active_message": active_message,
+        "deadline_message": deadline_message,
+        "removable": job.status == STATUS_AWAITING_COLLECTION,
+    }
+
+
+# status -> (badge_class, badge_text, spinner, live-poll). The one place this mapping lives, so
+# a status can never silently fall through to an unstyled "Unknown" badge without that being
+# provably checkable per-status in tests (see AGENTS.md's Helper 3 entry).
+_STATUS_PRESENTATION: dict[str, tuple[str, str, bool, bool]] = {
+    STATUS_QUEUED: ("", "Queued", False, True),
+    STATUS_RUNNING: ("info", "Distilling", True, True),
+    STATUS_PENDING_FETCH: ("", "Waiting to fetch", False, True),
+    STATUS_FETCHING: ("info", "Fetching", True, True),
+    STATUS_AWAITING_COLLECTION: ("warn", "Waiting for collector", False, True),
+    STATUS_COLLECTING: ("warn", "Being collected", True, True),
+    STATUS_DONE: ("ok", "Done", False, False),
+    STATUS_LOW_VALUE: ("warn", "Low-value", False, False),
+    STATUS_FAILED: ("danger", "Failed", False, False),
+}
+
+
+def status_presentation(status: str) -> dict:
+    """Which badge (class/text/spinner) a job's status renders as in the Activity view, and
+    whether that status should keep the view live-polling."""
+    cls, text, spinner, live = _STATUS_PRESENTATION.get(status, ("", "Unknown", False, False))
+    return {"badge_class": cls, "badge_text": text, "spinner": spinner, "live": live}
 
 
 class Worker:
