@@ -108,6 +108,13 @@ DISTIL_PUBLIC=false
 > Get one free at https://huggingface.co/settings/tokens (read-only scope is enough).
 > This is cosmetic only — the local embedder works fine without it.
 
+> **Changing a stage's model later without a redeploy:** `DISTIL_MODEL`/`DISTIL_MODEL_<STAGE>`
+> above are the *baseline* — once the app is running (locally or on Railway), the `/settings`
+> page in the web UI lets you override any one stage's model, stored durably beside the
+> database (survives a restart), applying starting with the next video. A stored setting there
+> beats the env var, which beats the built-in default; clearing it in one click reverts to
+> whichever of those two is next in line. Never touches `ANTHROPIC_API_KEY`.
+
 Load the variables into your current terminal session (so the `distil` command can read them):
 
 ```

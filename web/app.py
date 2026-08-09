@@ -32,7 +32,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from distil import okf, youtube
+from distil import model_config, model_settings, okf, youtube
 from distil.canonicalize import run_delete_entry_stage
 from distil.cli import (
     _make_canonicalize_client,
@@ -168,6 +168,27 @@ def _humanize_tag(tag: str) -> str:
 
 
 _TEMPLATES.env.filters["humanize_tag"] = _humanize_tag
+
+
+def _model_settings_rows() -> list[dict]:
+    """One row per model-calling stage for the ``/settings`` page — reshapes
+    :func:`distil.model_config.resolve_stage_model_info` into plain dicts a Jinja template and
+    the JSON routes below both render from, so the resolution logic (precedence, source
+    labeling, the faithfulness warning) lives exactly once, in ``model_config.py``."""
+    rows = []
+    for stage in model_config.ALL_STAGES:
+        info = model_config.resolve_stage_model_info(stage)
+        rows.append({
+            "stage": stage,
+            "model": info.model,
+            "source": info.source,
+            "env_var": info.env_var,
+            "active_env_var": info.active_env_var,
+            "faithfulness_warning": info.faithfulness_warning,
+            "has_stored_override": info.source == model_config.SOURCE_STORED,
+        })
+    return rows
+
 
 # Human-readable labels for progress display (web/templates/index.html); order here has no
 # effect on the declared phase plan, which _build_phase_plan computes per job.
@@ -895,6 +916,45 @@ def create_app() -> FastAPI:
             request, "entity.html",
             {**_entity_detail_context(store, entity), "active_page": "entities"},
         )
+
+    # ---- model settings (owner-configurable, no redeploy) ----
+    @app.get("/settings", response_class=HTMLResponse)
+    def settings_page(request: Request):
+        return _TEMPLATES.TemplateResponse(
+            request, "settings.html",
+            {"stages": _model_settings_rows(), "active_page": "settings"},
+        )
+
+    @app.get("/settings/models")
+    def settings_models_json():
+        return {"stages": _model_settings_rows()}
+
+    @app.post("/settings/models/{stage}")
+    def settings_set_model(stage: str, model: str = Form(...)):
+        if stage not in model_config.ALL_STAGES:
+            return JSONResponse({"detail": f"Unknown stage '{stage}'."}, status_code=404)
+        try:
+            model_settings.ModelSettingsStore().set(stage, model)
+        except model_settings.UnknownModelError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        info = model_config.resolve_stage_model_info(stage)
+        return {
+            "ok": True, "stage": stage, "model": info.model, "source": info.source,
+            "faithfulness_warning": info.faithfulness_warning,
+        }
+
+    @app.post("/settings/models/{stage}/clear")
+    def settings_clear_model(stage: str):
+        """Reverts the stage to whatever DISTIL_MODEL_<STAGE>/the tier default resolves to —
+        the one-click revert path. A no-op, not an error, when nothing was stored."""
+        if stage not in model_config.ALL_STAGES:
+            return JSONResponse({"detail": f"Unknown stage '{stage}'."}, status_code=404)
+        model_settings.ModelSettingsStore().clear(stage)
+        info = model_config.resolve_stage_model_info(stage)
+        return {
+            "ok": True, "stage": stage, "model": info.model, "source": info.source,
+            "faithfulness_warning": info.faithfulness_warning,
+        }
 
     # ---- ingest (non-blocking) ----
     @app.post("/ingest")
