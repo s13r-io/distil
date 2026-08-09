@@ -15,8 +15,8 @@ the score plus a reason refines your profile, so it gets more personally useful 
 
 ```
 transcript + your profile
-  → triage (what kind of knowledge? how lossy? worth it?)
-  → extract (routed by type, provenance-anchored)
+  → ingest (rejects only if under ~50 words — your editorial judgment is otherwise trusted)
+  → triage (what kind of knowledge? how lossy?) + extract (routed by type, provenance-anchored)
   → normalize (atomic, faithful, stance-preserving)
   → link (application ideas tied to YOUR goals)
   → synthesize (teaching note grounded in verified items)
