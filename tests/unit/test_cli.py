@@ -54,10 +54,6 @@ _NOTE = json.dumps({
 _CANON_REJECT = json.dumps([{"item_id": "k_01", "decision": "reject"}])
 
 
-def _merged(triage_json: str, items_json: str) -> str:
-    return f"<TRIAGE>\n{triage_json}\n</TRIAGE>\n<ITEMS>\n{items_json}\n</ITEMS>"
-
-
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
@@ -75,13 +71,14 @@ def env(tmp_path, monkeypatch):
 
 
 def _fake(monkeypatch, responses):
-    # A single shared FakeClient stands in for every stage (extract/link/note/graph/
-    # canonicalize) — each stage now has its own client-construction seam (_make_extract_client,
-    # _make_link_client, etc.) so DISTIL_MODEL_<STAGE> genuinely takes effect in production, but
-    # tests still want one client consuming the canned responses in order, exactly as before
+    # A single shared FakeClient stands in for every stage (triage/extract/link/note/graph/
+    # canonicalize) — each stage now has its own client-construction seam (_make_triage_client,
+    # _make_extract_client, etc.) so DISTIL_MODEL_<STAGE> genuinely takes effect in production,
+    # but tests still want one client consuming the canned responses in order, exactly as before
     # that split.
     fake = FakeClient(responses=responses)
     monkeypatch.setattr(cli, "_make_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_triage_client", lambda: fake)
     monkeypatch.setattr(cli, "_make_extract_client", lambda: fake)
     monkeypatch.setattr(cli, "_make_link_client", lambda: fake)
     monkeypatch.setattr(cli, "_make_note_client", lambda: fake)
@@ -94,7 +91,7 @@ def _fake(monkeypatch, responses):
 
 @pytest.mark.unit
 def test_c1_run_file_exits_zero_and_prints_path(env, monkeypatch, tmp_path):
-    _fake(monkeypatch, [_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE, _CANON_REJECT])
+    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
     monkeypatch.setattr(
         cli,
         "fetch_youtube_oembed_metadata",
@@ -129,7 +126,7 @@ def test_c1_run_file_exits_zero_and_prints_path(env, monkeypatch, tmp_path):
 
 @pytest.mark.unit
 def test_c1_run_paste_via_option(env, monkeypatch):
-    _fake(monkeypatch, [_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE, _CANON_REJECT])
+    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
     result = runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
     assert result.exit_code == 0, result.output
     assert ".md" in result.output
@@ -140,7 +137,7 @@ def test_c1_low_value_verdict_still_files_the_entry(env, monkeypatch):
     """The owner's decision to run this transcript overrides the model's verdict — triage
     still classifies it little_to_extract, but that never stops filing (owner decision;
     see distil/pipeline.py's module docstring)."""
-    _fake(monkeypatch, [_merged(_TRIAGE_LOW, _EXTRACT), _LINK, _NOTE, _CANON_REJECT])
+    _fake(monkeypatch, [_TRIAGE_LOW, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
     result = runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
     assert result.exit_code == 0, result.output
     assert ".md" in result.output
@@ -163,7 +160,7 @@ def test_c1_short_paste_is_rejected_clearly(env, monkeypatch):
 
 @pytest.mark.unit
 def test_c2_score_mutates_profile(env, monkeypatch):
-    _fake(monkeypatch, [_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE, _CANON_REJECT])
+    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
     run = runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
     entry_id = run.output.strip().split("/")[-1].replace(".md", "").strip()
 
@@ -179,7 +176,7 @@ def test_c2_score_mutates_profile(env, monkeypatch):
 
 @pytest.mark.unit
 def test_c3_list_and_show(env, monkeypatch):
-    _fake(monkeypatch, [_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE, _CANON_REJECT])
+    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
     run = runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
     entry_id = run.output.strip().split("/")[-1].replace(".md", "").strip()
 
@@ -240,6 +237,8 @@ def test_c3_run_bad_url_is_friendly(env, monkeypatch):
 # every stage's client-construction seam (_make_link_client, _make_note_client, etc.) routed
 # through model_config.make_stage_client, cli.py/web/app.py still shared one _make_client()
 # object across link/note/graph/canonicalize — the env var was inert for those four stages.
+# triage/link/note default to the cheap tier now (model_config.py's module docstring); extract/
+# graph/canonicalize stay on DISTIL_MODEL.
 
 
 @pytest.mark.unit
@@ -247,14 +246,12 @@ def test_c3_run_bad_url_is_friendly(env, monkeypatch):
     "make_fn_name,stage",
     [
         ("_make_extract_client", "extract"),
-        ("_make_link_client", "link"),
-        ("_make_note_client", "note"),
         ("_make_graph_client", "graph"),
         ("_make_canonicalize_client", "canonicalize"),
     ],
 )
 def test_per_stage_client_defaults_to_distil_model(env, monkeypatch, make_fn_name, stage):
-    """Byte-for-byte behavior preservation: with no per-stage override, every one of these
+    """Byte-for-byte behavior preservation: with no per-stage override, every strong-tier stage
     still resolves to DISTIL_MODEL, exactly as before this wiring existed."""
     make_fn = getattr(cli, make_fn_name)
     assert make_fn().model == "test-model"  # env fixture sets DISTIL_MODEL=test-model
@@ -264,6 +261,24 @@ def test_per_stage_client_defaults_to_distil_model(env, monkeypatch, make_fn_nam
 @pytest.mark.parametrize(
     "make_fn_name,stage",
     [
+        ("_make_triage_client", "triage"),
+        ("_make_link_client", "link"),
+        ("_make_note_client", "note"),
+    ],
+)
+def test_cheap_tier_stage_client_ignores_distil_model_by_default(env, monkeypatch, make_fn_name, stage):
+    """triage/link/note default to the cheap tier (model_config.py's module docstring) — they
+    must NOT silently follow DISTIL_MODEL the way the strong-tier stages do."""
+    from distil.model_config import DEFAULT_CHEAP_TIER_MODEL
+    make_fn = getattr(cli, make_fn_name)
+    assert make_fn().model == DEFAULT_CHEAP_TIER_MODEL
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "make_fn_name,stage",
+    [
+        ("_make_triage_client", "TRIAGE"),
         ("_make_extract_client", "EXTRACT"),
         ("_make_link_client", "LINK"),
         ("_make_note_client", "NOTE"),
@@ -279,6 +294,6 @@ def test_per_stage_client_honors_its_own_env_override(env, monkeypatch, make_fn_
 
 @pytest.mark.unit
 def test_make_summary_client_still_defaults_to_the_haiku_tier(env):
-    """The one stage that must NOT follow DISTIL_MODEL — unaffected by this wiring change."""
+    """Same cheap-tier default every CHEAP_TIER_STAGES member uses — unaffected by DISTIL_MODEL."""
     from distil.model_config import DEFAULT_SUMMARY_MODEL
     assert cli._make_summary_client().model == DEFAULT_SUMMARY_MODEL

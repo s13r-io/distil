@@ -11,13 +11,14 @@ depend on), but the pipeline never acts on it — the owner's decision to keep a
 unconditionally, and the only quality gate is ``ingest.py``'s word-count check (owner decision;
 see ``distil/pipeline.py``'s module docstring).
 
-**Not called by the production pipeline anymore.** ``run_pipeline`` reads the transcript once,
-through ``extract.run_triage_extract`` (a merged triage+extraction call — see that function's
-docstring and ``distil/prompts/triage_extract.py``), which reuses this module's JSON parser
-(:func:`parse_triage_response`) on its ``<TRIAGE>`` section. ``run_triage``/this module's own
-standalone model call stay as a reusable, independently-testable classifier — the gated eval
-suite (``tests/eval/test_triage_eval.py``) and any future diagnostic use still exercise it
-directly, isolated from extraction.
+**Runs once per pipeline call, on the cheap tier (owner decision).** ``run_pipeline`` calls
+:func:`run_triage` first, over the whole transcript; its dominant type then steers
+``extract.run_chunked_extraction`` (strong tier). This is a coarse categorical judgement, not
+extraction's faithfulness-critical verbatim-quote work, so the cheap tier is the measured,
+justified default here (see ``model_config.py``'s tier assignment and the PR that set it) — it
+was briefly merged into one strong-tier call alongside extraction, then split back out because
+chunked extraction (several per-chunk calls) cannot produce one whole-transcript classification
+without disagreeing verdicts across chunks.
 """
 
 from __future__ import annotations
@@ -54,12 +55,8 @@ def run_triage(transcript: Transcript, client: LLMClient) -> TriageResult:
 
 
 def parse_triage_response(raw: str) -> Triage:
-    """Parse a raw model response into a schema-valid :class:`Triage`.
-
-    Shared with ``extract.run_triage_extract``, which parses this exact JSON shape out of a
-    larger merged response's ``<TRIAGE>`` section — the format (fenced or bare JSON object,
-    optionally with surrounding prose) is identical either way.
-    """
+    """Parse a raw model response into a schema-valid :class:`Triage` (fenced or bare JSON
+    object, optionally with surrounding prose)."""
     text = _strip_fence(raw).strip()
     try:
         data = json.loads(text)

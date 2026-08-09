@@ -35,7 +35,7 @@ def normalize_items(items: list[KnowledgeItem], transcript: Transcript) -> list[
         # (3) near-duplicate merge keyed on the normalized statement.
         key = _normalize(clone.statement)
         if key in seen_statements:
-            _merge_into(verified[seen_statements[key]], clone)
+            merge_duplicate_item(verified[seen_statements[key]], clone)
             continue
         seen_statements[key] = len(verified)
         verified.append(clone)
@@ -54,8 +54,13 @@ def _backfill_provenance(item: KnowledgeItem, transcript: Transcript) -> None:
             return
 
 
-def _merge_into(target: KnowledgeItem, dup: KnowledgeItem) -> None:
-    """Fold a duplicate's incidental detail into the kept item without changing its meaning."""
+def merge_duplicate_item(target: KnowledgeItem, dup: KnowledgeItem) -> None:
+    """Fold a duplicate's incidental detail into the kept item without changing its meaning.
+
+    Public so ``extract.py``'s chunked-extraction near-duplicate pass can reuse the same
+    field-folding logic on a fuzzy (not just exact) statement match, rather than reimplementing
+    it — see that module's ``_dedupe_near_duplicate_items``.
+    """
     if target.rationale is None and dup.rationale is not None:
         target.rationale = dup.rationale
     if target.scope is None and dup.scope is not None:

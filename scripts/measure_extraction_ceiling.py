@@ -3,25 +3,28 @@
 
 `AnthropicClient.complete()` used to hardcode `max_tokens=4096` for every stage — extraction
 included, even though extraction's output scales with transcript length (one JSON object per
-knowledge item, across the whole merged triage+extract call — see `distil/extract.py`'s module
-docstring). On a real ~1,455-word transcript, extraction hit that ceiling *exactly* and the
-existing salvage path silently recovered a partial item list with no error, no warning, and an
-entry that filed and looked complete. `distil/model_config.py` now resolves extraction's ceiling
-to the model's own published output limit instead (`resolve_stage_max_tokens`).
+knowledge item — see `distil/extract.py`'s module docstring). On a real ~1,455-word transcript,
+extraction hit that ceiling *exactly* and the existing salvage path silently recovered a partial
+item list with no error, no warning, and an entry that filed and looked complete.
+`distil/model_config.py` now resolves extraction's ceiling to the model's own published output
+limit instead (`resolve_stage_max_tokens`).
 
-This script runs the real, merged triage+extract call (`distil.extract.run_triage_extract`) —
-not the full pipeline, since link/note/graph/file are irrelevant to this defect and would only
-add cost/noise — against a real transcript you point it at, three ways:
+This script runs one cheap-tier `distil.triage.run_triage` call to get a dominant type, then the
+real extraction call(s) (`distil.extract.run_extraction`/`run_chunked_extraction`) conditioned on
+that type — not the full pipeline, since link/note/graph/file are irrelevant to this defect and
+would only add cost/noise — against a real transcript you point it at, three ways:
 
     1. BEFORE  — the old hardcoded max_tokens=4096, exactly as production behaved until this fix.
     2. AFTER   — the new resolved ceiling (`model_config.resolve_stage_max_tokens("extract")`).
     3. CHUNKED — the transcript split via `distil.summary.chunk_transcript_text` (reused, not
                  reimplemented — the same sentence-safe chunker the narrative summary layer
-                 already uses), one `run_triage_extract` call per chunk at the new ceiling.
+                 already uses), one `run_extraction`-equivalent call per chunk at the new ceiling
+                 (`distil.extract.run_chunked_extraction`).
 
 For each, it reports item count, whether the response was truncated/salvaged
-(`TriageExtractResult.truncated` — the same flag now recorded on `KBEntry.extraction_truncated`),
-and the real dollar cost from the API's own reported token usage.
+(`ChunkedExtractionResult.truncated`/the single-call path's own truncation flag — the same signal
+recorded on `KBEntry.extraction_truncated`), and the real dollar cost from the API's own reported
+token usage.
 
 This is a real, billable run against the Anthropic API — it needs `ANTHROPIC_API_KEY` and
 `DISTIL_MODEL` set (see `.env.example`). It makes no changes to any Store — it never files
@@ -39,17 +42,19 @@ commits it.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from distil.extract import run_triage_extract  # noqa: E402
-from distil.ingest import Segment, Transcript, ingest_file  # noqa: E402
+from distil.extract import dominant_type, run_chunked_extraction, run_extraction  # noqa: E402
+from distil.ingest import Transcript, ingest_file  # noqa: E402
 from distil.llm import LLMClient  # noqa: E402
 from distil.model_config import resolve_stage_max_tokens, resolve_stage_model  # noqa: E402
-from distil.summary import chunk_transcript_text  # noqa: E402
+from distil.models import Triage  # noqa: E402
+from distil.triage import run_triage  # noqa: E402
 
 # $ per 1M tokens (input, output). Source: Anthropic's published pricing, cached via the
 # claude-api skill's Current Models table at the time this script was written — re-check
@@ -125,51 +130,59 @@ def _cost(usages: list[_Usage]) -> float:
     return total
 
 
-def _run_single_call(transcript: Transcript, model: str, max_tokens: int, label: str) -> None:
+class _TruncationWatcher(logging.Handler):
+    """Detects whether `run_extraction` logged its truncation warning during a call — the
+    single-call path only logs truncation (see `extract.py`), it doesn't return the flag the
+    way `ChunkedExtractionResult.truncated` does."""
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.triggered = False
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.triggered = True
+
+
+def _run_single_call(
+    transcript: Transcript, triage: Triage, model: str, max_tokens: int, label: str
+) -> None:
     client = _TrackingClient(model, max_tokens)
-    result = run_triage_extract(transcript, client)
+    watcher = _TruncationWatcher()
+    extract_logger = logging.getLogger("distil.extract")
+    extract_logger.addHandler(watcher)
+    try:
+        items = run_extraction(transcript, triage, client)
+    finally:
+        extract_logger.removeHandler(watcher)
     cost = _cost(client.usages)
     in_tok = sum(u.input_tokens for u in client.usages)
     out_tok = sum(u.output_tokens for u in client.usages)
     print(
-        f"{label}: max_tokens={max_tokens} -> {len(result.items)} item(s), "
-        f"truncated={result.truncated}, {len(client.usages)} call(s), "
+        f"{label}: max_tokens={max_tokens} -> {len(items)} item(s), "
+        f"truncated={watcher.triggered}, {len(client.usages)} call(s), "
         f"{in_tok} in / {out_tok} out tok, ${cost:.4f}"
     )
-    if result.truncated:
+    if watcher.triggered:
         print("  ^ truncated=True: the response was salvaged from an incomplete array — this "
               "run silently lost knowledge before the ceiling fix would have caught it.")
     print("  statements:")
-    for item in result.items:
+    for item in items:
         print(f"    [{item.type}] {item.statement}")
 
 
-def _run_chunked(transcript: Transcript, model: str, max_tokens: int) -> None:
-    chunks = chunk_transcript_text(transcript.full_text())
-    all_items = []
-    total_cost = 0.0
-    total_in = total_out = 0
-    any_truncated = False
-    for i, chunk_text in enumerate(chunks, start=1):
-        chunk_transcript = Transcript(segments=[Segment(text=chunk_text, locator=f"chunk:{i}")])
-        client = _TrackingClient(model, max_tokens)
-        result = run_triage_extract(chunk_transcript, client)
-        cost = _cost(client.usages)
-        total_cost += cost
-        total_in += sum(u.input_tokens for u in client.usages)
-        total_out += sum(u.output_tokens for u in client.usages)
-        any_truncated = any_truncated or result.truncated
-        all_items.extend(result.items)
-        print(
-            f"  chunk {i}/{len(chunks)} ({len(chunk_text.split())} words): "
-            f"{len(result.items)} item(s), truncated={result.truncated}, ${cost:.4f}"
-        )
+def _run_chunked(transcript: Transcript, triage: Triage, model: str, max_tokens: int) -> None:
+    client = _TrackingClient(model, max_tokens)
+    result = run_chunked_extraction(transcript, triage, client)
+    cost = _cost(client.usages)
+    in_tok = sum(u.input_tokens for u in client.usages)
+    out_tok = sum(u.output_tokens for u in client.usages)
     print(
-        f"chunked: {len(chunks)} chunk(s) -> {len(all_items)} item(s) total, "
-        f"any_truncated={any_truncated}, {total_in} in / {total_out} out tok, ${total_cost:.4f}"
+        f"chunked: {result.chunk_count} chunk(s) -> {len(result.items)} item(s) total, "
+        f"any_truncated={result.truncated}, {len(client.usages)} call(s), "
+        f"{in_tok} in / {out_tok} out tok, ${cost:.4f}"
     )
     print("  statements:")
-    for item in all_items:
+    for item in result.items:
         print(f"    [{item.type}] {item.statement}")
 
 
@@ -181,6 +194,8 @@ def main() -> None:
     args = parser.parse_args()
 
     model = resolve_stage_model("extract")
+    triage_model = resolve_stage_model("triage")
+    triage_max_tokens = resolve_stage_max_tokens("triage")
     new_ceiling = resolve_stage_max_tokens("extract")
     print(f"Model: {model}")
     print(f"Old hardcoded ceiling (before this fix): {_OLD_HARDCODED_MAX_TOKENS}")
@@ -193,14 +208,20 @@ def main() -> None:
         print(f"=== {path} ({word_count} words as ingested, {len(transcript.segments)} "
               f"segment(s)) ===")
         print()
+
+        triage_client = _TrackingClient(triage_model, triage_max_tokens)
+        triage = run_triage(transcript, triage_client).triage
+        print(f"Triage (cheap tier, runs once): dominant type = {dominant_type(triage)}")
+        print()
+
         print("-- BEFORE (old hardcoded max_tokens=4096) --")
-        _run_single_call(transcript, model, _OLD_HARDCODED_MAX_TOKENS, "single-call")
+        _run_single_call(transcript, triage, model, _OLD_HARDCODED_MAX_TOKENS, "single-call")
         print()
         print("-- AFTER (new resolved ceiling) --")
-        _run_single_call(transcript, model, new_ceiling, "single-call")
+        _run_single_call(transcript, triage, model, new_ceiling, "single-call")
         print()
         print("-- CHUNKED (new ceiling per chunk, distil.summary.chunk_transcript_text) --")
-        _run_chunked(transcript, model, new_ceiling)
+        _run_chunked(transcript, triage, model, new_ceiling)
         print()
 
 
