@@ -237,7 +237,8 @@ cookie login flow. New routes (`/ingest`, `/jobs`, `/entries/{id}`) sit behind t
 Profile editor; multi-page navigation beyond entry pages; settings beyond Sign out;
 title/topic free-text search; parallel job processing; a second worker service. (Raw
 transcript viewer and multi-page navigation via the `/concepts` pages shipped later, in
-Phase B — see `AGENTS.md`.)
+Phase B; a per-stage model settings page (`/settings`) shipped later too, in Phase F —
+see `AGENTS.md`.)
 
 ## 13. Deploy
 

@@ -176,12 +176,18 @@ def resolve_stage_model_info(stage: str) -> StageModelInfo:
                 model, source, active_env_var = global_default, SOURCE_ENV, "DISTIL_MODEL"
             else:
                 model, source = None, SOURCE_UNCONFIGURED
-    warning = EXTRACT_CHEAP_MODEL_WARNING if (
-        stage == "extract" and model is not None and "haiku" in model.lower()
-    ) else None
+    warning = (
+        EXTRACT_CHEAP_MODEL_WARNING
+        if (stage == "extract" and model is not None and "haiku" in model.lower())
+        else None
+    )
     return StageModelInfo(
-        stage=stage, model=model, source=source, env_var=env_var,
-        active_env_var=active_env_var, faithfulness_warning=warning,
+        stage=stage,
+        model=model,
+        source=source,
+        env_var=env_var,
+        active_env_var=active_env_var,
+        faithfulness_warning=warning,
     )
 
 

@@ -178,15 +178,17 @@ def _model_settings_rows() -> list[dict]:
     rows = []
     for stage in model_config.ALL_STAGES:
         info = model_config.resolve_stage_model_info(stage)
-        rows.append({
-            "stage": stage,
-            "model": info.model,
-            "source": info.source,
-            "env_var": info.env_var,
-            "active_env_var": info.active_env_var,
-            "faithfulness_warning": info.faithfulness_warning,
-            "has_stored_override": info.source == model_config.SOURCE_STORED,
-        })
+        rows.append(
+            {
+                "stage": stage,
+                "model": info.model,
+                "source": info.source,
+                "env_var": info.env_var,
+                "active_env_var": info.active_env_var,
+                "faithfulness_warning": info.faithfulness_warning,
+                "has_stored_override": info.source == model_config.SOURCE_STORED,
+            }
+        )
     return rows
 
 
@@ -921,7 +923,8 @@ def create_app() -> FastAPI:
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request):
         return _TEMPLATES.TemplateResponse(
-            request, "settings.html",
+            request,
+            "settings.html",
             {"stages": _model_settings_rows(), "active_page": "settings"},
         )
 
@@ -939,7 +942,10 @@ def create_app() -> FastAPI:
             return JSONResponse({"detail": str(exc)}, status_code=400)
         info = model_config.resolve_stage_model_info(stage)
         return {
-            "ok": True, "stage": stage, "model": info.model, "source": info.source,
+            "ok": True,
+            "stage": stage,
+            "model": info.model,
+            "source": info.source,
             "faithfulness_warning": info.faithfulness_warning,
         }
 
@@ -952,7 +958,10 @@ def create_app() -> FastAPI:
         model_settings.ModelSettingsStore().clear(stage)
         info = model_config.resolve_stage_model_info(stage)
         return {
-            "ok": True, "stage": stage, "model": info.model, "source": info.source,
+            "ok": True,
+            "stage": stage,
+            "model": info.model,
+            "source": info.source,
             "faithfulness_warning": info.faithfulness_warning,
         }
 

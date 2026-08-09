@@ -137,12 +137,8 @@ class ModelSettingsStore:
         if conn is None:
             return {}
         try:
-            rows = conn.execute(
-                "SELECT stage, model, updated_at FROM model_settings"
-            ).fetchall()
-            return {
-                r[0]: StoredModelSetting(stage=r[0], model=r[1], updated_at=r[2]) for r in rows
-            }
+            rows = conn.execute("SELECT stage, model, updated_at FROM model_settings").fetchall()
+            return {r[0]: StoredModelSetting(stage=r[0], model=r[1], updated_at=r[2]) for r in rows}
         finally:
             conn.close()
 
