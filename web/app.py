@@ -982,7 +982,12 @@ def create_app() -> FastAPI:
         if job is None:
             return JSONResponse({"detail": "job not found"}, status_code=404)
         already_submitted = job.status == jobsmod.STATUS_QUEUED or job.collected_at is not None
-        if job.status != jobsmod.STATUS_COLLECTING and not already_submitted:
+        if already_submitted:
+            # Nothing to (re-)write: the transcript is already in the pipeline (or the job has
+            # since finished/failed and any staged file was already cleaned up) — staging again
+            # here would recreate a file that no future event will ever clean up again.
+            return {"job_id": job_id, "status": jobsmod.STATUS_QUEUED}
+        if job.status != jobsmod.STATUS_COLLECTING:
             return JSONResponse(
                 {"detail": "job is not currently leased to a collector"}, status_code=409
             )
