@@ -36,7 +36,14 @@ from distil import okf, youtube
 from distil.canonicalize import run_delete_entry_stage
 from distil.cli import _make_client, _make_embedder
 from distil.graph import link_graph
-from distil.ingest import Segment, Transcript, ingest_file, ingest_text
+from distil.ingest import (
+    IngestError,
+    Segment,
+    Transcript,
+    ingest_file,
+    ingest_srt_text,
+    ingest_text,
+)
 from distil.pipeline import PipelineConfig, run_pipeline
 from distil.profile_update import apply_feedback
 from distil.query import ask as run_ask
@@ -65,6 +72,10 @@ _EMBEDDER_LOCK = threading.Lock()
 _EMBEDDER_CACHE = None
 
 _PLAYLIST_FETCH_DELAY_DEFAULT = 3.0  # seconds; see create_app()'s Fetcher wiring for why
+_COLLECTOR_LEASE_SECONDS_DEFAULT = jobsmod._DEFAULT_COLLECTOR_LEASE_SECONDS
+_COLLECTOR_EXPIRY_SECONDS_DEFAULT = jobsmod._DEFAULT_COLLECTOR_EXPIRY_SECONDS
+_COLLECTOR_CLAIM_LIMIT_DEFAULT = 5
+_COLLECTOR_CLAIM_LIMIT_MAX = 20
 
 
 def _db_path() -> str:
@@ -113,6 +124,29 @@ def _playlist_fetch_delay_seconds() -> float:
         return float(raw)
     except ValueError:
         return _PLAYLIST_FETCH_DELAY_DEFAULT
+
+
+def _collector_lease_seconds() -> float:
+    raw = os.environ.get("DISTIL_COLLECTOR_LEASE_SECONDS")
+    if not raw:
+        return _COLLECTOR_LEASE_SECONDS_DEFAULT
+    try:
+        return float(raw)
+    except ValueError:
+        return _COLLECTOR_LEASE_SECONDS_DEFAULT
+
+
+def _collector_expiry_seconds() -> float:
+    """How long a video waits for external collection before failing cleanly — default 7 days
+    (WEB_UI_SPEC collector queue), configurable via ``DISTIL_COLLECTOR_EXPIRY_SECONDS`` the same
+    way ``DISTIL_PLAYLIST_FETCH_DELAY_SECONDS`` already is."""
+    raw = os.environ.get("DISTIL_COLLECTOR_EXPIRY_SECONDS")
+    if not raw:
+        return _COLLECTOR_EXPIRY_SECONDS_DEFAULT
+    try:
+        return float(raw)
+    except ValueError:
+        return _COLLECTOR_EXPIRY_SECONDS_DEFAULT
 
 
 def _default_profile():
@@ -217,9 +251,17 @@ def _distill_job(job: jobsmod.Job) -> dict:
     )
     reporter = _PhaseReporter(jobs_store, job.job_id, plan)
     profile = store.load_profile(_USER_ID) or _default_profile()
-    transcript = _time_block(
-        timings, "ingest", lambda: _load_job_transcript(job, on_phase=reporter.on_phase)
-    )
+    try:
+        transcript = _time_block(
+            timings, "ingest", lambda: _load_job_transcript(job, on_phase=reporter.on_phase)
+        )
+    except YoutubeFetchError as exc:
+        # Only a bot-check refusal is worth waiting on — a genuinely uncaptioned/private/missing
+        # video must still fail immediately, exactly as it does today (see
+        # distil.youtube.is_bot_check_refusal for how confidently these are told apart).
+        if youtube.is_bot_check_refusal(exc):
+            return {"status": "awaiting_collection", "error": str(exc)}
+        raise
     client = _make_client()
     embedder = _time_block(timings, "embedder", _cached_safe_embedder)
     reporter.on_phase("metadata", "start")
@@ -290,14 +332,18 @@ def _load_job_transcript(job: jobsmod.Job, *, on_phase=None):
 
 def _fetch_playlist_video(job: jobsmod.Job) -> dict:
     """Fetcher worker callback: fetch one playlist video's transcript and stage it to the
-    persistent volume. Never raises — a fetch failure (no captions, bot check, timeout, missing
-    yt-dlp binary) becomes a ``failed`` result so it fails only this job, exactly like the old
-    inline-fetch-at-distill-time path did (WEB_UI_SPEC §8 / _enqueue_youtube_source docstring)."""
+    persistent volume. Never raises — a fetch failure becomes a ``failed`` result so it fails
+    only this job, exactly like the old inline-fetch-at-distill-time path did (WEB_UI_SPEC §8 /
+    _enqueue_youtube_source docstring) — except specifically a YouTube bot-check refusal, which
+    becomes ``awaiting_collection`` instead: parked for an external collector rather than failed,
+    since that failure is about this server's address, not this video."""
     jobs_store = jobsmod.JobStore(_db_path())
     reporter = _PhaseReporter(jobs_store, job.job_id, ["transcript_fetch", "caption_parse"])
     try:
         transcript = youtube.fetch_video_transcript(job.payload, on_phase=reporter.on_phase)
     except YoutubeFetchError as exc:
+        if youtube.is_bot_check_refusal(exc):
+            return {"status": "awaiting_collection", "error": str(exc)}
         return {"status": "failed", "error": str(exc)}
     except subprocess.TimeoutExpired:
         return {"status": "failed", "error": "Fetching the transcript timed out."}
@@ -666,13 +712,17 @@ def create_app() -> FastAPI:
 
     # on_finished only fires for a successful (done/low_value) terminal status — a failed job's
     # staged file must stay on disk so a retry can still read it (see _load_job_transcript).
-    worker = jobsmod.Worker(_db_path(), _distill_job, on_finished=_cleanup_staged_file)
+    worker = jobsmod.Worker(
+        _db_path(), _distill_job, on_finished=_cleanup_staged_file,
+        collector_expiry_seconds=_collector_expiry_seconds(),
+    )
     # A second, independent single-worker thread (Phase E): fetches playlist videos'
     # transcripts up front, overlapping with `worker` distilling whatever's already staged —
     # they claim disjoint job statuses (pending_fetch/fetching vs queued/running), so neither
     # blocks the other, and distilling stays exactly as single-threaded as before.
     fetcher = jobsmod.Fetcher(
         _db_path(), _fetch_playlist_video, delay_seconds=_playlist_fetch_delay_seconds(),
+        collector_expiry_seconds=_collector_expiry_seconds(),
     )
 
     @app.on_event("startup")
@@ -687,7 +737,14 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
-        if not auth.path_is_open(request.url.path) and not request.url.path.startswith("/static"):
+        # /collector/* routes are exempt from the owner auth gate: they're gated by their own,
+        # separate credential (auth.request_is_collector_authorized), checked inside each route —
+        # never by the owner's session cookie or DISTIL_AUTH_SECRET bearer token.
+        if (
+            not auth.path_is_open(request.url.path)
+            and not request.url.path.startswith("/static")
+            and not auth.path_is_collector(request.url.path)
+        ):
             if not auth.request_is_authorized(request):
                 accepts_html = "text/html" in request.headers.get("accept", "")
                 if accepts_html:
@@ -884,6 +941,71 @@ def create_app() -> FastAPI:
                 _cleanup_staged_file(job)
         n = store_jobs.clear(scope)
         return {"cleared": n}
+
+    # ---- external collector queue (bot-check refusals only) ----
+    # Gated by auth.request_is_collector_authorized, a separate scoped credential
+    # (DISTIL_COLLECTOR_TOKEN) — never the owner's session/bearer (see _auth_gate above, which
+    # exempts this whole prefix from the owner check specifically so these routes can enforce
+    # their own). A collector can claim and submit here and reach nothing else on the site.
+    def _require_collector_auth(request: Request) -> JSONResponse | None:
+        if not auth.request_is_collector_authorized(request):
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+        return None
+
+    @app.post("/collector/jobs/claim")
+    def collector_claim(request: Request, limit: int = _COLLECTOR_CLAIM_LIMIT_DEFAULT):
+        unauthorized = _require_collector_auth(request)
+        if unauthorized is not None:
+            return unauthorized
+        bounded_limit = max(1, min(limit, _COLLECTOR_CLAIM_LIMIT_MAX))
+        store_jobs = jobsmod.JobStore(_db_path())
+        claimed = store_jobs.claim_for_collection(
+            limit=bounded_limit, lease_seconds=_collector_lease_seconds(),
+        )
+        return {
+            "jobs": [
+                {"job_id": j.job_id, "url": j.payload, "lease_expires_at": j.lease_expires_at}
+                for j in claimed
+            ]
+        }
+
+    @app.post("/collector/jobs/{job_id}/transcript")
+    def collector_submit_transcript(request: Request, job_id: str, srt: str = Form(...)):
+        unauthorized = _require_collector_auth(request)
+        if unauthorized is not None:
+            return unauthorized
+        # Validated as parseable captions before anything is accepted into the pipeline — the
+        # same parser a real yt-dlp fetch's captions already go through (distil.youtube._fetch_into).
+        try:
+            transcript = ingest_srt_text(srt)
+        except IngestError as exc:
+            return JSONResponse(
+                {"detail": f"Not parseable as captions: {exc}"}, status_code=400
+            )
+        store_jobs = jobsmod.JobStore(_db_path())
+        staged_path = _stage_transcript(job_id, transcript)
+        outcome = store_jobs.submit_collected_transcript(job_id, staged_path=str(staged_path))
+        if outcome in ("not_found", "not_leased"):
+            # Nothing owns this file (the job never reached queued/KIND_YOUTUBE_STAGED for it) —
+            # remove it now or it leaks on the volume forever under this job_id's deterministic path.
+            staged_path.unlink(missing_ok=True)
+            status_code = 404 if outcome == "not_found" else 409
+            detail = "job not found" if outcome == "not_found" else (
+                "job is not currently leased to a collector"
+            )
+            return JSONResponse({"detail": detail}, status_code=status_code)
+        # "accepted" or "already_submitted" (idempotent retry) both report success — the staged
+        # path is deterministic per job_id, so a duplicate submit just overwrites it in place.
+        return {"job_id": job_id, "status": jobsmod.STATUS_QUEUED}
+
+    @app.post("/collector/jobs/{job_id}/unfetchable")
+    def collector_report_unfetchable(request: Request, job_id: str, reason: str = Form(...)):
+        unauthorized = _require_collector_auth(request)
+        if unauthorized is not None:
+            return unauthorized
+        store_jobs = jobsmod.JobStore(_db_path())
+        ok = store_jobs.report_uncollectable(job_id, error=reason.strip()[:500])
+        return JSONResponse({"ok": ok}, status_code=200 if ok else 409)
 
     # ---- entries ----
     @app.get("/entries")

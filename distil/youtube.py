@@ -242,6 +242,28 @@ def _is_transient_failure(stderr: str | None) -> bool:
     return any(marker in text for marker in _TRANSIENT_MARKERS)
 
 
+# YouTube's own wording for its bot-identity challenge (Phase 22/23 above), forwarded verbatim
+# through yt-dlp's ERROR: line — yt-dlp has no dedicated exception type or error code for this
+# condition, only this string. Confidence is therefore bounded by how stable that external
+# wording is: it has been consistent across every yt-dlp version consulted for this project (see
+# tests/unit/test_youtube.py, tests/unit/test_web_jobs.py, AGENTS.md's Phase 22 entry), but it is
+# a substring match on non-contractual text, not a structural guarantee. The failure mode if
+# YouTube/yt-dlp ever reword it is safe: the match just stops firing and the refusal falls back
+# to the ordinary fail-immediately path — never a wrong or dangerous outcome, only a missed
+# opportunity to park it for external collection.
+_BOT_CHECK_MARKER = "Sign in to confirm you're not a bot"
+
+
+def is_bot_check_refusal(error: YoutubeFetchError | str) -> bool:
+    """True when a fetch failure is specifically YouTube's bot-identity challenge on this
+    server's address — never a throttle, and never a per-video captions/availability problem
+    (a private/deleted/uncaptioned video's error text doesn't contain this marker), so routing
+    only this case to an external collector never mistakes an unrelated, permanent failure for
+    one worth waiting on.
+    """
+    return _BOT_CHECK_MARKER in str(error)
+
+
 def _run_yt_dlp(cmd: list[str], run, timeout: float, sleep=time.sleep):
     """Invoke yt-dlp, retrying transient failures (429/5xx/network) with exponential backoff.
 

@@ -22,6 +22,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 _OPEN_PATHS = {"/health", "/login"}
 _COOKIE_NAME = "distil_session"
+_COLLECTOR_PATH_PREFIX = "/collector"
 
 
 def is_public() -> bool:
@@ -30,6 +31,37 @@ def is_public() -> bool:
 
 def auth_secret() -> str | None:
     return os.environ.get("DISTIL_AUTH_SECRET") or None
+
+
+def collector_secret() -> str | None:
+    """The external collector's own credential — deliberately a separate env var from
+    ``DISTIL_AUTH_SECRET``, never derived from or compared against it, so it can be issued,
+    rotated, or revoked independently of the owner's site password."""
+    return os.environ.get("DISTIL_COLLECTOR_TOKEN") or None
+
+
+def path_is_collector(path: str) -> bool:
+    """Routes reachable with the collector credential instead of the owner's session/bearer —
+    claim/submit/report-unfetchable only (web/app.py's ``/collector/*`` routes)."""
+    return path == _COLLECTOR_PATH_PREFIX or path.startswith(_COLLECTOR_PATH_PREFIX + "/")
+
+
+def request_is_collector_authorized(request: Request) -> bool:
+    """Bearer-token-only check against ``DISTIL_COLLECTOR_TOKEN`` — never a session cookie,
+    never ``DISTIL_AUTH_SECRET``. Unlike :func:`request_is_authorized`, this ignores
+    :func:`is_public`/localhost convenience entirely and always requires the token: the collector
+    queue is a machine-to-machine credential, not a browsing session, so there is no equivalent of
+    "trusted because it's localhost" for it. Fails closed when the token isn't configured, so the
+    collector queue is simply unusable (never accidentally open) until an operator sets one.
+    """
+    secret = collector_secret()
+    if not secret:
+        return False
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        return False
+    token = auth_header.removeprefix("Bearer ").strip()
+    return hmac.compare_digest(token, secret)
 
 
 def assert_startup_safe() -> None:

@@ -21,7 +21,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Job status values (WEB_UI_SPEC §6). "removed" = taken out of the queue before running.
@@ -38,12 +38,28 @@ STATUS_REMOVED = "removed"
 STATUS_PENDING_FETCH = "pending_fetch"
 STATUS_FETCHING = "fetching"
 
+# External-collector queue: a job whose fetch here failed specifically due to YouTube's
+# bot-identity refusal (never any other failure — see distil.youtube.is_bot_check_refusal) waits
+# here for a collector on a trusted, non-datacenter address to fetch it instead. This is a third
+# lifecycle, fully disjoint from queued/running and pending_fetch/fetching: AWAITING_COLLECTION
+# (waiting) -> COLLECTING (leased to a collector, with an expiry) -> QUEUED (kind
+# KIND_YOUTUBE_STAGED, once a transcript is submitted) — from there it's indistinguishable from a
+# playlist prefetch and needs no further special-casing anywhere downstream. A lease that expires
+# (collector died mid-fetch) returns the job to AWAITING_COLLECTION, never stranding it; a job
+# that sits in AWAITING_COLLECTION/COLLECTING past its own (separate, longer) ``collection_deadline``
+# fails cleanly instead of waiting forever.
+STATUS_AWAITING_COLLECTION = "awaiting_collection"
+STATUS_COLLECTING = "collecting"
+
 # A playlist video whose transcript has already been fetched and staged to disk (persistent
 # volume — see web/app.py's _staging_root). ``payload`` is the staged file path, not a URL.
 KIND_YOUTUBE_STAGED = "youtube_staged"
 
 _FINISHED = {STATUS_DONE, STATUS_LOW_VALUE, STATUS_REMOVED}
 _AUTOCLEAR_AFTER_SECONDS = 24 * 60 * 60  # done/low_value/removed clear after 24h; failed never
+
+_DEFAULT_COLLECTOR_LEASE_SECONDS = 10 * 60.0  # long enough for one real fetch + submit round trip
+_DEFAULT_COLLECTOR_EXPIRY_SECONDS = 7 * 24 * 60 * 60.0  # 7 days (WEB_UI_SPEC collector queue)
 
 
 def _now() -> str:
@@ -73,6 +89,12 @@ class Job:
     phase_total: int | None = None
     phase_started_at: str | None = None
     phase_durations: dict[str, float] = field(default_factory=dict)
+    # Collector queue (this phase): ``lease_expires_at`` is set only while STATUS_COLLECTING and
+    # cleared on release/submit; ``collection_deadline`` is set once on first entry into
+    # STATUS_AWAITING_COLLECTION and never reset by a lease claim/release/expiry, since it bounds
+    # the whole 7-day wait, not any one collector's lease.
+    lease_expires_at: str | None = None
+    collection_deadline: str | None = None
 
     def age_seconds(self) -> float:
         try:
@@ -98,6 +120,8 @@ class Job:
             "phase_total": self.phase_total,
             "phase_started_at": self.phase_started_at,
             "phase_durations": self.phase_durations,
+            "lease_expires_at": self.lease_expires_at,
+            "collection_deadline": self.collection_deadline,
         }
 
 
@@ -147,6 +171,9 @@ class JobStore:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN phase_total INTEGER")
             self._conn.execute("ALTER TABLE jobs ADD COLUMN phase_started_at TEXT")
             self._conn.execute("ALTER TABLE jobs ADD COLUMN phase_durations TEXT")
+        if "lease_expires_at" not in cols:
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN lease_expires_at TEXT")
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN collection_deadline TEXT")
         self._conn.commit()
 
     def _row(self, r: sqlite3.Row) -> Job:
@@ -165,6 +192,10 @@ class JobStore:
             phase_total=r["phase_total"] if "phase_total" in r.keys() else None,
             phase_started_at=r["phase_started_at"] if "phase_started_at" in r.keys() else None,
             phase_durations=durations,
+            lease_expires_at=r["lease_expires_at"] if "lease_expires_at" in r.keys() else None,
+            collection_deadline=(
+                r["collection_deadline"] if "collection_deadline" in r.keys() else None
+            ),
         )
 
     def enqueue(
@@ -197,8 +228,16 @@ class JobStore:
         return self._row(r) if r else None
 
     def list_active(self) -> list[Job]:
-        """Jobs to show in Activity, newest first, after applying the 24h auto-clear rule."""
+        """Jobs to show in Activity, newest first, after applying the 24h auto-clear rule.
+
+        Also sweeps the collector queue (expired leases back to the pool, expired 7-day waits to
+        failed) on the same cadence — this is what keeps both bounded with no collector ever
+        running: the existing Activity poll (WEB_UI_SPEC) already calls this every ~2s, exactly
+        like ``autoclear`` already piggybacks on it for done/low_value/removed rows.
+        """
         self.autoclear()
+        self.release_expired_leases()
+        self.expire_stale_awaiting_collection()
         cur = self._conn.execute("SELECT * FROM jobs ORDER BY created_at DESC")
         return [self._row(r) for r in cur.fetchall()]
 
@@ -397,6 +436,161 @@ class JobStore:
         self._conn.commit()
         return cur1.rowcount + cur2.rowcount
 
+    # ---- External-collector queue (bot-check refusals only) ----------------------------
+
+    def mark_awaiting_collection(
+        self, job_id: str, *, error: str, expiry_seconds: float = _DEFAULT_COLLECTOR_EXPIRY_SECONDS,
+    ) -> None:
+        """First entry into the waiting state — sets ``collection_deadline`` exactly once. A
+        later lease claim/release/expiry must never call this again for the same job, or the
+        7-day clock would silently reset every time a collector's lease lapses."""
+        deadline = (datetime.now(timezone.utc) + timedelta(seconds=expiry_seconds)).isoformat()
+        self._conn.execute(
+            "UPDATE jobs SET status=?, error=?, collection_deadline=?, lease_expires_at=NULL, "
+            "updated_at=? WHERE job_id=?",
+            (STATUS_AWAITING_COLLECTION, error, deadline, _now(), job_id),
+        )
+        self._conn.commit()
+
+    def claim_for_collection(
+        self, *, limit: int, lease_seconds: float = _DEFAULT_COLLECTOR_LEASE_SECONDS,
+    ) -> list[Job]:
+        """Lease up to ``limit`` waiting videos to a collector. Sweeps expired leases and
+        expired (7-day) waits first, so a claim always sees the true current pool rather than
+        handing out something that should have already failed or already come back to the pool.
+
+        Each row is claimed with its own ``UPDATE ... WHERE job_id=? AND status=?``, exactly the
+        same guarded-update idiom :meth:`claim_next_queued` already uses — the row only flips if
+        it's still in the expected state, so two concurrent callers (two collector processes, two
+        connections) racing for the same row can never both succeed: only one UPDATE's WHERE
+        clause matches, the other affects zero rows. Proven under real concurrent threads in
+        tests/unit/test_web_jobs.py.
+        """
+        self.release_expired_leases()
+        self.expire_stale_awaiting_collection()
+        lease_expires = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
+        claimed: list[Job] = []
+        with self._conn:
+            rows = self._conn.execute(
+                "SELECT * FROM jobs WHERE status=? ORDER BY created_at ASC LIMIT ?",
+                (STATUS_AWAITING_COLLECTION, limit),
+            ).fetchall()
+            for r in rows:
+                job = self._row(r)
+                cur = self._conn.execute(
+                    "UPDATE jobs SET status=?, lease_expires_at=?, updated_at=? "
+                    "WHERE job_id=? AND status=?",
+                    (STATUS_COLLECTING, lease_expires, _now(), job.job_id, STATUS_AWAITING_COLLECTION),
+                )
+                if cur.rowcount:
+                    job.status = STATUS_COLLECTING
+                    job.lease_expires_at = lease_expires
+                    claimed.append(job)
+        return claimed
+
+    def release_expired_leases(self) -> int:
+        """A collector that dies mid-fetch (crash, killed process, lost connection) must not
+        strand its claimed video forever — return any lease past its expiry to the waiting pool.
+        ``collection_deadline`` is untouched: only the lease resets, never the overall 7-day wait.
+        """
+        now = time.time()
+        released = 0
+        for r in self._conn.execute(
+            "SELECT job_id, lease_expires_at FROM jobs WHERE status=?", (STATUS_COLLECTING,)
+        ).fetchall():
+            if not r["lease_expires_at"]:
+                continue
+            try:
+                expires = datetime.fromisoformat(r["lease_expires_at"]).timestamp()
+            except ValueError:
+                continue
+            if expires < now:
+                self._conn.execute(
+                    "UPDATE jobs SET status=?, lease_expires_at=NULL, updated_at=? WHERE job_id=?",
+                    (STATUS_AWAITING_COLLECTION, _now(), r["job_id"]),
+                )
+                released += 1
+        if released:
+            self._conn.commit()
+        return released
+
+    def expire_stale_awaiting_collection(self) -> int:
+        """A video nobody collects fails cleanly once its ``collection_deadline`` passes — never
+        retried automatically. No staged file exists to clean up at this point: a job only ever
+        gets one (kind ``KIND_YOUTUBE_STAGED``, written by a successful submit) once it has
+        already left this lifecycle entirely, so there is nothing on disk here to reclaim."""
+        now = time.time()
+        expired: list[str] = []
+        for r in self._conn.execute(
+            "SELECT job_id, collection_deadline FROM jobs WHERE status IN (?,?)",
+            (STATUS_AWAITING_COLLECTION, STATUS_COLLECTING),
+        ).fetchall():
+            if not r["collection_deadline"]:
+                continue
+            try:
+                deadline = datetime.fromisoformat(r["collection_deadline"]).timestamp()
+            except ValueError:
+                continue
+            if deadline < now:
+                expired.append(r["job_id"])
+        for job_id in expired:
+            self._conn.execute(
+                "UPDATE jobs SET status=?, error=?, lease_expires_at=NULL, updated_at=? "
+                "WHERE job_id=?",
+                (
+                    STATUS_FAILED,
+                    "Nobody collected this video within 7 days; it will not be retried "
+                    "automatically.",
+                    _now(),
+                    job_id,
+                ),
+            )
+        if expired:
+            self._conn.commit()
+        return len(expired)
+
+    def submit_collected_transcript(self, job_id: str, *, staged_path: str) -> str:
+        """Move a leased job to ``queued`` with its collected transcript staged — from here it's
+        indistinguishable from a playlist prefetch. Idempotent: a job already moved past
+        COLLECTING (a previous call already succeeded) reports ``"already_submitted"`` rather
+        than erroring, so a collector retrying after a lost HTTP response sees success, not a
+        spurious failure, and never double-queues the same video.
+        """
+        r = self._conn.execute("SELECT status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        if not r:
+            return "not_found"
+        if r["status"] == STATUS_QUEUED:
+            return "already_submitted"
+        if r["status"] != STATUS_COLLECTING:
+            return "not_leased"
+        self._conn.execute(
+            "UPDATE jobs SET status=?, kind=?, payload=?, lease_expires_at=NULL, "
+            "collection_deadline=NULL, error=NULL, updated_at=? WHERE job_id=? AND status=?",
+            (STATUS_QUEUED, KIND_YOUTUBE_STAGED, staged_path, _now(), job_id, STATUS_COLLECTING),
+        )
+        self._conn.commit()
+        return "accepted"
+
+    def report_uncollectable(self, job_id: str, *, error: str) -> bool:
+        """A collector's own determination that a video is genuinely unfetchable (private,
+        deleted, region-blocked, etc. from its vantage point) — fails the job outright, exactly
+        like an ordinary non-bot-check failure. Idempotent against a lost-response retry: a job
+        already failed by an earlier call to this method returns True again rather than False."""
+        r = self._conn.execute("SELECT status, error FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        if not r:
+            return False
+        if r["status"] == STATUS_FAILED:
+            return True
+        if r["status"] != STATUS_COLLECTING:
+            return False
+        self._conn.execute(
+            "UPDATE jobs SET status=?, error=?, lease_expires_at=NULL, updated_at=? "
+            "WHERE job_id=? AND status=?",
+            (STATUS_FAILED, error, _now(), job_id, STATUS_COLLECTING),
+        )
+        self._conn.commit()
+        return True
+
 
 class Worker:
     """Single background thread: claim queued job -> run distill_fn -> record outcome.
@@ -418,11 +612,13 @@ class Worker:
         *,
         poll_seconds: float = 1.0,
         on_finished: Callable[[Job], None] | None = None,
+        collector_expiry_seconds: float = _DEFAULT_COLLECTOR_EXPIRY_SECONDS,
     ):
         self._db_path = db_path
         self._distill_fn = distill_fn
         self._poll = poll_seconds
         self._on_finished = on_finished
+        self._collector_expiry_seconds = collector_expiry_seconds
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._store: JobStore | None = None
@@ -477,6 +673,14 @@ class Worker:
             store.mark_done(
                 job.job_id, entry_id=result.get("entry_id", ""), summary=result.get("summary", ""),
             )
+        elif status == STATUS_AWAITING_COLLECTION:
+            # A bot-check refusal, not a real failure — park it for an external collector rather
+            # than failing (never a successful terminal status, so on_finished must not fire).
+            store.mark_awaiting_collection(
+                job.job_id, error=result.get("error", ""),
+                expiry_seconds=self._collector_expiry_seconds,
+            )
+            return
         else:
             store.mark_failed(job.job_id, error=result.get("error", "unknown pipeline result"))
             return
@@ -508,12 +712,14 @@ class Fetcher:
         poll_seconds: float = 1.0,
         delay_seconds: float = 3.0,
         sleep: Callable[[float], None] = time.sleep,
+        collector_expiry_seconds: float = _DEFAULT_COLLECTOR_EXPIRY_SECONDS,
     ):
         self._db_path = db_path
         self._fetch_fn = fetch_fn
         self._poll = poll_seconds
         self._delay_seconds = delay_seconds
         self._sleep = sleep
+        self._collector_expiry_seconds = collector_expiry_seconds
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._store: JobStore | None = None
@@ -562,5 +768,10 @@ class Fetcher:
             return
         if result.get("status") == "fetched":
             store.mark_fetched(job.job_id, kind=result["kind"], payload=result["payload"])
+        elif result.get("status") == "awaiting_collection":
+            store.mark_awaiting_collection(
+                job.job_id, error=result.get("error", ""),
+                expiry_seconds=self._collector_expiry_seconds,
+            )
         else:
             store.mark_failed(job.job_id, error=result.get("error", "unknown fetch result"))
