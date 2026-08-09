@@ -35,3 +35,6 @@ htmlcov/
 .idea/
 .vscode/
 .venv-test/
+
+# Local scratch measurement/analysis output (not shipped code)
+/.measurements/
