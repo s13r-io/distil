@@ -303,6 +303,86 @@ $ bash scripts/backup_kb.sh
 ```
 Run it on a schedule (cron, or a Railway cron service) to keep an off-platform copy.
 
+## 10. (Optional) Run the external collector on this machine
+
+Only needed if the server logs (or the Activity view shows a job stuck "waiting to be
+collected") "Sign in to confirm you're not a bot" for a YouTube video — that's the *server's*
+hosting address being challenged, not your account. This runs a small program on your own
+machine (a real signed-in browser, on a residential connection) that fetches it instead and
+hands the captions back. See `distil/collector.py`'s module docstring and `AGENTS.md`'s
+"External-collector queue" entry for how it works; this section is just how to run it.
+
+### 10.1 Configure
+
+This machine needs the `youtube` extra installed too, for `yt-dlp` (step 1 used `pip install
+-e ".[anthropic,embed-local,vec,web,dev]"` — add `youtube` to that list, or run
+`pip install -e ".[youtube]"` if this is a separate machine from your main setup). The first
+real fetch may prompt for OS permission to read your browser's cookie storage (macOS Keychain,
+etc.) — that's yt-dlp's `--cookies-from-browser` doing exactly what it says, locally; nothing
+about that prompt reaches distil or the server.
+
+Add to `.env` (see `.env.example`'s "External collector program" block) or export directly:
+```
+$ export DISTIL_COLLECTOR_SERVER_URL=https://your-app.up.railway.app
+$ export DISTIL_COLLECTOR_TOKEN=<the same secret you set as DISTIL_COLLECTOR_TOKEN on the server>
+$ export DISTIL_COLLECTOR_BROWSER=chrome   # or firefox, safari, chrome:Default, ... — leave unset to fetch anonymously
+```
+`DISTIL_COLLECTOR_TOKEN` is a separate credential from your site login: it can only claim and
+submit videos through `/collector/*`, never read your knowledge base, ask a question, or log
+in as you. Keep it out of version control exactly like your other secrets.
+
+### 10.2 Run it
+
+```
+$ source .venv/bin/activate
+$ set -a; source .env; set +a
+$ distil collector-run
+```
+It polls the server, fetches any waiting video, submits the transcript back, pauses, and
+repeats — forever, until you stop it with Ctrl-C. Every fetch logs whether it used a signed-in
+browser session or fell back to anonymous; if you expected "signed_in" and see "anonymous",
+you're signed out of that browser (or `DISTIL_COLLECTOR_BROWSER` names the wrong one).
+
+### 10.3 Have it start with your machine (optional)
+
+A plain `launchd` job on macOS — two files, two commands, nothing to install. To remove it
+later: run the `unload` command below and delete the plist.
+
+Create `~/Library/LaunchAgents/io.distil.collector.plist` (fill in your real paths/values,
+then `chmod 600` it — it contains your collector token):
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>io.distil.collector</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/path/to/distil/.venv/bin/distil</string>
+    <string>collector-run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DISTIL_COLLECTOR_SERVER_URL</key><string>https://your-app.up.railway.app</string>
+    <key>DISTIL_COLLECTOR_TOKEN</key><string>YOUR_TOKEN_HERE</string>
+    <key>DISTIL_COLLECTOR_BROWSER</key><string>chrome</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/distil-collector.log</string>
+  <key>StandardErrorPath</key><string>/tmp/distil-collector.log</string>
+</dict>
+</plist>
+```
+```
+$ launchctl load ~/Library/LaunchAgents/io.distil.collector.plist   # start now + on every login
+$ launchctl unload ~/Library/LaunchAgents/io.distil.collector.plist # stop and remove from startup
+```
+
+Not on macOS? The same two ideas — run this command, restart it if it dies, load these env
+vars — map onto a single `@reboot` line in `crontab -e` or a small systemd user unit with the
+same `ExecStart`/`Environment` lines; no framework needed either way.
+
 ---
 
 ## Quick reference — daily use, once set up
@@ -317,6 +397,7 @@ $ distil list                              # see entries
 $ distil show <entry_id>                   # read one
 $ distil score <entry_id> --score N --reason <reason>
 $ distil ask "your question"               # query your notes
+$ distil collector-run                     # (only if you run the external collector — see §10)
 ```
 
 ## If something goes wrong
