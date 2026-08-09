@@ -166,8 +166,7 @@ PHASE_LABELS: dict[str, str] = {
     "caption_parse": "Parsing captions",
     "ingest": "Reading transcript",
     "metadata": "Fetching video info",
-    "triage": "Checking value",
-    "extract": "Extracting knowledge",
+    "extract": "Classifying & extracting knowledge",
     "normalize": "Normalizing items",
     "link": "Linking to profile",
     "note": "Writing teaching note",
@@ -186,12 +185,18 @@ def _build_phase_plan(
     """The ordered phases *this* job will actually run, given its kind and the pipeline flags.
 
     Declaring the total from these flags up front (rather than a fixed 9) is what keeps the
-    step count honest for jobs where graph/canonicalize/concept_edges are disabled.
+    step count honest for jobs where graph/canonicalize/concept_edges are disabled. Triage is no
+    longer its own phase — it's merged into "extract" (one strong-tier call; see pipeline.py's
+    module docstring). "narrative_summary" is listed right after "metadata", before "extract",
+    reflecting when it actually starts (the cheap-tier summary runs concurrently with "extract",
+    not after "note" — its belated "finish" event doesn't disturb this ordering, since
+    current_phase only ever advances on a "start" event; see _PhaseReporter.on_phase).
     """
     pre = ["transcript_fetch", "caption_parse"] if job.kind == "youtube" else ["ingest"]
-    plan = [*pre, "metadata", "triage", "extract", "normalize", "link", "note"]
+    plan = [*pre, "metadata"]
     if enable_narrative_summary:
         plan.append("narrative_summary")
+    plan += ["extract", "normalize", "link", "note"]
     if enable_graph:
         plan.append("graph")
     plan.append("file")
@@ -422,7 +427,7 @@ def _time_block(timings: dict[str, float], stage: str, fn):
 
 def _format_timings(timings: dict[str, float], total: float) -> str:
     ordered = [
-        "ingest", "metadata", "triage", "extract", "normalize", "link", "note",
+        "ingest", "metadata", "narrative_summary", "extract", "normalize", "link", "note",
         "embedder", "file",
     ]
     parts = [

@@ -41,6 +41,10 @@ _NOTE = json.dumps({
 })
 
 
+def _merged(triage_json: str, items_json: str) -> str:
+    return f"<TRIAGE>\n{triage_json}\n</TRIAGE>\n<ITEMS>\n{items_json}\n</ITEMS>"
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
@@ -60,7 +64,7 @@ def env(tmp_path, monkeypatch):
 
 def _seed_entry(monkeypatch):
     monkeypatch.setattr(
-        cli, "_make_client", lambda: FakeClient(responses=[_TRIAGE, _EXTRACT, _LINK, _NOTE])
+        cli, "_make_client", lambda: FakeClient(responses=[_merged(_TRIAGE, _EXTRACT), _LINK, _NOTE])
     )
     runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
 
@@ -109,7 +113,7 @@ def test_c4_ask_lookup_only_lists_sources(env, monkeypatch):
 def test_c5_reindex_backfills(env, monkeypatch):
     # file an entry WITHOUT embedding (simulate pre-read-layer) by disabling the embedder
     monkeypatch.setattr(
-        cli, "_make_client", lambda: FakeClient(responses=[_TRIAGE, _EXTRACT, _LINK, _NOTE])
+        cli, "_make_client", lambda: FakeClient(responses=[_merged(_TRIAGE, _EXTRACT), _LINK, _NOTE])
     )
     monkeypatch.setattr(cli, "_safe_embedder", lambda: None)
     runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])

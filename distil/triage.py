@@ -10,6 +10,14 @@ quality-critical output; ``density``/``transcript_loss`` are informational conte
 depend on), but the pipeline never acts on it — the owner's decision to keep a video is trusted
 unconditionally, and the only quality gate is ``ingest.py``'s word-count check (owner decision;
 see ``distil/pipeline.py``'s module docstring).
+
+**Not called by the production pipeline anymore.** ``run_pipeline`` reads the transcript once,
+through ``extract.run_triage_extract`` (a merged triage+extraction call — see that function's
+docstring and ``distil/prompts/triage_extract.py``), which reuses this module's JSON parser
+(:func:`parse_triage_response`) on its ``<TRIAGE>`` section. ``run_triage``/this module's own
+standalone model call stay as a reusable, independently-testable classifier — the gated eval
+suite (``tests/eval/test_triage_eval.py``) and any future diagnostic use still exercise it
+directly, isolated from extraction.
 """
 
 from __future__ import annotations
@@ -41,11 +49,17 @@ class TriageResult:
 def run_triage(transcript: Transcript, client: LLMClient) -> TriageResult:
     prompt = build_triage_prompt(transcript.full_text())
     raw = client.complete(prompt, system=SYSTEM)
-    triage = _parse(raw)
+    triage = parse_triage_response(raw)
     return TriageResult(triage=triage, raw=raw)
 
 
-def _parse(raw: str) -> Triage:
+def parse_triage_response(raw: str) -> Triage:
+    """Parse a raw model response into a schema-valid :class:`Triage`.
+
+    Shared with ``extract.run_triage_extract``, which parses this exact JSON shape out of a
+    larger merged response's ``<TRIAGE>`` section — the format (fenced or bare JSON object,
+    optionally with surrounding prose) is identical either way.
+    """
     text = _strip_fence(raw).strip()
     try:
         data = json.loads(text)

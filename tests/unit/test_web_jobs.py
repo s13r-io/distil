@@ -477,7 +477,7 @@ def test_web_distill_job_skips_inline_graph_and_reports_timings(tmp_path, monkey
     def fake_run_pipeline(*_args, **kwargs):
         config = kwargs["config"]
         captured["enable_graph"] = config.enable_graph
-        config.timing_callback("triage", 1.26)
+        config.timing_callback("extract", 1.26)
         return KBEntry.model_validate({
             "entry_id": "e_fast",
             "source": {"title": "Fast note", "captured_at": "2026-06-15T00:00:00"},
@@ -506,7 +506,7 @@ def test_web_distill_job_skips_inline_graph_and_reports_timings(tmp_path, monkey
     assert result["status"] == jobsmod.STATUS_DONE
     assert captured["enable_graph"] is False
     assert scheduled == ["e_fast"]
-    assert "triage 1.3s" in result["summary"]
+    assert "extract 1.3s" in result["summary"]
     assert "graph updating" in result["summary"]
     out = capsys.readouterr().out
     line = next(line for line in out.splitlines() if line.startswith("distil_timing "))
@@ -514,7 +514,7 @@ def test_web_distill_job_skips_inline_graph_and_reports_timings(tmp_path, monkey
     assert payload["job_id"] == job.job_id
     assert payload["entry_id"] == "e_fast"
     assert payload["status"] == "done"
-    assert payload["timings"]["triage"] == 1.26
+    assert payload["timings"]["extract"] == 1.26
 
 
 # ---- Phase A visible progress, wired through _distill_job (no LLM) --------------------
@@ -532,9 +532,9 @@ def test_distill_job_persists_phase_durations_and_current_phase(tmp_path, monkey
     def fake_run_pipeline(*_args, **kwargs):
         config = kwargs["config"]
         # Simulate what pipeline._timed does for one stage: entry, timing, exit.
-        config.phase_callback("triage", "start")
-        config.timing_callback("triage", 0.5)
-        config.phase_callback("triage", "finish")
+        config.phase_callback("extract", "start")
+        config.timing_callback("extract", 0.5)
+        config.phase_callback("extract", "finish")
         return KBEntry.model_validate({
             "entry_id": "e_fast",
             "source": {"title": "Fast note", "captured_at": "2026-06-15T00:00:00"},
@@ -559,12 +559,12 @@ def test_distill_job_persists_phase_durations_and_current_phase(tmp_path, monkey
 
     got = jobsmod.JobStore(db).get(job.job_id)
     # ingest + metadata phases ran for real (not mocked) and their durations were persisted,
-    # alongside the pipeline-reported "triage" duration — this is requirement 5 (durations
+    # alongside the pipeline-reported "extract" duration — this is requirement 5 (durations
     # stored) plus requirement 3 (pre-pipeline steps get their own phases).
-    assert got.phase_durations["triage"] >= 0
+    assert got.phase_durations["extract"] >= 0
     assert "ingest" in got.phase_durations
     assert "metadata" in got.phase_durations
-    assert got.current_phase == "triage"
+    assert got.current_phase == "extract"
     assert got.phase_index is not None and got.phase_total is not None
     assert got.phase_index <= got.phase_total
 

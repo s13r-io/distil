@@ -66,8 +66,8 @@ def test_summary_is_unaffected_by_distil_model(monkeypatch):
 
 @pytest.mark.unit
 def test_make_stage_client_uses_the_resolved_model(monkeypatch):
-    monkeypatch.setenv("DISTIL_MODEL_TRIAGE", "claude-sonnet-5")
-    client = make_stage_client("triage")
+    monkeypatch.setenv("DISTIL_MODEL_EXTRACT", "claude-sonnet-5")
+    client = make_stage_client("extract")
     assert client.model == "claude-sonnet-5"
 
 

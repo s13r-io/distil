@@ -54,6 +54,10 @@ _NOTE = json.dumps({
 _CANON_REJECT = json.dumps([{"item_id": "k_01", "decision": "reject"}])
 
 
+def _merged(triage_json: str, items_json: str) -> str:
+    return f"<TRIAGE>\n{triage_json}\n</TRIAGE>\n<ITEMS>\n{items_json}\n</ITEMS>"
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
@@ -79,7 +83,7 @@ def _fake(monkeypatch, responses):
 
 @pytest.mark.unit
 def test_c1_run_file_exits_zero_and_prints_path(env, monkeypatch, tmp_path):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
+    _fake(monkeypatch, [_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE, _CANON_REJECT])
     monkeypatch.setattr(
         cli,
         "fetch_youtube_oembed_metadata",
@@ -114,7 +118,7 @@ def test_c1_run_file_exits_zero_and_prints_path(env, monkeypatch, tmp_path):
 
 @pytest.mark.unit
 def test_c1_run_paste_via_option(env, monkeypatch):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
+    _fake(monkeypatch, [_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE, _CANON_REJECT])
     result = runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
     assert result.exit_code == 0, result.output
     assert ".md" in result.output
@@ -125,7 +129,7 @@ def test_c1_low_value_verdict_still_files_the_entry(env, monkeypatch):
     """The owner's decision to run this transcript overrides the model's verdict — triage
     still classifies it little_to_extract, but that never stops filing (owner decision;
     see distil/pipeline.py's module docstring)."""
-    _fake(monkeypatch, [_TRIAGE_LOW, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
+    _fake(monkeypatch, [_merged(_TRIAGE_LOW, _EXTRACT), _LINK, _NOTE, _CANON_REJECT])
     result = runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
     assert result.exit_code == 0, result.output
     assert ".md" in result.output
@@ -148,7 +152,7 @@ def test_c1_short_paste_is_rejected_clearly(env, monkeypatch):
 
 @pytest.mark.unit
 def test_c2_score_mutates_profile(env, monkeypatch):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
+    _fake(monkeypatch, [_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE, _CANON_REJECT])
     run = runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
     entry_id = run.output.strip().split("/")[-1].replace(".md", "").strip()
 
@@ -164,7 +168,7 @@ def test_c2_score_mutates_profile(env, monkeypatch):
 
 @pytest.mark.unit
 def test_c3_list_and_show(env, monkeypatch):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
+    _fake(monkeypatch, [_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE, _CANON_REJECT])
     run = runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
     entry_id = run.output.strip().split("/")[-1].replace(".md", "").strip()
 
