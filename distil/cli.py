@@ -87,9 +87,11 @@ def _make_extract_client() -> LLMClient:
 # link/note/graph/canonicalize each get the same treatment as _make_extract_client/
 # _make_triage_client: DISTIL_MODEL_<STAGE> has resolved correctly in model_config.py since it
 # was introduced, but nothing actually constructed a client from it here before — every call
-# site used to share one `_make_client()` object across them, so the env var was inert. link and
-# note default to the cheap tier now (model_config.py's module docstring); graph and
-# canonicalize default to DISTIL_MODEL (STRONG_TIER_STAGES) exactly as before.
+# site used to share one `_make_client()` object across them, so the env var was inert. link,
+# note, and graph default to the cheap tier (model_config.py's module docstring — graph moved
+# there from the strong tier, owner decision: it was placed there originally by analogy with
+# canonicalize, never by measurement); canonicalize defaults to DISTIL_MODEL (STRONG_TIER_STAGES)
+# exactly as before.
 def _make_link_client() -> LLMClient:
     return make_stage_client("link")
 

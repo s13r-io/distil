@@ -237,8 +237,9 @@ def test_c3_run_bad_url_is_friendly(env, monkeypatch):
 # every stage's client-construction seam (_make_link_client, _make_note_client, etc.) routed
 # through model_config.make_stage_client, cli.py/web/app.py still shared one _make_client()
 # object across link/note/graph/canonicalize — the env var was inert for those four stages.
-# triage/link/note default to the cheap tier now (model_config.py's module docstring); extract/
-# graph/canonicalize stay on DISTIL_MODEL.
+# triage/link/note/graph default to the cheap tier now (model_config.py's module docstring —
+# graph moved there from the strong tier, owner decision: never measured, placed strong
+# originally only by analogy with canonicalize); extract/canonicalize stay on DISTIL_MODEL.
 
 
 @pytest.mark.unit
@@ -246,7 +247,6 @@ def test_c3_run_bad_url_is_friendly(env, monkeypatch):
     "make_fn_name,stage",
     [
         ("_make_extract_client", "extract"),
-        ("_make_graph_client", "graph"),
         ("_make_canonicalize_client", "canonicalize"),
     ],
 )
@@ -264,11 +264,12 @@ def test_per_stage_client_defaults_to_distil_model(env, monkeypatch, make_fn_nam
         ("_make_triage_client", "triage"),
         ("_make_link_client", "link"),
         ("_make_note_client", "note"),
+        ("_make_graph_client", "graph"),
     ],
 )
 def test_cheap_tier_stage_client_ignores_distil_model_by_default(env, monkeypatch, make_fn_name, stage):
-    """triage/link/note default to the cheap tier (model_config.py's module docstring) — they
-    must NOT silently follow DISTIL_MODEL the way the strong-tier stages do."""
+    """triage/link/note/graph default to the cheap tier (model_config.py's module docstring) —
+    they must NOT silently follow DISTIL_MODEL the way the strong-tier stages do."""
     from distil.model_config import DEFAULT_CHEAP_TIER_MODEL
     make_fn = getattr(cli, make_fn_name)
     assert make_fn().model == DEFAULT_CHEAP_TIER_MODEL

@@ -65,8 +65,9 @@ both construct all six via ``model_config.make_stage_client(stage)`` (each stage
 ``DISTIL_MODEL_<STAGE>`` in the environment genuinely changes only that stage's model — no
 further ``pipeline.py`` change required, and no caller needs to pass these explicitly to get
 today's defaults (every stage still resolves to its tier default unless overridden — see
-``model_config.py``'s ``STRONG_TIER_STAGES``/``CHEAP_TIER_STAGES``). A settings UI for editing
-these values is a deliberate follow-up; the wiring itself is not.
+``model_config.py``'s ``STRONG_TIER_STAGES``/``CHEAP_TIER_STAGES``). The web app's ``/settings``
+page (``distil/model_settings.py``) lets the owner store a per-stage override durably, on top of
+this same env-var precedence — see ``model_config.py``'s "Settings-UI precedence" section.
 """
 
 from __future__ import annotations

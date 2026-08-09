@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Settings - Distil{% endblock %}
+{% block content %}
+
+<header class="hero-strip">
+  <div>
+    <h1>Model settings</h1>
+    <p>Choose which model each pipeline stage uses. A change here takes effect on the next
+      video — no redeploy, no env var to edit. Never enter or view an API key on this page.</p>
+  </div>
+</header>
+
+<main class="library-page">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Pipeline stages</h2>
+    </div>
+    <div id="settings-list" class="library-list"></div>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script id="stage-data" type="application/json">{{ stages|tojson }}</script>
+<script>
+const STAGES = JSON.parse(document.getElementById('stage-data').textContent);
+function esc(s){const d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML;}
+function sourceBadge(source){
+  const label={stored:'Stored setting',env:'Environment variable',default:'Built-in default',unconfigured:'Not configured'}[source]||source;
+  const cls={stored:'ok',env:'info',default:'',unconfigured:'danger'}[source]||'';
+  return '<span class="badge '+cls+'">'+esc(label)+'</span>';
+}
+function renderRow(row){
+  const modelText = row.model==null ? '(none — set DISTIL_MODEL)' : row.model;
+  const warning = row.faithfulness_warning
+    ? '<p class="muted warning-text" data-role="warning" style="margin:6px 0 0;color:var(--warn);">'+esc(row.faithfulness_warning)+'</p>'
+    : '<p class="muted" data-role="warning" style="margin:6px 0 0;display:none;"></p>';
+  return ''
+    +'<div class="entryrow" data-stage="'+esc(row.stage)+'" style="display:block;">'
+    +'<div class="top"><span class="entry-title">'+esc(row.stage)+'</span>'
+    +'<span data-role="source">'+sourceBadge(row.source)+'</span></div>'
+    +'<div class="meta-line"><span class="muted" data-role="model">'+esc(modelText)+'</span>'
+    +(row.env_var ? '<span class="badge">override: '+esc(row.env_var)+'</span>' : '')+'</div>'
+    +warning
+    +'<div class="row wrap" style="gap:8px;margin-top:10px;">'
+    +'<input type="text" data-role="input" placeholder="e.g. claude-opus-5" value="" style="flex:1;min-width:220px;">'
+    +'<button type="button" data-role="save" class="primary">Save</button>'
+    +'<button type="button" data-role="reset" class="btn"'+(row.has_stored_override?'':' disabled')+'>Reset to default</button>'
+    +'</div>'
+    +'<p class="muted" data-role="error" style="margin:6px 0 0;color:var(--danger);display:none;"></p>'
+    +'</div>';
+}
+function renderAll(){
+  document.getElementById('settings-list').innerHTML = STAGES.map(renderRow).join('');
+  STAGES.forEach(row=>wireRow(row.stage));
+}
+function rowEl(stage){ return document.querySelector('.entryrow[data-stage="'+stage+'"]'); }
+function applyRow(stage, data){
+  const idx = STAGES.findIndex(r=>r.stage===stage);
+  if(idx>=0) STAGES[idx] = {...STAGES[idx], model: data.model, source: data.source, faithfulness_warning: data.faithfulness_warning, has_stored_override: data.source==='stored'};
+  const el = rowEl(stage);
+  el.outerHTML = renderRow(STAGES[idx]);
+  wireRow(stage);
+}
+function wireRow(stage){
+  const el = rowEl(stage);
+  const input = el.querySelector('[data-role="input"]');
+  const errorEl = el.querySelector('[data-role="error"]');
+  el.querySelector('[data-role="save"]').onclick = async ()=>{
+    const model = input.value.trim();
+    errorEl.style.display='none';
+    if(!model) return;
+    const fd = new FormData(); fd.append('model', model);
+    const r = await fetch('/settings/models/'+encodeURIComponent(stage), {method:'POST', body:fd});
+    const data = await r.json();
+    if(!r.ok){
+      errorEl.textContent = data.detail || 'Could not save.';
+      errorEl.style.display='block';
+      return;
+    }
+    applyRow(stage, data);
+  };
+  const resetBtn = el.querySelector('[data-role="reset"]');
+  resetBtn.onclick = async ()=>{
+    const r = await fetch('/settings/models/'+encodeURIComponent(stage)+'/clear', {method:'POST'});
+    const data = await r.json();
+    if(!r.ok){
+      errorEl.textContent = data.detail || 'Could not reset.';
+      errorEl.style.display='block';
+      return;
+    }
+    applyRow(stage, data);
+  };
+}
+renderAll();
+</script>
+{% endblock %}
