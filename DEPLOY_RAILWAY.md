@@ -52,6 +52,13 @@ Optional tuning: `DISTIL_RETRIEVAL_THRESHOLD`, `DISTIL_TOP_K`, `DISTIL_NOVELTY_R
 `DISTIL_PLAYLIST_FETCH_DELAY_SECONDS` (default 3.0 — pause between a playlist's transcript
 fetches). Never commit these — they live only in Railway.
 
+`DISTIL_COLLECTOR_TOKEN`, `DISTIL_COLLECTOR_LEASE_SECONDS` (default 600), and
+`DISTIL_COLLECTOR_EXPIRY_SECONDS` (default 7 days) configure the external-collector queue that
+lets a bot-checked video be fetched from a trusted machine elsewhere instead — see `AGENTS.md`'s
+"External-collector queue" entry. There is no collector program to use this queue yet (a later
+piece), so leave `DISTIL_COLLECTOR_TOKEN` unset until one exists; a bot-checked video just waits
+up to its expiry instead of failing.
+
 > **Local embeddings + Railway:** with `DISTIL_EMBEDDER=local` (the chosen default) a small
 > embedding model loads into the service's RAM and should be baked into the image at build
 > time. Pick an instance with enough memory for it. On a very small instance, set
