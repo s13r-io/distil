@@ -34,7 +34,7 @@ from fastapi.templating import Jinja2Templates
 
 from distil import okf, youtube
 from distil.canonicalize import run_delete_entry_stage
-from distil.cli import _make_client, _make_embedder
+from distil.cli import _make_client, _make_embedder, _make_summary_client
 from distil.graph import link_graph
 from distil.ingest import (
     IngestError,
@@ -48,6 +48,7 @@ from distil.pipeline import PipelineConfig, run_pipeline
 from distil.profile_update import apply_feedback
 from distil.query import ask as run_ask
 from distil.query import stream_ask
+from distil.refresh_summary import refresh_narrative_summary
 from distil.source import (
     SourceMetadata,
     SourceMetadataError,
@@ -168,6 +169,7 @@ PHASE_LABELS: dict[str, str] = {
     "normalize": "Normalizing items",
     "link": "Linking to profile",
     "note": "Writing teaching note",
+    "narrative_summary": "Writing narrative summary",
     "graph": "Linking related entries",
     "file": "Filing entry",
     "canonicalize": "Matching concepts",
@@ -177,6 +179,7 @@ PHASE_LABELS: dict[str, str] = {
 
 def _build_phase_plan(
     job: jobsmod.Job, *, enable_graph: bool, enable_canonicalize: bool, enable_concept_edges: bool,
+    enable_narrative_summary: bool = True,
 ) -> list[str]:
     """The ordered phases *this* job will actually run, given its kind and the pipeline flags.
 
@@ -185,6 +188,8 @@ def _build_phase_plan(
     """
     pre = ["transcript_fetch", "caption_parse"] if job.kind == "youtube" else ["ingest"]
     plan = [*pre, "metadata", "triage", "extract", "normalize", "link", "note"]
+    if enable_narrative_summary:
+        plan.append("narrative_summary")
     if enable_graph:
         plan.append("graph")
     plan.append("file")
@@ -237,9 +242,11 @@ def _distill_job(job: jobsmod.Job) -> dict:
     enable_graph = False
     enable_canonicalize = True
     enable_concept_edges = True
+    enable_narrative_summary = True
     plan = _build_phase_plan(
         job, enable_graph=enable_graph, enable_canonicalize=enable_canonicalize,
         enable_concept_edges=enable_concept_edges,
+        enable_narrative_summary=enable_narrative_summary,
     )
     reporter = _PhaseReporter(jobs_store, job.job_id, plan)
     profile = store.load_profile(_USER_ID) or _default_profile()
@@ -273,10 +280,12 @@ def _distill_job(job: jobsmod.Job) -> dict:
             enable_graph=enable_graph,
             enable_canonicalize=enable_canonicalize,
             enable_concept_edges=enable_concept_edges,
+            enable_narrative_summary=enable_narrative_summary,
             timing_callback=lambda stage, seconds: timings.__setitem__(stage, seconds),
             phase_callback=reporter.on_pipeline_event,
         ),
         embedder=embedder,
+        summary_client=_make_summary_client(),
     )
     total = perf_counter() - total_start
     n = len(entry.knowledge_items)
@@ -1125,6 +1134,18 @@ def create_app() -> FastAPI:
             media_type="text/markdown; charset=utf-8",
             headers=headers,
         )
+
+    @app.post("/entries/{entry_id}/refresh-summary")
+    def refresh_summary(entry_id: str):
+        """Generate/regenerate ONLY this entry's narrative summary, from its stored raw
+        transcript — never re-fetches from YouTube, never re-runs extraction (see
+        distil/refresh_summary.py). Reports plainly (200 with ok=false) when no stored
+        transcript is available, rather than a generic error."""
+        store = _store()
+        result = refresh_narrative_summary(entry_id, store, _make_summary_client())
+        if not result.ok and result.message.startswith("Entry"):
+            return JSONResponse({"detail": result.message}, status_code=404)
+        return JSONResponse({"ok": result.ok, "message": result.message})
 
     @app.post("/entries/{entry_id}/score")
     def score(entry_id: str, score: int = Form(...), reason: str = Form(...)):

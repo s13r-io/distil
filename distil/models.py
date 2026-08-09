@@ -204,6 +204,20 @@ class ReviewQuestion(_Model):
     item_ids: list[str] = Field(default_factory=list)
 
 
+class NarrativeSummary(_Model):
+    """A whole-transcript narrative account (narrative summary layer). Unlike
+    ``DistilledNote``, which is built only from extracted ``KnowledgeItem`` objects and so
+    inherits extraction's coverage gaps, this reads the transcript directly and is generated
+    on a cheaper model tier (compression, not judgement) — see ``distil/summary.py``. Carries
+    no citations: it is the readable account to read first, not the grounded structure to
+    trust and check (that remains ``DistilledNote``)."""
+
+    text: str
+    chunk_count: int
+    model: str
+    generated_at: str
+
+
 class DistilledNote(_Model):
     title: str = ""
     core_takeaway: GroundedText
@@ -240,6 +254,7 @@ class KBEntry(_Model):
     knowledge_items: list[KnowledgeItem] = Field(default_factory=list)
     application_links: list[ApplicationLink] = Field(default_factory=list)
     distilled_note: DistilledNote | None = None
+    narrative_summary: NarrativeSummary | None = None
     related_entries: list[RelatedEntry] = Field(default_factory=list)
     tags: Tags = Field(default_factory=Tags)
     feedback: Feedback = Field(default_factory=Feedback)

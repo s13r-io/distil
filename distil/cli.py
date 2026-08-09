@@ -21,11 +21,13 @@ from .collector import CollectorConfigError, config_from_env, run_collector
 from .embed import Embedder, make_embedder
 from .ingest import IngestError, Transcript, ingest_file, ingest_text
 from .llm import AnthropicClient, LLMClient
+from .model_config import make_stage_client
 from .models import Profile
 from .pipeline import PipelineConfig, run_pipeline
 from .profile_update import apply_feedback
 from .query import ask as run_ask
 from .reconcile import reconcile_okf_bundle
+from .refresh_summary import refresh_narrative_summary
 from .source import (
     SourceMetadata,
     SourceMetadataError,
@@ -54,6 +56,15 @@ def _make_store() -> Store:
 
 def _make_client() -> LLMClient:
     return AnthropicClient()
+
+
+def _make_summary_client() -> LLMClient:
+    """The narrative-summary layer's cheap-tier client — resolved via the general per-stage
+    mechanism (``distil/model_config.py``), deliberately never ``DISTIL_MODEL`` unless
+    ``DISTIL_MODEL_SUMMARY`` is set to it explicitly. Always constructible (the "summary" stage
+    has a hardcoded cheap-tier default), unlike ``_make_client``, whose ``ANTHROPIC_API_KEY``
+    requirement is enforced lazily at the first real call."""
+    return make_stage_client("summary")
 
 
 def _make_embedder() -> Embedder:
@@ -148,6 +159,7 @@ def run(
                 model_version=os.environ.get("DISTIL_MODEL", ""),
             ),
             embedder=embedder,
+            summary_client=_make_summary_client(),
         )
     except RuntimeError as exc:
         # e.g. missing ANTHROPIC_API_KEY / DISTIL_MODEL
@@ -244,6 +256,20 @@ def delete_entry(
         raise typer.Exit(0)
     run_delete_entry_stage(entry_id, store)
     typer.echo(f"Deleted {entry_id}.")
+
+
+@app.command(name="refresh-summary")
+def refresh_summary(entry_id: str = typer.Argument(..., help="The entry id to refresh.")):
+    """Regenerate ONLY an entry's narrative summary, from its stored raw transcript.
+
+    Never re-fetches from YouTube and never re-runs extraction — items, concepts, and
+    entities are untouched. Reports plainly if no stored transcript is available.
+    """
+    store = _make_store()
+    result = refresh_narrative_summary(entry_id, store, _make_summary_client())
+    typer.echo(result.message)
+    if not result.ok:
+        raise typer.Exit(1)
 
 
 @app.command()

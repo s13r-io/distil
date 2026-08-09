@@ -540,6 +540,33 @@ def _render_raw(entry: KBEntry, transcript: Transcript, slug: str) -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
+_RAW_SEGMENT_LINE = re.compile(r"^\*\*\[.*?\]\*\*\s?(.*)$")
+
+
+def load_raw_transcript_text(slug: str, okf_root: str | Path) -> str | None:
+    """Recover the transcript's plain text back out of ``raw/<slug>.md`` (the immutable
+    per-video page :func:`export_entry` writes) — the only persisted copy of a filed entry's
+    transcript. Used by the narrative-summary refresh action, which must work from stored
+    text and never re-fetch. Returns ``None`` when the page doesn't exist (an entry filed
+    before OKF export existed, or one whose raw page was later removed by ``reconcile.py``) —
+    a real, expected state this system produces, not a bug to work around."""
+    path = Path(okf_root) / "raw" / f"{slug}.md"
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-8")
+    body = text.split("## Transcript", 1)
+    if len(body) < 2:
+        return None
+    lines: list[str] = []
+    for line in body[1].splitlines():
+        match = _RAW_SEGMENT_LINE.match(line.strip())
+        if match and match.group(1):
+            lines.append(match.group(1))
+    if not lines:
+        return None
+    return " ".join(lines)
+
+
 # ---- indexes -------------------------------------------------------------------------------
 
 
