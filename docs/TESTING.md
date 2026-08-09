@@ -33,7 +33,10 @@ Create at minimum these labelled transcripts (short, hand-written or trimmed rea
 - `mixed_talk.txt` — conceptual + opinion + experiential mixed.
 
 Plus input-format fixtures for ingestion: `sample.srt` (real SRT timestamps), `inline_ts.txt`
-(plain text with inline `00:12:30` markers), and `no_timestamps.md` (prose, no timestamps at all).
+(plain text with inline `00:12:30` markers), `no_timestamps.md` (prose, no timestamps at all), and
+`youtube_rolling_caption_mmss.txt` (a verbatim excerpt of a real YouTube transcript-panel paste,
+inline `MM:SS`-per-line with text-less rolling-preview lines — not hand-typed, per the project's
+standing rule against fixtures sharing a wrong assumption with the code under test).
 
 Each fixture has a sibling `*.expected.json` describing properties to assert (not exact output):
 e.g. `{ "verdict": "little_to_extract" }` for the vlog, `{ "transcript_loss": "high" }` for screen-share.
@@ -54,6 +57,11 @@ that must abstain.
 - T-I6: the normalized transcript shape is identical across `.srt`/`.txt`/`.md`/paste (downstream stages don't care about source format).
 - T-I7 (owner decision, supersedes triage's old `little_to_extract` short-circuit): a transcript below `DISTIL_MIN_TRANSCRIPT_WORDS` (default 50) raises `TranscriptTooShortError` on every ingest path (`ingest_text`, `ingest_file`'s `.srt` and text branches, `ingest_srt_text`) — a distinct `IngestError` subclass, never conflated with a read/parse/fetch failure; a transcript at or above the floor is never rejected on quality grounds, and the threshold is configurable.
 - T-I8: `is_thin_source(word_count)` — a visibility signal, never a rejection — is `True` only strictly between 0 and `DISTIL_THIN_TRANSCRIPT_WORDS` (default 500); `0` (unknown, pre-existing entries) and values at/above the threshold are `False`.
+- T-I9 (inline `MM:SS` rolling-caption dumps — the YouTube-transcript-panel paste shape): a majority-of-non-blank-lines `MM:SS` input routes to `_parse_mmss_rolling_caption`, producing clean prose segments (no leaked timestamp tokens) with `HH:MM:SS`-normalized timestamps and a word count that reflects real speech, not injected timestamp digits.
+- T-I10: rolling-caption preview lines (text-less lines previewing the next timestamp just before its real line arrives) are discarded — never kept as empty segments and never merged/duplicated into a neighboring segment's text.
+- T-I11: ordinary prose without timestamps, and prose where only a single line happens to open with something clock-shaped (a spoken time, not a caption mark), stay on the plain-prose path — the majority-of-lines bar is what prevents misdetection.
+- T-I12: once the majority bar is cleared, the parser itself demands an absolute bar: a line that doesn't match the `MM:SS`-open-of-line shape at all, or matched timestamps that are not non-decreasing start-to-end, raises `IngestError` rather than guessing which lines are captions.
+- T-I13: the SRT ingest path (`ingest_srt_text` → `_parse_srt`, and by extension the live YouTube/collector fetch paths built on it) is confirmed unaffected by the `MM:SS` detection added for T-I9 — its output is unchanged.
 
 ### youtube.py (fetch layer — `yt-dlp` invoked via an injectable ``run``, no real subprocess/network in unit tests)
 - T-Y1: a playlist URL (`?list=` with no `v`, or `/playlist` path) is distinguished from a single video URL.
