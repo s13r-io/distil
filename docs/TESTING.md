@@ -120,6 +120,14 @@ that must abstain.
 - T-COL10: a transient collector<->server HTTP failure — both a pure transport error and a 5xx response — retries with exponential backoff in `CollectorClient._request` and succeeds once the server responds; a persistent transport failure still raises `CollectorHTTPError` after exhausting attempts; a 4xx is never retried.
 - T-COL11: a lost `submit_transcript` response (the request lands and the server queues the job, but the client never sees the reply) is retried and resends the identical job_id + srt text — proved with an opener that performs the real request then raises as if the response were lost — resulting in exactly one queued job, not a duplicate or corrupted state, relying on `/collector/jobs/{id}/transcript`'s own idempotency (T-COL2) rather than any client-side dedup; `run_collector` survives this without crashing.
 
+### collector_net.py — DNS fallback for the collector's system resolver (real `socket.gaierror` from a fake resolver, real local TLS server with a freshly-generated cert; never a mocked `open_with_dns_fallback`)
+- T-COL13: `open_with_dns_fallback` resolves normally; when `resolve` raises `socket.gaierror` and a fallback address is stored for that hostname, it connects via the fallback and the request still succeeds.
+- T-COL14: with no fallback stored, a `socket.gaierror` propagates as `URLError` on every call (never gives up permanently, never fabricates an address).
+- T-COL15: a successful connection — whether resolved normally or via fallback — records the address it used in `DNSFallbackStore`, and the value persists across a fresh `DNSFallbackStore` instance over the same file (survives a restart).
+- T-COL16: once `resolve` starts succeeding again, the next call takes the normal path and never consults or reports the stored fallback (`on_degraded` fires only on the degraded call, not the recovered one).
+- T-COL17: a stored fallback address that no longer works raises `URLError` for that call, but the very next call retries real resolution and succeeds — a dead cached address never traps the collector.
+- T-COL18: connecting to a pinned literal address still performs genuine certificate verification against the request's hostname — a hostname the certificate wasn't issued for fails with `ssl.SSLCertVerificationError`, and the matching hostname succeeds.
+
 ### cli.py — `distil collector-run`
 - T-COL12: fails cleanly (no traceback) with a readable message when required collector env vars are missing; otherwise starts `run_collector` with the env-derived config and reports whether a browser is configured; a `KeyboardInterrupt` stops the loop cleanly rather than propagating.
 
