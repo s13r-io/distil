@@ -2,10 +2,27 @@
 
 Parses any supported input — ``.srt``, ``.txt``, ``.md``, or pasted text — into one
 normalized :class:`Transcript`: an ordered list of :class:`Segment` ``{text, timestamp?,
-locator}``. Timestamps are captured when the source has them (SRT cues or inline
-``HH:MM:SS`` markers) and left ``None`` otherwise; a ``locator`` (``seg:<index>``) is always
-populated so untimestamped sources still have a stable pointer. Downstream stages depend only
-on this shape, never on the original format.
+locator}``. Timestamps are captured when the source has them (SRT cues, inline ``HH:MM:SS``
+markers, or inline ``MM:SS`` rolling-caption dumps — see below) and left ``None`` otherwise; a
+``locator`` (``seg:<index>``) is always populated so untimestamped sources still have a stable
+pointer. Downstream stages depend only on this shape, never on the original format.
+
+**Inline ``MM:SS`` rolling-caption dumps (fixes a real defect: pasted YouTube transcripts were
+silently mangled).** Copying YouTube's transcript panel produces a shape the old inline-``HH:MM:SS``
+detector never recognized: every non-blank line opens with a bare ``MM:SS`` timestamp, and rolling
+playback duplicates each upcoming timestamp on its own text-less line just before the real text
+line for it arrives (confirmed against a real ~4,600-line export). Treating that as ordinary prose
+(the old fallback) spliced every timestamp digit into the middle of the speech — on the owner's own
+~8,600-word file this injected 3,073 timestamp tokens (26% word-count inflation) and broke verbatim
+quote matching badly enough that extraction dropped every item. ``_parse_mmss_rolling_caption``
+handles it: text-less lines are discarded as caption-window noise, real lines become segments with
+their ``MM:SS`` converted to ``HH:MM:SS`` for display, and text stays untouched. Detecting this shape
+is deliberately conservative given how easily ``MM:SS`` collides with spoken content (`"at 3:15 we
+start"`): a majority of non-blank lines must open with the pattern (mirroring the existing
+``HH:MM:SS`` bar) *and*, inside the parser itself, EVERY non-blank line must match and the matched
+timestamps must be non-decreasing start-to-end — genuine caption exports satisfy both; scattered
+prose mentioning clock times essentially never does. Either check failing raises ``IngestError``
+rather than guessing which lines are captions.
 
 **The only quality gate in the pipeline is a word count (owner decision, supersedes the old
 triage ``little_to_extract`` short-circuit).** ``_check_min_words`` runs at the tail of
@@ -26,7 +43,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-_INLINE_TS = re.compile(r"^\s*(\d{1,2}:\d{2}:\d{2})(?:[.,]\d+)?\s+(.*)$")
+_INLINE_TS_HHMMSS = re.compile(r"^\s*(\d{1,2}:\d{2}:\d{2})(?:[.,]\d+)?\s+(.*)$")
+_INLINE_TS_MMSS = re.compile(r"^\s*(\d{1,2}:\d{2})[ \t]*(.*)$")
 _SRT_TIME = re.compile(r"(\d{2}):(\d{2}):(\d{2})[.,]\d{3}\s*-->")
 _SRT_INDEX_ONLY = re.compile(r"^\d+$")
 
@@ -131,17 +149,22 @@ def ingest_srt_text(raw: str) -> Transcript:
 
 
 def ingest_text(text: str) -> Transcript:
-    """Normalize pasted/plain text. Detects inline ``HH:MM:SS`` markers per line."""
+    """Normalize pasted/plain text. Detects inline ``HH:MM:SS`` and ``MM:SS`` markers per line."""
     if not text or not text.strip():
         raise IngestError("Empty input: nothing to ingest.")
 
     # If most non-blank lines start with an inline timestamp, treat line-per-segment.
+    # HH:MM:SS is checked first since its stricter shape can't collide with MM:SS's.
     lines = [ln for ln in text.splitlines() if ln.strip()]
-    ts_lines = [ln for ln in lines if _INLINE_TS.match(ln)]
-    if lines and len(ts_lines) >= max(1, len(lines) // 2):
+    hhmmss_lines = [ln for ln in lines if _INLINE_TS_HHMMSS.match(ln)]
+    if lines and len(hhmmss_lines) >= max(1, len(lines) // 2):
         transcript = _parse_inline_timestamped(text)
     else:
-        transcript = _parse_paragraphs(text)
+        mmss_lines = [ln for ln in lines if _INLINE_TS_MMSS.match(ln)]
+        if lines and len(mmss_lines) >= max(1, len(lines) // 2):
+            transcript = _parse_mmss_rolling_caption(text)
+        else:
+            transcript = _parse_paragraphs(text)
     _check_min_words(transcript)
     return transcript
 
@@ -192,7 +215,7 @@ def _parse_inline_timestamped(text: str) -> Transcript:
     for line in text.splitlines():
         if not line.strip():
             continue
-        m = _INLINE_TS.match(line)
+        m = _INLINE_TS_HHMMSS.match(line)
         if m:
             ts, body = m.group(1), m.group(2).strip()
             ts = _normalize_ts(ts)
@@ -205,6 +228,59 @@ def _parse_inline_timestamped(text: str) -> Transcript:
     if not segments:
         raise IngestError("No usable lines found in input.")
     return Transcript(segments=segments)
+
+
+def _parse_mmss_rolling_caption(text: str) -> Transcript:
+    """Parse a YouTube-transcript-panel-style ``MM:SS`` caption dump.
+
+    Called only after ``ingest_text`` has already seen a majority of non-blank lines open
+    with the ``MM:SS`` shape. From here the bar for actually trusting that shape is higher and
+    absolute, not majority: every non-blank line must match, and the matched timestamps must
+    never decrease — either failing means this isn't confidently a caption export (could be
+    prose that coincidentally opens several lines with something clock-like), so this refuses
+    with IngestError instead of guessing which lines are real captions.
+    """
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    parsed: list[tuple[int, str]] = []
+    for ln in lines:
+        m = _INLINE_TS_MMSS.match(ln)
+        if not m:
+            raise IngestError(
+                "Input looks like MM:SS-timestamped captions, but line "
+                f"{ln.strip()!r} doesn't match that shape — refusing rather than "
+                "guessing which lines are captions."
+            )
+        minutes, seconds = m.group(1).split(":")
+        parsed.append((int(minutes) * 60 + int(seconds), m.group(2).strip()))
+
+    for (prev_ts, _), (cur_ts, _) in zip(parsed, parsed[1:], strict=False):
+        if cur_ts < prev_ts:
+            raise IngestError(
+                "Input has MM:SS-shaped line starts, but the timestamps are not "
+                "in non-decreasing order — this doesn't look like real caption "
+                "output, refusing rather than guessing."
+            )
+
+    segments: list[Segment] = []
+    idx = 0
+    for total_seconds, body in parsed:
+        # A rolling-caption window previews its next timestamp on a text-less line just
+        # before the real text for it appears; that preview carries no speech and is noise.
+        if not body:
+            continue
+        segments.append(
+            Segment(text=body, locator=f"seg:{idx}", timestamp=_seconds_to_hhmmss(total_seconds))
+        )
+        idx += 1
+    if not segments:
+        raise IngestError("No usable caption lines found in input.")
+    return Transcript(segments=segments)
+
+
+def _seconds_to_hhmmss(total_seconds: int) -> str:
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 def _parse_paragraphs(text: str) -> Transcript:

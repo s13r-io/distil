@@ -9,6 +9,7 @@ rule): a transcript below the minimum word count is rejected with TranscriptTooS
 distinct from IngestError's other failure modes (missing file, empty input, bad format).
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -199,6 +200,127 @@ def test_a_transcript_well_above_minimum_is_never_rejected():
     rubbish = " ".join(["like", "um", "you", "know"] * 20)  # 80 low-content words
     t = ingest_text(rubbish)
     assert len(t.segments) >= 1
+
+
+# ---- Inline MM:SS rolling-caption dumps (YouTube transcript-panel paste shape) -----------
+#
+# Fixture is a verbatim 100-line excerpt of a real YouTube transcript-panel export (see
+# CLAUDE.md's ingest entry) — never hand-typed — so these tests can't share a wrong assumption
+# with the implementation the way a hand-typed fixture once did for a different bug.
+
+
+@pytest.mark.unit
+def test_mmss_rolling_caption_fixture_parses_clean_speech_and_timestamps():
+    t = ingest_file(FIX / "youtube_rolling_caption_mmss.txt")
+    assert len(t.segments) == 34
+    assert t.segments[0].text == "Um, hi everyone. Good evening. I think"
+    assert t.segments[0].timestamp == "00:00:58"
+    assert t.segments[1].timestamp == "00:01:00"
+    # timestamps normalized to HH:MM:SS, consistent with the other inline-timestamp path
+    assert all(s.timestamp is not None and s.timestamp.count(":") == 2 for s in t.segments)
+
+
+@pytest.mark.unit
+def test_mmss_rolling_caption_word_count_reflects_real_prose_not_timestamp_tokens():
+    """The old paragraph fallback spliced every MM:SS token into the text as if spoken;
+    the real defect this fixes: on this excerpt that would have counted ~34 extra
+    timestamp-shaped tokens as words. The fixed word count must be prose-only."""
+    t = ingest_file(FIX / "youtube_rolling_caption_mmss.txt")
+    assert len(t.full_text().split()) == 196
+
+
+@pytest.mark.unit
+def test_mmss_rolling_caption_leaks_no_timestamp_tokens_into_text():
+    t = ingest_file(FIX / "youtube_rolling_caption_mmss.txt")
+    for seg in t.segments:
+        assert not re.search(r"\b\d{1,2}:\d{2}\b", seg.text), seg.text
+
+
+@pytest.mark.unit
+def test_mmss_rolling_caption_preview_lines_do_not_duplicate_or_appear_as_segments():
+    """Rolling playback previews the next timestamp on its own text-less line just before
+    the real text line for it arrives — that preview must be dropped, not kept as an empty
+    segment and not merged into the following segment's text."""
+    t = ingest_file(FIX / "youtube_rolling_caption_mmss.txt")
+    assert all(seg.text.strip() for seg in t.segments)
+    # "I'm audible to all of you guys. Let me" / "know in the chat..." are two distinct
+    # segments in the source, not one merged/duplicated line.
+    texts = [seg.text for seg in t.segments]
+    assert texts.count("I'm audible to all of you guys. Let me") == 1
+    assert texts.count("know in the chat if I'm audible.") == 1
+
+
+@pytest.mark.unit
+def test_ordinary_prose_without_timestamps_is_unaffected_by_mmss_detection():
+    prose = (
+        "We covered a lot of ground today, from architecture to deployment.\n\n"
+        f"{_LONG_ENOUGH} and then some more discussion followed after that point."
+    )
+    t = ingest_text(prose)
+    assert len(t.segments) == 2
+    assert all(s.timestamp is None for s in t.segments)
+
+
+@pytest.mark.unit
+def test_a_single_spoken_time_is_not_mistaken_for_a_caption_timestamp():
+    """A speaker legitimately saying something that looks like a timestamp must not flip
+    ordinary prose into caption parsing — only one line out of many opens with a digit
+    pattern here, well under the majority bar, so it stays plain text untouched."""
+    prose = (
+        "So here's the plan for the demo today.\n"
+        "3:15 is when we'll actually start the live portion of the walkthrough.\n"
+        f"{_LONG_ENOUGH}\n"
+        "After that we'll take questions from the audience for a while.\n"
+        "Thanks everyone for showing up early to help us test the setup.\n"
+    )
+    t = ingest_text(prose)
+    assert all(s.timestamp is None for s in t.segments)
+    assert any("3:15 is when we'll actually start" in s.text for s in t.segments)
+
+
+@pytest.mark.unit
+def test_mmss_shaped_but_non_monotonic_timestamps_refuse_clearly():
+    """Every line opens with an MM:SS-shaped token (clears the majority bar), but the
+    timestamps jump backwards — not real caption output, so this must refuse rather than
+    silently mis-parse. Mangled and correct must never look identical."""
+    bogus = "\n".join(
+        [
+            f"01:00 {_LONG_ENOUGH}",
+            "00:30 second line goes backwards in time which real captions never do",
+            "02:00 third line",
+        ]
+    )
+    with pytest.raises(IngestError):
+        ingest_text(bogus)
+
+
+@pytest.mark.unit
+def test_mmss_shaped_but_partially_unmatched_lines_refuse_clearly():
+    """Majority of lines look like MM:SS captions but one real line doesn't match at all —
+    an ambiguous, mixed shape this must refuse rather than guess about."""
+    bogus = "\n".join(
+        [
+            f"01:00 {_LONG_ENOUGH}",
+            "02:00 second line",
+            "this line has no timestamp at all and breaks the caption shape",
+            "03:00 fourth line",
+        ]
+    )
+    with pytest.raises(IngestError):
+        ingest_text(bogus)
+
+
+@pytest.mark.unit
+def test_srt_path_is_unaffected_by_mmss_caption_detection():
+    """The live YouTube/collector path (ingest_srt_text -> _parse_srt) puts timestamps in
+    the segment's timestamp field already and never routes through ingest_text's MM:SS
+    detection at all — confirm its output is exactly what it was before this fix."""
+    t = ingest_file(FIX / "sample.srt")
+    assert len(t.segments) == 3
+    assert t.segments[0].timestamp == "00:00:01"
+    assert t.segments[1].timestamp == "00:00:04"
+    assert t.segments[2].timestamp == "00:01:12"
+    assert "Welcome to the talk" in t.segments[0].text
 
 
 # ---- is_thin_source: a visibility signal, never a rejection ------------------------------
