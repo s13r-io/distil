@@ -36,6 +36,33 @@
 
 <div class="reader-grid">
   <main class="reader-main">
+    <article class="panel narrative-shell">
+      <div class="core-head">
+        <p class="muted" style="margin:0;">Narrative summary &middot; read this first</p>
+        {% if has_transcript %}
+        <button type="button" class="note-action" id="refresh-summary">
+          {% if e.narrative_summary %}Regenerate{% else %}Generate{% endif %}
+        </button>
+        {% endif %}
+      </div>
+      {% if e.narrative_summary %}
+      <div class="narrative-body">
+        {% for paragraph in e.narrative_summary.text.split("\n\n") %}
+        <p>{{ paragraph }}</p>
+        {% endfor %}
+      </div>
+      <p class="muted" style="margin:8px 0 0; font-size:12px;">
+        Generated from {{ e.narrative_summary.chunk_count }} transcript chunk{% if e.narrative_summary.chunk_count != 1 %}s{% endif %}
+        on {{ e.narrative_summary.model }}. No citations — trust and check the teaching note below instead.
+      </p>
+      {% elif has_transcript %}
+      <p class="muted" style="margin:0;">Not generated yet. This reads the whole stored transcript on a cheaper model — press Generate.</p>
+      {% else %}
+      <p class="muted" style="margin:0;">No stored transcript is available for this entry, so a narrative summary can't be generated.</p>
+      {% endif %}
+      <p class="muted hide" id="refresh-summary-status" style="margin:8px 0 0;"></p>
+    </article>
+
     {% if e.distilled_note %}
     {% set n = e.distilled_note %}
     <article class="panel note-shell">
@@ -296,6 +323,27 @@ async function submitScore(){
   const r=await fetch('/entries/{{ e.entry_id }}/score',{method:'POST',body:fd});
   const state=document.getElementById('score-state');
   state.textContent = r.ok ? ('Scored '+chosen+' / '+reason+' saved') : 'Could not save score.';
+}
+const refreshSummary=document.getElementById('refresh-summary');
+if(refreshSummary){
+  refreshSummary.onclick=async()=>{
+    const status=document.getElementById('refresh-summary-status');
+    refreshSummary.disabled=true;
+    status.classList.remove('hide');
+    status.textContent='Generating…';
+    try{
+      const r=await fetch('/entries/{{ e.entry_id }}/refresh-summary',{method:'POST'});
+      const data=await r.json();
+      if(r.ok && data.ok){
+        window.location.reload();
+        return;
+      }
+      status.textContent=data.message||data.detail||'Could not generate a narrative summary.';
+    }catch(e){
+      status.textContent='Could not generate a narrative summary.';
+    }
+    refreshSummary.disabled=false;
+  };
 }
 const copyNote=document.getElementById('copy-note');
 if(copyNote){
