@@ -904,7 +904,16 @@ def create_app() -> FastAPI:
         # second round trip or changing /jobs from a bare array into an object.
         last_collector_checkin = store_jobs.last_collector_checkin()
         return [
-            {**j.to_dict(), "collector_last_seen": last_collector_checkin}
+            {
+                **j.to_dict(),
+                "collector_last_seen": last_collector_checkin,
+                "presentation": jobsmod.status_presentation(j.status),
+                "collector_status": (
+                    jobsmod.collector_status_for_job(j, last_collector_checkin)
+                    if j.status in (jobsmod.STATUS_AWAITING_COLLECTION, jobsmod.STATUS_COLLECTING)
+                    else None
+                ),
+            }
             for j in store_jobs.list_active()
         ]
 

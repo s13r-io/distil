@@ -235,56 +235,29 @@ document.getElementById('distil-btn').addEventListener('click', async () => {
   }finally{btn.disabled=false;}
 });
 
-/* ---------- Activity ---------- */
-const ACTIVE=new Set(['queued','running','pending_fetch','fetching','awaiting_collection','collecting']);
-// A collector polls every ~30s even when there's nothing to claim (that's the honest liveness
-// signal — see web/jobs.py's record_collector_checkin). Anything older than this is treated the
-// same as "never checked in": stale enough that nothing should be assumed to be coming.
-const COLLECTOR_STALE_SECONDS=5*60;
+/* ---------- Activity ----------
+ * The server decides every presentation/wording/staleness call (job.presentation,
+ * job.collector_status - see web/jobs.py's status_presentation/collector_status_for_job) so this
+ * script is just a thin renderer of values it's already been handed, not a second copy of that
+ * logic re-derived from raw timestamps in JS. */
 let _jobsPollTimer=null;
 let _jobsLoading=false;
-function jobBadge(s){
-  const map={queued:['','Queued'],running:['info','<span class="spinner"></span>Distilling'],
-    pending_fetch:['','Waiting to fetch'],
-    fetching:['info','<span class="spinner"></span>Fetching'],
-    awaiting_collection:['warn','Waiting for collector'],
-    collecting:['warn','<span class="spinner"></span>Being collected'],
-    done:['ok','Done'],low_value:['warn','Low-value'],failed:['danger','Failed']};
-  const [cls,txt]=map[s]||['','Unknown'];
-  return '<span class="badge '+cls+'">'+txt+'</span>';
-}
-function fmtDuration(seconds){
-  seconds=Math.max(0,Math.round(seconds));
-  const d=Math.floor(seconds/86400), h=Math.floor((seconds%86400)/3600), m=Math.floor((seconds%3600)/60);
-  if(d>0) return d+'d '+h+'h';
-  if(h>0) return h+'h '+m+'m';
-  if(m>0) return m+'m';
-  return seconds+'s';
+function jobBadge(j){
+  const p=j.presentation||{badge_class:'',badge_text:'Unknown',spinner:false};
+  const spinner=p.spinner?'<span class="spinner"></span>':'';
+  return '<span class="badge '+p.badge_class+'">'+spinner+esc(p.badge_text)+'</span>';
 }
 function collectorDetail(j){
+  const cs=j.collector_status;
   const lines=[
     "YouTube refused to fetch this video from this server, so it's parked waiting to be "+
     "collected from your own machine instead.",
+    cs.checkin_message,
   ];
-  if(j.collector_last_seen){
-    const ago=(Date.now()-new Date(j.collector_last_seen).getTime())/1000;
-    lines.push(ago<=COLLECTOR_STALE_SECONDS
-      ? 'A collector checked in '+fmtDuration(ago)+' ago.'
-      : 'Nothing is currently collecting (last seen '+fmtDuration(ago)+' ago) - start the '+
-        'collector, or this video will expire.');
-  }else{
-    lines.push('Nothing is currently collecting - start the collector, or this video will expire.');
-  }
-  if(j.status==='collecting'){
-    lines.push('It has been picked up and is being fetched right now.');
-  }
-  if(j.collection_deadline){
-    const left=(new Date(j.collection_deadline).getTime()-Date.now())/1000;
-    lines.push(left>0 ? 'Gives up in '+fmtDuration(left)+' if still uncollected.'
-      : 'Past its collection deadline; it will be marked failed shortly.');
-  }
+  if(cs.active_message) lines.push(cs.active_message);
+  if(cs.deadline_message) lines.push(cs.deadline_message);
   let html='<span>'+lines.map(esc).join(' ')+'</span>';
-  if(j.status==='awaiting_collection') html+=' / <a href="#" data-remove="'+j.job_id+'">Remove</a>';
+  if(cs.removable) html+=' / <a href="#" data-remove="'+j.job_id+'">Remove</a>';
   return html;
 }
 const PHASE_LABELS={
@@ -325,7 +298,7 @@ async function loadJobs(){
         else if(j.status==='queued'||j.status==='pending_fetch') detail='<a href="#" data-remove="'+j.job_id+'">Remove</a>';
         else if(j.status==='running'||j.status==='fetching') detail=progressDetail(j);
         else if(j.status==='awaiting_collection'||j.status==='collecting') detail=collectorDetail(j);
-        return '<div class="jobrow"><div class="top"><span class="entry-title">'+esc(j.title)+'</span>'+jobBadge(j.status)+'</div>'
+        return '<div class="jobrow"><div class="top"><span class="entry-title">'+esc(j.title)+'</span>'+jobBadge(j)+'</div>'
           +'<div class="meta-line muted">'+detail+'</div></div>';
       }).join('');
     }
@@ -335,7 +308,7 @@ async function loadJobs(){
     document.getElementById('clear-failed').classList.toggle('hide',!hasFailed);
     box.querySelectorAll('[data-remove]').forEach(a=>a.onclick=async e=>{e.preventDefault();await fetch('/jobs/'+a.dataset.remove+'/remove',{method:'POST'});loadJobs();});
     box.querySelectorAll('[data-retry]').forEach(a=>a.onclick=async e=>{e.preventDefault();await fetch('/jobs/'+a.dataset.retry+'/retry',{method:'POST'});loadJobs();});
-    if(jobs.some(j=>ACTIVE.has(j.status))) _jobsPollTimer=setTimeout(loadJobs,2000);
+    if(jobs.some(j=>j.presentation&&j.presentation.live)) _jobsPollTimer=setTimeout(loadJobs,2000);
   }finally{
     _jobsLoading=false;
   }
