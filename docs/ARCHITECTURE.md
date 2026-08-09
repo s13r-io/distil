@@ -55,6 +55,9 @@ raw input (pasted text or .srt / .txt / .md file) + profile
 [5] Note synthesis ────► distilled_note (teaching note grounded in verified item ids)
         │
         ▼
+[5.5] Narrative summary (optional, cheap-tier) ► narrative_summary — whole-transcript account,
+        │                no citations; runs only when a caller injects a summary_client
+        ▼
 [6] Graph-link ────────► related_entries (match against existing KB index)
         │
         ▼
@@ -81,7 +84,9 @@ candidate matching is a deterministic index lookup first; 8 and 9 likewise — e
 similarity candidates first, one capped batched LLM call for matching plus capped synthesis calls
 for 8, one capped LLM call per candidate pair for 9; 8's entity-mention matching/synthesis follows
 the identical shape one granularity down, so it adds no new LLM-backed stage). Pure/deterministic
-stages: **0, 3, 7, 10**.
+stages: **0, 3, 7, 10**. Stage **5.5** is also LLM-backed but optional and on a separate,
+cheap-tier client (`model_config.resolve_stage_model("summary")`, never the strong `DISTIL_MODEL`)
+— it only runs when a caller opts in, so it's never counted against the core call budget below.
 Keep the core LLM-call count per useful transcript bounded (target ≤ 4 before graph relation
 classification: triage, extract, link, note). Low-value transcripts still stop after triage.
 
@@ -104,6 +109,9 @@ distil/
   normalize.py       # stage 3 (pure: validation, provenance check, dedup)
   link.py            # stage 4 (profile-aware application links)
   note.py            # stage 5 (grounded teaching-note synthesis + deterministic fallback)
+  model_config.py    # per-stage model resolution: DISTIL_MODEL_<STAGE> overrides, cheap-tier default for "summary"
+  summary.py         # stage 5.5 (optional, cheap-tier): whole-transcript narrative summary — sentence-safe chunking + coverage-floor retry
+  refresh_summary.py # per-entry narrative-summary regeneration (CLI `refresh-summary` / web route); never re-fetches or re-extracts
   graph.py           # stage 6 (candidate lookup + relation classify)
   canonicalize.py    # stage 8: concept-matching engine, per-item match/new/reject against `concepts` table; also entity-mention matching against `entities` one granularity down (Phase D); plus `run_canonicalize_stage` orchestration (see AGENTS.md)
   synthesize_concept.py  # concept-page + entity-page synthesis: grounded ConceptClaim/EntityClaim synthesis + code-rendered citations, called from `run_canonicalize_stage` (see AGENTS.md)
@@ -136,6 +144,7 @@ data/                # distil.db incl. vectors (gitignored)
 - **OKF export layer (Phase 2)**: at the File stage, `store.file_entry(..., transcript=...)` derives a second, neutral bundle under `okf_root` (default a sibling of `kb_dir`, e.g. `data/../okf`) via `okf.py` — `sources/<slug>.md` (summary + key moments + a link to the raw page) and `raw/<slug>.md` (immutable timestamped transcript), plus regenerated `index.md`/`sources/index.md`. It carries no feedback or application-link data, and is skipped when `transcript` is omitted (e.g. feedback-only re-files). `okf_lint.py` (`python -m distil.okf_lint <okf_root>`) validates the bundle. See `AGENTS.md` for the slug-stability rule and phase boundaries, and `docs/TESTING.md` (T-OKF*, T-OKFL*) for the test catalog.
 - **Concept canonicalization + synthesis (Stage 8, OKF Phase 3)**: `canonicalize.run_canonicalize_stage(entry, store, client)` is `pipeline.run_pipeline`'s Stage 8, gated by `PipelineConfig.enable_canonicalize` (default `True`). It calls `canonicalize_entry` (decides match/new/reject per knowledge item against existing `concepts` rows — embedding-similarity candidates + a capped LLM call — returning the touched `Concept`s), then `synthesize_touched_concepts` (ranks touched concepts by embedding similarity and, up to a per-video cap, calls `synthesize_concept.py` to build grounded `ConceptClaim`s), then keeps the OKF bundle in sync via `okf.export_concept`/`remove_concept` (including concepts that lost this entry as a member, not just touched ones) and `okf.render_source_with_concepts` (the source page's "## Concepts covered" backlink). `okf_lint.py`'s E5-E8 checks validate the resulting `concepts/` bundle. The same Stage 8 call also runs `canonicalize_entry_entities`/`synthesize_touched_entities` (gated by `PipelineConfig.enable_entities`, default `True`) — the identical match/new/reject/synthesis-capping shape one granularity down (entity mentions instead of items, with a hard `kind` pre-filter), keeping `okf/entities/` in sync the same way (`okf_lint.py`'s E9-E12). Entities ride the extraction response already read for items, so this adds no new transcript read or pipeline stage. See `AGENTS.md` for the full data-flow detail and phase boundaries.
 - **Concept↔concept typed edges (Stage 9, OKF Phase 3b)**: `concept_graph.run_concept_edges_stage(touched, store, client)` is `pipeline.run_pipeline`'s Stage 9, gated by `PipelineConfig.enable_concept_edges` (default `True`). For each concept Stage 8 actually synthesized this run, `link_concept_graph` finds candidates via centroid-to-centroid cosine similarity (`Store.find_concept_edge_candidates`) and classifies each into `contrasts_with`/`builds_on`/`related` (or drops it) with one capped LLM call, replacing `Concept.edges` wholesale. `Store.prune_dangling_concept_edges` then drops edges left dangling by any concept deleted this run, and every concept whose edges changed gets its OKF page re-exported (`## Contrasts with`/`## Builds on`/`## Related`, plus a deterministic `> **Contradiction:**` flag from `synthesize_concept.find_claim_contradictions`). `okf_lint.py`'s E8 check counts these typed-edge links as valid inbound links. See `AGENTS.md` for the full data-flow detail.
+- **Narrative summary (Stage 5.5, optional)**: `summary.py` reads the transcript directly (sentence-safe chunking, per-chunk + merge synthesis, coverage-floor retry on thin output or a dropped connection) on a separate client resolved via `model_config.resolve_stage_model("summary")` — cheap-tier by default, never the strong `DISTIL_MODEL`. `pipeline.run_pipeline` only runs it when a caller passes `summary_client`; a failure is caught and logged, never blocking filing. `refresh_summary.py` regenerates just `narrative_summary` later, from the entry's already-stored OKF raw page, without re-fetching or re-extracting (CLI `refresh-summary` / `POST /entries/{id}/refresh-summary`). See `AGENTS.md` for full detail.
 - **Provenance** is stored inside each item; the transcript itself is not retained after processing unless the user opts in (privacy).
 
 ## 5. LLM boundary (critical for testing)
@@ -154,8 +163,10 @@ All config via env (`.env` locally, service variables when hosted): `ANTHROPIC_A
 `DISTIL_PROFILE_ALPHA` (default 0.3), `DISTIL_EMBEDDER` (`local` | `api`), `DISTIL_EMBED_MODEL`,
 `DISTIL_RETRIEVAL_THRESHOLD` (min similarity to clear the abstention gate), `DISTIL_TOP_K`
 (default 6), `DISTIL_AUTH_SECRET` (required when not on localhost), `DISTIL_PUBLIC` (set true
-when hosting — refuses to serve without `DISTIL_AUTH_SECRET`). No secrets in source.
-`.env.example` documents every variable.
+when hosting — refuses to serve without `DISTIL_AUTH_SECRET`), `DISTIL_MODEL_<STAGE>` (per-stage
+model override, e.g. `DISTIL_MODEL_SUMMARY`), `DISTIL_SUMMARY_CHUNK_CHARS`/
+`DISTIL_SUMMARY_MAX_RETRIES` (narrative summary layer). No secrets in source. `.env.example`
+documents every variable.
 
 ## 7. Deployment (local)
 

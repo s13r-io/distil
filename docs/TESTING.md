@@ -165,6 +165,20 @@ that must abstain.
 - T-DN5: malformed model output or a failed note call falls back to a deterministic note built from verified items.
 - T-DN6: empty verified item list returns no note and makes no model call.
 
+### model_config.py (per-stage model resolution — unit)
+- T-MCFG1: every `STRONG_TIER_STAGES` member falls back to `DISTIL_MODEL` when set, and raises `RuntimeError` when it isn't — the same "must be set explicitly" contract `AnthropicClient` already enforces, just resolved per stage.
+- T-MCFG2: `DISTIL_MODEL_<STAGE>` overrides one stage only — setting it for one strong-tier stage never leaks into the others, which still resolve to the shared `DISTIL_MODEL`.
+- T-MCFG3: `"summary"` defaults to `DEFAULT_SUMMARY_MODEL` (`claude-haiku-4-5`) with no env var set, is unaffected by `DISTIL_MODEL` alone, and `DISTIL_MODEL_SUMMARY` overrides it like any other stage.
+- T-MCFG4: `make_stage_client(stage)` constructs an `LLMClient` with the resolved model and never requires `ANTHROPIC_API_KEY` at construction time (enforced lazily, at the first real call, exactly like `AnthropicClient()` today).
+
+### summary.py (narrative summary layer — reads the transcript directly, unit, FakeClient)
+- T-SUM1: `chunk_transcript_text` splits on sentence boundaries only — no sentence is dropped, duplicated, reordered, or split across a chunk boundary; a chunk respects the target size unless a single sentence is itself longer, in which case that sentence stays whole.
+- T-SUM2: chunk size falls back to `DISTIL_SUMMARY_CHUNK_CHARS` when no explicit `chunk_chars` is passed; empty/whitespace-only input yields no chunks.
+- T-SUM3: a too-thin chunk or merge summary (below the scaled floor `max(40, ratio * source_len)`) is rejected and retried, succeeding once a long-enough response arrives; a dropped connection (`client.complete` raises) is retried identically; exhausting `max_retries` on either raises `NarrativeSummaryError` rather than returning or persisting a thin result.
+- T-SUM4: chunk summaries are merged in chronological order — the merge prompt contains the first chunk's summary before the second's; a single chunk skips the merge call entirely (`chunk_count == 1`).
+- T-SUM5: `NarrativeSummary.model` is tagged from the injected client's own `.model` attribute when present, else falls back to `model_config.resolve_stage_model("summary")` — never a hardcoded literal.
+- T-SUM6: an empty/whitespace-only transcript raises `NarrativeSummaryError` rather than making a model call.
+
 ### graph.py
 - T-G1: candidate lookup returns existing entries sharing topics/items (deterministic, no LLM).
 - T-G2: relation classification maps to the allowed enum only.
@@ -202,6 +216,11 @@ that must abstain.
 - T-PL11 (Phase A): a disabled stage (`enable_graph`/`enable_canonicalize`/`enable_concept_edges=False`) emits no start/finish events, so a caller deriving the declared total from these events reflects only what will actually run.
 - T-PL12 (Phase D): an entity mentioned in the extract response flows end-to-end (canonicalized, synthesized, exported to `okf_root/entities/`) at the existing Stage 8 — the total LLM call count matches concepts-only-plus-entities exactly, with no extra call for a second transcript read.
 - T-PL13 (Phase D): with `enable_entities=False`, the entities stage makes zero LLM calls and creates no entities, even though the extract response still carries an `entities` array.
+- T-PL14 (narrative summary): with a distinct cheap-tier `summary_client` injected, the strong client makes exactly its pre-existing triage+extract+link+note calls (zero narrative-summary calls) and the cheap client makes exactly the narrative-summary call (zero triage/extract/link/note calls) — the model-tier split proven by counting calls on two separate `FakeClient` instances, never by inspecting configuration.
+- T-PL15 (narrative summary): omitting `summary_client` (every caller that existed before this stage) reproduces prior behavior exactly — no extra call, `entry.narrative_summary` stays `None`.
+- T-PL16 (narrative summary): `config.enable_narrative_summary=False` makes zero calls on the summary client even when one is injected.
+- T-PL17 (narrative summary): a narrative-summary failure (thin output exhausting retries, or a dropped connection) is caught and logged — the entry is still filed, just without a `narrative_summary`.
+- T-PL18 (narrative summary): `phase_callback` reports `("narrative_summary", "start")`/`"finish"` between `note` and `file` (or `graph`, when enabled), consistent with T-PL9's ordering guarantee.
 
 ### okf.py (OKF export layer, Phase 2 — pure, no LLM)
 - T-OKF1: the export slug is derived from `source.title` (slugified); falls back to `entry_id` when the title yields nothing usable; stable across repeated calls.
@@ -287,6 +306,13 @@ that must abstain.
 - T-CEDGE5: `run_concept_edges_stage` skips concepts still `pending_synthesis` (zero LLM calls, no edges written) and exports the OKF page only for concepts whose edges actually changed.
 - T-CEDGE6: `Store.prune_dangling_concept_edges` drops an edge whose target concept was deleted, and the affected concept's OKF page is re-exported without the stale edge section.
 
+### refresh_summary.py (per-entry narrative-summary refresh — unit, FakeClient)
+- T-RS1: refreshing a fully filed entry regenerates only `narrative_summary`; knowledge items, concept membership/pages, and the raw OKF page are all byte-identical/unchanged before and after.
+- T-RS2: refresh makes exactly one model call (the narrative-summary chunk call) — a shared client seeded with only that one response would `IndexError` on any re-run of extraction, note, or canonicalize, proving nothing else executes.
+- T-RS3: an entry with no stored raw transcript page (filed before OKF export existed, or reconciled away) reports plainly that it can't generate a summary and that retrying won't help, rather than a doomed retry or an obscure failure.
+- T-RS4: refreshing an unknown entry id reports "not found" rather than raising.
+- T-RS5: exhausting the coverage-floor retries reports "could not generate" and leaves `narrative_summary` at its prior value (`None` here), never a partial/thin result.
+
 ### cli.py
 - T-C1: `distil run <file>` accepts `.srt`/`.txt`/`.md` and `distil run --paste` (or stdin) accepts pasted text; exits 0 and prints the entry path.
 - T-C2: `distil score <id> --score 5 --reason relevant` mutates the profile.
@@ -295,6 +321,7 @@ that must abstain.
 - T-C5: `distil reindex` embeds entries that have no stored vector yet.
 - T-C6: `distil run --url <youtube-url>` stores source attribution; non-YouTube source URLs are rejected cleanly.
 - T-C7: `distil delete <entry_id> --yes` removes the markdown file, SQLite index row, and item vectors.
+- T-C8: `distil refresh-summary <id>` regenerates the summary and prints confirmation; a missing entry exits non-zero with a friendly "not found" message; the command uses the summary-tier client seam (`_make_summary_client`) exclusively — it must never construct the main (strong-tier) client.
 
 ### embed.py / store vectors (unit, FakeEmbedder)
 - T-X1: filing an entry stores one vector per knowledge item in the `vec0` table.
@@ -320,6 +347,11 @@ that must abstain.
 - T-Q16 (Phase C): `DISTIL_CONCEPT_NOTE_DEPTH` (or the `concept_note_depth` kwarg, which wins over the env) controls whether a matched concept's member quotes reach the synthesis prompt — `"claims"` (default) sends claim text only, `"full"` inlines each cited member's quote; an unrecognized value degrades to the default rather than raising.
 - T-Q17 (Phase C, regression): `depth="full"`'s richer concept-notes block does not weaken citation validation — a fabricated citation is still stripped and reported as ungrounded.
 - T-QE1-4 (Phase D): `retrieve_entities`/`ask` gate entities through the exact same `threshold` as items/concepts (never an easier bar) — ranks relevant entities first, an entity clearing the gate alone avoids abstention, a low-similarity entity never bypasses it (zero synthesis calls), and recruited sources resolve from the live `KBEntry` rather than the entity's own stale copied quote/timestamp. Mirrors T-Q9/T-Q11/T-Q13/T-Q12 one granularity down.
+
+### web/app.py — POST /entries/{id}/refresh-summary
+- T-WRS1: a successful refresh returns 200 with `{"ok": true}`, and the entry page renders a "Narrative summary" section once one is present.
+- T-WRS2: an unknown entry id 404s.
+- T-WRS3: an entry with no stored transcript returns 200 with `{"ok": false}` and a message naming the transcript, not a 4xx/5xx — a plain, expected report, not an error.
 
 ### auth (web, hosted) — `web/`
 - T-A1: with `DISTIL_PUBLIC=true` and no `DISTIL_AUTH_SECRET` set, the app refuses to start/serve (fails closed).

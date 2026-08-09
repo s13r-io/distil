@@ -124,6 +124,16 @@ the structured fields; body is the human-readable rendering) and indexed in SQLi
     "generated_from": "llm | fallback"
   },
 
+  // NARRATIVE SUMMARY — whole-transcript account, read directly (not from knowledge items),
+  // on a cheaper model tier. Additive/optional: carries no citations (that's still
+  // distilled_note above) and is `null` unless a caller opts in with a summary client.
+  "narrative_summary": {
+    "text": "string",
+    "chunk_count": 0,
+    "model": "string",
+    "generated_at": "ts"
+  },
+
   // GRAPH EDGES — turns a folder into a knowledge base.
   "related_entries": [
     { "target": "entry_id|item_id",
