@@ -489,6 +489,28 @@ def test_diagnose_pot_reports_no_attempts_when_never_asked():
     assert result.provider_discovery is None
     assert result.context_attempts == []
     assert "Sign in to confirm you're not a bot" in result.raw_output
+    assert result.bot_check_detected is True
+
+
+# ---- Phase 24: diagnose_pot surfaces whether the bot-check safety net is alive ----
+
+
+@pytest.mark.unit
+def test_diagnose_pot_bot_check_detected_true_on_real_curly_apostrophe_refusal():
+    def fake_run(cmd, **kwargs):
+        return _proc(returncode=1, stdout="", stderr=_REAL_BOT_CHECK_STDERR)
+
+    result = diagnose_pot("https://www.youtube.com/watch?v=abc12345678", run=fake_run)
+    assert result.bot_check_detected is True
+
+
+@pytest.mark.unit
+def test_diagnose_pot_bot_check_detected_false_when_run_succeeds():
+    def fake_run(cmd, **kwargs):
+        return _proc(returncode=0, stdout="[info] abc: Downloading subtitles: en\n", stderr="")
+
+    result = diagnose_pot("https://www.youtube.com/watch?v=abc12345678", run=fake_run)
+    assert result.bot_check_detected is False
 
 
 @pytest.mark.unit
@@ -726,13 +748,59 @@ def test_fetch_video_transcript_requests_srt_natively_without_convert_subs(tmp_p
 
 
 # ---- bot-check refusal detection (collector queue) ----
+#
+# Phase 24 incident: the original `_BOT_CHECK_MARKER` literal and its test fixtures were both
+# typed with a straight U+0027 apostrophe ("you're"), but YouTube's actual refusal text (verified
+# from production failures for videos AbpyqAfxZ8c and QER-0DaC-Gk) uses the curly U+2019 RIGHT
+# SINGLE QUOTATION MARK ("you’re"). Test and implementation shared the same wrong assumption,
+# so the suite was green while detection matched nothing in production. `_REAL_BOT_CHECK_STDERR`
+# below is that genuine captured wording, curly apostrophe included byte-for-byte, and is what the
+# regression test below is built from — not a hand-retyped paraphrase.
+
+_REAL_BOT_CHECK_STDERR = (
+    "ERROR: [youtube] AbpyqAfxZ8c: Sign in to confirm you’re not a bot. "
+    "This helps protect our community. Learn more"
+)
 
 
 @pytest.mark.unit
-def test_is_bot_check_refusal_true_for_youtube_identity_challenge():
+def test_is_bot_check_refusal_true_for_real_captured_curly_apostrophe_output():
+    """Regression test for the Phase 24 incident: fails against the pre-fix straight-quote
+    literal match, passes once detection tolerates YouTube's actual curly apostrophe."""
+    exc = YoutubeFetchError(f"yt-dlp failed: {_REAL_BOT_CHECK_STDERR}")
+    assert is_bot_check_refusal(exc) is True
+
+
+@pytest.mark.unit
+def test_is_bot_check_refusal_true_for_straight_apostrophe_variant():
+    # Covered in case YouTube ever reverts to (or some yt-dlp version normalizes to) a plain
+    # ASCII apostrophe — the original, pre-incident wording must keep matching too.
     exc = YoutubeFetchError(
         "yt-dlp failed: ERROR: [youtube] abc12345678: Sign in to confirm you're not a bot"
     )
+    assert is_bot_check_refusal(exc) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "apostrophe",
+    [
+        "'",  # U+0027 APOSTROPHE (straight — pre-incident fixture wording)
+        "’",  # RIGHT SINGLE QUOTATION MARK (curly — what YouTube actually sends)
+        "‘",  # LEFT SINGLE QUOTATION MARK
+        "ʼ",  # MODIFIER LETTER APOSTROPHE
+        "`",  # GRAVE ACCENT, sometimes substituted for an apostrophe
+        "",  # no apostrophe at all — a plausible future reword ("you not a bot"->"youre")
+    ],
+)
+def test_is_bot_check_refusal_tolerates_apostrophe_typographic_variants(apostrophe):
+    exc = f"Sign in to confirm you{apostrophe}re not a bot"
+    assert is_bot_check_refusal(exc) is True
+
+
+@pytest.mark.unit
+def test_is_bot_check_refusal_is_case_insensitive():
+    exc = "sign in to confirm YOU’RE not a bot"
     assert is_bot_check_refusal(exc) is True
 
 
@@ -750,7 +818,7 @@ def test_is_bot_check_refusal_false_for_playlist_listing_failure():
 
 @pytest.mark.unit
 def test_is_bot_check_refusal_accepts_a_plain_string_too():
-    assert is_bot_check_refusal("Sign in to confirm you're not a bot") is True
+    assert is_bot_check_refusal(_REAL_BOT_CHECK_STDERR) is True
 
 
 # ---- Helper 2 (collector): fetch_raw_captions shares _fetch_captions_raw with _fetch_into ----

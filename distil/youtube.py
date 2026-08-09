@@ -261,24 +261,38 @@ def _is_transient_failure(stderr: str | None) -> bool:
 
 # YouTube's own wording for its bot-identity challenge (Phase 22/23 above), forwarded verbatim
 # through yt-dlp's ERROR: line — yt-dlp has no dedicated exception type or error code for this
-# condition, only this string. Confidence is therefore bounded by how stable that external
-# wording is: it has been consistent across every yt-dlp version consulted for this project (see
-# tests/unit/test_youtube.py, tests/unit/test_web_jobs.py, AGENTS.md's Phase 22 entry), but it is
-# a substring match on non-contractual text, not a structural guarantee. The failure mode if
-# YouTube/yt-dlp ever reword it is safe: the match just stops firing and the refusal falls back
-# to the ordinary fail-immediately path — never a wrong or dangerous outcome, only a missed
-# opportunity to park it for external collection.
-_BOT_CHECK_MARKER = "Sign in to confirm you're not a bot"
+# condition, only this string. **Phase 24 incident**: the apostrophe in "you're" is the one part
+# of this message YouTube is free to typeset differently, and production logs for videos
+# AbpyqAfxZ8c and QER-0DaC-Gk show it sending U+2019 RIGHT SINGLE QUOTATION MARK
+# ("you’re"), not the plain U+0027 apostrophe a hand-typed literal naturally produces — the
+# original `_BOT_CHECK_MARKER = "Sign in to confirm you're not a bot"` (straight quote) matched
+# nothing in production, ever, and the original tests couldn't catch it because they asserted
+# against a fixture typed with that same straight quote instead of real captured yt-dlp output.
+# A substring miss here and "nothing has needed the safety net yet" are indistinguishable from
+# outside — that's what let this ship silently inert. `_BOT_CHECK_RE` matches on the stable,
+# low-punctuation core of the sentence — "sign in to confirm you", then 0-2 arbitrary characters
+# (whatever apostrophe/quote mark is in play, or none at all), then "re not a bot" — instead of
+# pinning to one exact quote character, so straight, curly, or an as-yet-unseen typographic
+# variant all keep matching without risking another silent single-character miss. Case-insensitive
+# for the same reason: nothing here depends on YouTube's capitalization staying fixed either.
+# The failure mode if YouTube reworks the message beyond recognition is still safe — the match
+# stops firing and the refusal falls back to the ordinary fail-immediately path, never a wrong
+# outcome — but "stops firing" must not go unnoticed again the way it did here: use
+# `distil youtube-diagnose-pot <url>` / `GET /diagnostics/youtube-pot?url=...`
+# (`PotDiagnostic.bot_check_detected`) against a video you know is bot-checked to confirm
+# detection is actually alive, rather than assuming silence means nothing needed it.
+_BOT_CHECK_RE = re.compile(r"sign in to confirm you.{0,2}re not a bot", re.IGNORECASE)
 
 
 def is_bot_check_refusal(error: YoutubeFetchError | str) -> bool:
     """True when a fetch failure is specifically YouTube's bot-identity challenge on this
     server's address — never a throttle, and never a per-video captions/availability problem
-    (a private/deleted/uncaptioned video's error text doesn't contain this marker), so routing
+    (a private/deleted/uncaptioned video's error text doesn't match this pattern), so routing
     only this case to an external collector never mistakes an unrelated, permanent failure for
-    one worth waiting on.
+    one worth waiting on. See :data:`_BOT_CHECK_RE` above for why this is a tolerant pattern
+    rather than an exact-literal substring match.
     """
-    return _BOT_CHECK_MARKER in str(error)
+    return _BOT_CHECK_RE.search(str(error)) is not None
 
 
 def _run_yt_dlp(cmd: list[str], run, timeout: float, sleep=time.sleep):
@@ -579,12 +593,22 @@ class PotDiagnostic:
     token for; empty means finding (a) from the task that motivated this ("never asked" — no
     attempt for *any* context), not (b) ("asked and rejected", which would show an attempt here
     followed by a provider error/rejection in ``raw_output``).
+
+    ``bot_check_detected`` (Phase 24) is :func:`is_bot_check_refusal` run against this same
+    ``raw_output`` — the answer to "is the collector-queue safety net actually alive", not just
+    "was a token requested". Run this diagnostic against a video you already know is bot-checked
+    (any video that just failed a real fetch with the "Sign in to confirm..." error is a live
+    example) and check this field: ``True`` means detection is working; ``False`` while
+    ``raw_output`` visibly contains YouTube's refusal text means detection has silently gone dead
+    again — exactly the class of bug this field exists to catch, the way a straight-vs-curly
+    apostrophe once did with no visible symptom other than "the queue is never used".
     """
 
     returncode: int
     provider_discovery: str | None
     context_attempts: list[tuple[str, str]] = field(default_factory=list)
     raw_output: str = ""
+    bot_check_detected: bool = False
 
 
 def diagnose_pot(
@@ -607,6 +631,11 @@ def diagnose_pot(
     ``--extractor-args`` value carrying the provider URL) and reported as a
     :class:`PotDiagnostic` with a sentinel ``returncode`` and redacted ``raw_output``, so callers
     never need their own redaction and can't reintroduce the leak by skipping it.
+
+    Also reports (Phase 24) whether this run's output would be recognized by
+    :func:`is_bot_check_refusal` — see :attr:`PotDiagnostic.bot_check_detected` — so this same
+    command doubles as the tool for confirming the collector-queue safety net is still alive,
+    not just for PO-token mechanics.
     """
     provider_url = os.environ.get("DISTIL_POT_PROVIDER_URL")
     try:
@@ -637,6 +666,7 @@ def diagnose_pot(
             provider_discovery=None,
             context_attempts=[],
             raw_output=redacted_error,
+            bot_check_detected=is_bot_check_refusal(redacted_error),
         )
     redacted = _redact_pot_diagnostic(f"{proc.stdout}{proc.stderr}", provider_url)
     discovery_match = _PROVIDER_DISCOVERY_RE.search(redacted)
@@ -651,4 +681,5 @@ def diagnose_pot(
         provider_discovery=discovery_match.group(0).strip() if discovery_match else None,
         context_attempts=attempts,
         raw_output=redacted,
+        bot_check_detected=is_bot_check_refusal(redacted),
     )

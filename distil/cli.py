@@ -331,9 +331,10 @@ def reconcile(
 def youtube_diagnose_pot(
     url: str = typer.Argument(..., help="A YouTube video URL to run a verbose PO-token diagnostic fetch against."),
 ):
-    """Run a verbose yt-dlp fetch for one video and report PO-token provider discovery and
-    per-context attempts — for answering "was a token even requested" without shell access
-    (see distil/youtube.py's module docstring, Phase 23)."""
+    """Run a verbose yt-dlp fetch for one video and report PO-token provider discovery,
+    per-context attempts, and whether the bot-check safety net would recognize this run's output
+    — for answering "was a token even requested" and "is collector-queue routing still alive"
+    without shell access (see distil/youtube.py's module docstring, Phase 23/24)."""
     if not is_youtube_host(url):
         _fail("URL must be a YouTube URL.")
         return
@@ -345,6 +346,7 @@ def youtube_diagnose_pot(
             typer.echo(f"  - {context} PO token requested for {client} client")
     else:
         typer.echo("Context attempts: none (no PO token was requested for any context)")
+    typer.echo(f"Bot-check refusal detected in this output: {result.bot_check_detected}")
     typer.echo(f"\nyt-dlp exit code: {result.returncode}")
     typer.echo("\n--- full output ---")
     typer.echo(result.raw_output)
