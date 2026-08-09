@@ -58,3 +58,23 @@ def test_youtube_diagnose_pot_reports_context_attempts(monkeypatch):
     assert "bgutil:http-1.3.1" in result.output
     assert "player PO token requested for mweb client" in result.output
     assert "gvs PO token requested for web_safari client" in result.output
+
+
+@pytest.mark.unit
+def test_youtube_diagnose_pot_reports_bot_check_detected(monkeypatch):
+    monkeypatch.setattr(
+        cli,
+        "diagnose_pot",
+        lambda url, **kwargs: PotDiagnostic(
+            returncode=1,
+            provider_discovery=None,
+            context_attempts=[],
+            raw_output="ERROR: Sign in to confirm you’re not a bot",
+            bot_check_detected=True,
+        ),
+    )
+    result = runner.invoke(
+        cli.app, ["youtube-diagnose-pot", "https://www.youtube.com/watch?v=abc"]
+    )
+    assert result.exit_code == 0
+    assert "Bot-check refusal detected in this output: True" in result.output

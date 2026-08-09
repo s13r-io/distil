@@ -71,6 +71,23 @@ def test_diagnose_youtube_pot_reports_context_attempts(client):
 
 
 @pytest.mark.unit
+def test_diagnose_youtube_pot_reports_bot_check_detected(client):
+    test_client, webapp = client
+    webapp.youtube.diagnose_pot = lambda url, **kwargs: PotDiagnostic(
+        returncode=1,
+        provider_discovery=None,
+        context_attempts=[],
+        raw_output="ERROR: Sign in to confirm you’re not a bot",
+        bot_check_detected=True,
+    )
+    r = test_client.get(
+        "/diagnostics/youtube-pot", params={"url": "https://www.youtube.com/watch?v=abc"}
+    )
+    assert r.status_code == 200
+    assert r.json()["bot_check_detected"] is True
+
+
+@pytest.mark.unit
 def test_diagnose_youtube_pot_requires_auth_when_public(tmp_path, monkeypatch):
     from distil.models import Profile
     from distil.store import Store

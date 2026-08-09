@@ -1131,12 +1131,13 @@ def create_app() -> FastAPI:
             return JSONResponse({"detail": "not found"}, status_code=404)
         return RedirectResponse(url="/library", status_code=303)
 
-    # ---- diagnostics (Phase 23) ----
+    # ---- diagnostics (Phase 23/24) ----
     @app.get("/diagnostics/youtube-pot")
     def diagnose_youtube_pot(url: str):
-        """Run a verbose yt-dlp fetch for ``url`` and report PO-token provider discovery and
-        per-context attempts — the permanent replacement for SSH'ing in to run this by hand
-        (see distil/youtube.py's module docstring, Phase 23)."""
+        """Run a verbose yt-dlp fetch for ``url`` and report PO-token provider discovery,
+        per-context attempts, and whether the bot-check safety net recognizes this run's output
+        — the permanent replacement for SSH'ing in to run this by hand (see
+        distil/youtube.py's module docstring, Phase 23/24)."""
         if not is_youtube_host(url):
             return JSONResponse({"detail": "url must be a YouTube URL."}, status_code=400)
         result = youtube.diagnose_pot(url)
@@ -1147,6 +1148,7 @@ def create_app() -> FastAPI:
                 {"context": context, "client": client}
                 for context, client in result.context_attempts
             ],
+            "bot_check_detected": result.bot_check_detected,
             "raw_output": result.raw_output,
         })
 
