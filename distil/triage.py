@@ -1,8 +1,15 @@
 """Stage 1 — Triage. ARCHITECTURE.md §2; TESTING T-T1..T5.
 
-Classifies a transcript (types present, density, transcript-loss, verdict). The deterministic
+Classifies a transcript (dominant knowledge type, density, transcript-loss). The deterministic
 glue here — prompt assembly, JSON extraction, schema validation — is unit-tested against a
 ``FakeClient``; the model's judgment is checked by the gated eval suite.
+
+The ``knowledge_types_present`` classification drives what ``extract.py`` looks for and is the
+quality-critical output; ``density``/``transcript_loss`` are informational context for the note.
+``verdict`` is still produced (the schema/prompt/rendering shape other code and stored data
+depend on), but the pipeline never acts on it — the owner's decision to keep a video is trusted
+unconditionally, and the only quality gate is ``ingest.py``'s word-count check (owner decision;
+see ``distil/pipeline.py``'s module docstring).
 """
 
 from __future__ import annotations
@@ -36,11 +43,6 @@ def run_triage(transcript: Transcript, client: LLMClient) -> TriageResult:
     raw = client.complete(prompt, system=SYSTEM)
     triage = _parse(raw)
     return TriageResult(triage=triage, raw=raw)
-
-
-def is_low_value(result: TriageResult) -> bool:
-    """The honesty short-circuit signal: pipeline must not extract when this is True (T-T3)."""
-    return result.triage.verdict == "little_to_extract"
 
 
 def _parse(raw: str) -> Triage:

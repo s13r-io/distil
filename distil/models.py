@@ -108,6 +108,7 @@ class Source(_Model):
     metadata_provider: str | None = None
     metadata_fetched_at: str | None = None
     duration_sec: int = 0
+    transcript_word_count: int = 0
     captured_at: str
 
 

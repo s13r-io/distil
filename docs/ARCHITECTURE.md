@@ -37,11 +37,12 @@ raw input (pasted text or .srt / .txt / .md file) + profile
         │
         ▼
 [0] Ingest ──────────► normalized transcript: list of segments {text, timestamp?, locator}
-        │              (parses .srt and inline timestamps; tolerates none — PURE, no LLM)
+        │              (parses .srt and inline timestamps, tolerates none; rejects a
+        │              transcript below a word-count floor (TranscriptTooShortError) — the
+        │              pipeline's only quality gate, owner decision — PURE, no LLM)
         ▼
-[1] Triage ──────────► triage verdict (types, density, loss, verdict)
-        │                     │
-        │            if verdict == little_to_extract → return low-value result, do not file
+[1] Triage ──────────► dominant knowledge type (routes stage 2), density, transcript-loss
+        │              (informational); verdict is stored but never gates anything
         ▼
 [2] Extract (routed by type) ──► raw knowledge items
         │
@@ -88,7 +89,8 @@ stages: **0, 3, 7, 10**. Stage **5.5** is also LLM-backed but optional and on a 
 cheap-tier client (`model_config.resolve_stage_model("summary")`, never the strong `DISTIL_MODEL`)
 — it only runs when a caller opts in, so it's never counted against the core call budget below.
 Keep the core LLM-call count per useful transcript bounded (target ≤ 4 before graph relation
-classification: triage, extract, link, note). Low-value transcripts still stop after triage.
+classification: triage, extract, link, note). There is no quality short-circuit: once a
+transcript clears stage 0's word-count floor, it always runs the full sequence and gets filed.
 
 **Timestamps are optional.** Stage 0 captures a timestamp per segment when the source has one
 (`.srt`, or inline markers like `00:12:30`), and leaves it null otherwise, always keeping a

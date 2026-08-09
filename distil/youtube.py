@@ -177,7 +177,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from distil.ingest import IngestError, Transcript, ingest_srt_text
+from distil.ingest import IngestError, Transcript, TranscriptTooShortError, ingest_srt_text
 from distil.source import is_youtube_host
 
 _logger = logging.getLogger(__name__)
@@ -530,6 +530,12 @@ def _fetch_into(
         on_phase("caption_parse", "start")
     try:
         transcript = ingest_srt_text(raw)
+    except TranscriptTooShortError:
+        # Not a fetch failure — the fetch succeeded and captions parsed fine, there just isn't
+        # enough of them. Let it propagate as its own type rather than folding it into
+        # YoutubeFetchError, so callers can tell "too short to work with" apart from a genuine
+        # fetch/parse problem (see distil.ingest's module docstring).
+        raise
     except IngestError as exc:
         raise YoutubeFetchError(str(exc)) from exc
     if on_phase is not None:

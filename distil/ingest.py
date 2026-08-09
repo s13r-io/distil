@@ -6,10 +6,22 @@ locator}``. Timestamps are captured when the source has them (SRT cues or inline
 ``HH:MM:SS`` markers) and left ``None`` otherwise; a ``locator`` (``seg:<index>``) is always
 populated so untimestamped sources still have a stable pointer. Downstream stages depend only
 on this shape, never on the original format.
+
+**The only quality gate in the pipeline is a word count (owner decision, supersedes the old
+triage ``little_to_extract`` short-circuit).** ``_check_min_words`` runs at the tail of
+``_parse_srt`` and ``ingest_text`` — the two low-level parsers every public entry point
+(``ingest_file``, ``ingest_text``, ``ingest_srt_text``) bottoms out in — so every ingest path
+(pasted text, uploaded file, server-fetched YouTube video, external-collector submission) is
+covered by these two call sites without needing one of its own. It raises
+:class:`TranscriptTooShortError`, a distinct subclass of :class:`IngestError`, so callers can
+tell "too short to work with" apart from a genuine read/parse/fetch failure. The owner has been
+explicit that this is the *only* rejection rule: no duration, no coverage arithmetic, no model
+judgment of quality.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,9 +32,66 @@ _SRT_INDEX_ONLY = re.compile(r"^\d+$")
 
 _TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".text", ".vtt"}
 
+# Owner decision: "if the transcript has less than 50 words, it should be rejected. More than
+# that, you should work on it." Configurable via DISTIL_MIN_TRANSCRIPT_WORDS for the same reason
+# every other tuned threshold in this codebase is env-overridable (see store.py's
+# DISTIL_CONCEPT_SIM_FLOOR etc.) — the default is the owner's stated number.
+MIN_TRANSCRIPT_WORDS = 50
+
+# A separate, higher, non-rejecting threshold: below this, a filed entry is flagged as built from
+# unusually little material (see is_thin_source below). Never gates — see its docstring.
+THIN_TRANSCRIPT_WORDS = 500
+
 
 class IngestError(ValueError):
     """Raised for empty input, a missing file, or an unsupported/binary format."""
+
+
+class TranscriptTooShortError(IngestError):
+    """Raised when a transcript has fewer than the minimum word count worth distilling.
+
+    A subclass of :class:`IngestError` (it *is* an ingest-time rejection) but distinct enough
+    for callers to branch on: this is a clear, expected rejection of thin content, never a
+    fetch/parse/read failure, and must be presented to the owner differently from one."""
+
+
+def _min_transcript_words() -> int:
+    try:
+        return int(os.environ.get("DISTIL_MIN_TRANSCRIPT_WORDS", MIN_TRANSCRIPT_WORDS))
+    except ValueError:
+        return MIN_TRANSCRIPT_WORDS
+
+
+def _check_min_words(transcript: Transcript) -> None:
+    word_count = len(transcript.full_text().split())
+    minimum = _min_transcript_words()
+    if word_count < minimum:
+        raise TranscriptTooShortError(
+            f"Transcript has only {word_count} word{'s' if word_count != 1 else ''} "
+            f"(minimum {minimum}) — too short to work with."
+        )
+
+
+def is_thin_source(word_count: int) -> bool:
+    """True when a filed entry's transcript is unusually short for its source.
+
+    Deliberately transcript-only, and deliberately just a visibility signal, never a rejection:
+    a partially truncated fetch (e.g. an hour-long video whose fetch died after three minutes)
+    can't be told apart from a genuinely short source without knowing the source's real
+    duration, and ``Source.duration_sec`` is never populated today (see models.py/pipeline.py) —
+    populating it would mean touching the transcript-fetching machinery, which this gate must
+    not do. So this only ever flags "built from little material," honestly, without claiming to
+    detect truncation specifically. ``word_count == 0`` means unknown (entries filed before this
+    field existed) and is deliberately not flagged, to avoid mislabeling old data as thin.
+    """
+    return 0 < word_count < _thin_transcript_words()
+
+
+def _thin_transcript_words() -> int:
+    try:
+        return int(os.environ.get("DISTIL_THIN_TRANSCRIPT_WORDS", THIN_TRANSCRIPT_WORDS))
+    except ValueError:
+        return THIN_TRANSCRIPT_WORDS
 
 
 @dataclass
@@ -70,9 +139,11 @@ def ingest_text(text: str) -> Transcript:
     lines = [ln for ln in text.splitlines() if ln.strip()]
     ts_lines = [ln for ln in lines if _INLINE_TS.match(ln)]
     if lines and len(ts_lines) >= max(1, len(lines) // 2):
-        return _parse_inline_timestamped(text)
-
-    return _parse_paragraphs(text)
+        transcript = _parse_inline_timestamped(text)
+    else:
+        transcript = _parse_paragraphs(text)
+    _check_min_words(transcript)
+    return transcript
 
 
 # ---- format parsers ---------------------------------------------------------------------
@@ -110,7 +181,9 @@ def _parse_srt(raw: str) -> Transcript:
         idx += 1
     if not segments:
         raise IngestError("No subtitle cues found in .srt input.")
-    return Transcript(segments=segments)
+    transcript = Transcript(segments=segments)
+    _check_min_words(transcript)
+    return transcript
 
 
 def _parse_inline_timestamped(text: str) -> Transcript:

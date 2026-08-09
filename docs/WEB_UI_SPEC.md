@@ -93,11 +93,16 @@ state ("terminated" = failed).
   driven by the job's persisted `current_phase`/`phase_index`/`phase_total`/`phase_started_at`
   (see `AGENTS.md`'s "Visible per-stage progress" entry for the plumbing). `M` reflects only the
   phases this job will actually run (kind + enabled stages), and shrinks honestly if the
-  low-value short-circuit ends the run early instead of continuing to claim an unreached total.
+  transcript-too-short rejection ends the run early instead of continuing to claim an unreached
+  total.
 - *Done* — "kept N items · verdict rich" + **View entry** link. The entry page also shows a
-  collapsed per-stage timing breakdown for the finished run.
-- *Low-value* — honest neutral notice: "Not much to extract — verdict little_to_extract.
-  Nothing filed." (FR12). Not error-styled.
+  collapsed per-stage timing breakdown for the finished run. There is no quality short-circuit
+  (owner decision — see `AGENTS.md`): every transcript that clears ingest's word-count floor
+  ends up Done, even one triage classifies `little_to_extract`.
+- *Low-value* — honest neutral notice naming the word count and the floor (e.g. "Transcript has
+  only 12 words (minimum 50) — too short to work with."). This is the *only* rejection in the
+  pipeline; it fires at ingest, before the model is ever asked to judge quality. Not
+  error-styled, and distinct from *Failed* (no Retry offered).
 - *Failed* — error reason, which phase it failed during, + **Retry** (re-queues the same
   transcript).
 

@@ -33,7 +33,9 @@ from distil.youtube import YoutubeFetchError
 from web import jobs as jobsmod
 from web.app import create_app
 
-_GOOD_SRT = "1\n00:00:00,000 --> 00:00:02,000\nHello world.\n"
+# Long enough to clear ingest.py's word-count floor (the server validates every submitted
+# transcript via ingest_srt_text before accepting it).
+_GOOD_SRT = "1\n00:00:00,000 --> 00:00:02,000\n" + "Hello world. " * 30 + "\n"
 
 
 def _test_client_opener(test_client: TestClient):

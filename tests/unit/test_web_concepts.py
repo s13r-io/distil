@@ -208,6 +208,30 @@ def test_entry_page_links_transcript_and_contributed_concepts(seeded):
 
 
 @pytest.mark.unit
+def test_entry_page_shows_thin_source_badge_when_word_count_is_low(seeded):
+    store = Store(db_path=seeded / "distil.db", kb_dir=seeded / "kb")
+    entry = _file_entry(store, "e1", "Talk About Testing")
+    entry.source.transcript_word_count = 120
+    store.file_entry(entry)
+    client = TestClient(create_app())
+    r = client.get("/entries/e1")
+    assert r.status_code == 200
+    assert "thin source" in r.text
+
+
+@pytest.mark.unit
+def test_entry_page_hides_thin_source_badge_when_word_count_is_healthy(seeded):
+    store = Store(db_path=seeded / "distil.db", kb_dir=seeded / "kb")
+    entry = _file_entry(store, "e1", "Talk About Testing")
+    entry.source.transcript_word_count = 2000
+    store.file_entry(entry)
+    client = TestClient(create_app())
+    r = client.get("/entries/e1")
+    assert r.status_code == 200
+    assert "thin source" not in r.text
+
+
+@pytest.mark.unit
 def test_entry_page_hides_transcript_link_when_no_bundle_exported(seeded):
     store = Store(db_path=seeded / "distil.db", kb_dir=seeded / "kb")
     store.file_entry(KBEntry.model_validate({

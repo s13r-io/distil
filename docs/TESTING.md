@@ -52,6 +52,8 @@ that must abstain.
 - T-I4: pasted plain text (no file extension) is normalized the same as `.txt`.
 - T-I5: unknown/binary file or empty input → clear error, not a crash.
 - T-I6: the normalized transcript shape is identical across `.srt`/`.txt`/`.md`/paste (downstream stages don't care about source format).
+- T-I7 (owner decision, supersedes triage's old `little_to_extract` short-circuit): a transcript below `DISTIL_MIN_TRANSCRIPT_WORDS` (default 50) raises `TranscriptTooShortError` on every ingest path (`ingest_text`, `ingest_file`'s `.srt` and text branches, `ingest_srt_text`) — a distinct `IngestError` subclass, never conflated with a read/parse/fetch failure; a transcript at or above the floor is never rejected on quality grounds, and the threshold is configurable.
+- T-I8: `is_thin_source(word_count)` — a visibility signal, never a rejection — is `True` only strictly between 0 and `DISTIL_THIN_TRANSCRIPT_WORDS` (default 500); `0` (unknown, pre-existing entries) and values at/above the threshold are `False`.
 
 ### youtube.py (fetch layer — `yt-dlp` invoked via an injectable ``run``, no real subprocess/network in unit tests)
 - T-Y1: a playlist URL (`?list=` with no `v`, or `/playlist` path) is distinguished from a single video URL.
@@ -131,7 +133,7 @@ that must abstain.
 ### triage.py (unit, FakeClient)
 - T-T1: parses a well-formed model response into a TriageResult.
 - T-T2: malformed/partial model JSON → raises a clear ParseError (no silent garbage).
-- T-T3: `little_to_extract` verdict short-circuits the pipeline (no extract call made).
+- T-T3 (owner decision): removed — there is no `is_low_value`/short-circuit signal anymore; `verdict` is classified and stored but never gates the pipeline (see pipeline.py's module docstring and T-PL2 below).
 - T-T4 (eval): `low_value_vlog.txt` → verdict `little_to_extract`.
 - T-T5 (eval): `screen_share.txt` → `transcript_loss.level == "high"` with non-empty evidence.
 
@@ -201,10 +203,12 @@ that must abstain.
 - T-S5: noisy source filenames are cleaned for display, optional YouTube URLs render near the top of notes, and Note v1 evidence is collapsed/de-emphasized.
 - T-S6 (OKF, Phase 2): `file_entry(..., transcript=...)` exports `sources/<slug>.md` + `raw/<slug>.md` under `okf_root`; omitting `transcript` (feedback-only re-file) leaves no `okf_root` directory.
 - T-S7 (OKF, Phase 2): `okf_root` defaults to a sibling of `kb_dir`. `delete_entry` is pure DB/file-store (kb file, index row, vectors, membership retraction) and deliberately does not touch OKF pages — see T-DEL1-4 for the orchestration layer (`canonicalize.run_delete_entry_stage`) that does.
+- T-S8 (owner decision, replaces the removed legacy-low-value pruning test): `list_entries` never prunes on `triage.verdict`/empty `knowledge_items` — a filed entry with `little_to_extract` and zero items is a normal outcome now, and listing-time pruning on it would silently reintroduce the exact discard the pipeline itself no longer does. Only a row whose backing `kb/` file is missing is pruned.
+- T-S9: a "Thin material" advisory line renders (in both the note and no-note markdown bodies, and in `teaching_note_markdown`) when `source.transcript_word_count` is below `DISTIL_THIN_TRANSCRIPT_WORDS`; absent when healthy or when the count is `0` (unknown/legacy).
 
 ### pipeline.py
 - T-PL1: end-to-end with FakeClient produces a complete, schema-valid KBEntry with `distilled_note`.
-- T-PL2: `little_to_extract` path returns a minimal result without filing and makes no extract/link calls.
+- T-PL2 (owner decision, replaces the removed `little_to_extract` short-circuit test): a transcript triage classifies `little_to_extract` still runs the full sequence and is filed exactly like any other — `verdict` is stored, never acted on.
 - T-PL3: useful transcript with graph disabled stays within four LLM calls: triage, extract, link, note.
 - T-PL4 (OKF, Phase 2): filing a useful transcript exports both OKF pages (`sources/<slug>.md`, `raw/<slug>.md`) via `store.file_entry`'s `transcript` kwarg.
 - T-PL5 (Phase 15.3): with `enable_canonicalize=True`, filing a useful transcript produces a concept page under `okf_root/concepts/` (`type: concept`, a "## Sources" section).
@@ -212,7 +216,7 @@ that must abstain.
 - T-PL7 (Phase 16): with `enable_concept_edges=True`, a second video whose concept centroid is similar to an existing concept's gets a classified typed edge, rendered under a `## Contrasts with`/`## Builds on`/`## Related` heading on its OKF page.
 - T-PL8 (Phase 16): with `enable_concept_edges=False`, the concept-edges stage makes zero LLM calls even when a candidate would otherwise exist, and no concept gains an edge.
 - T-PL9 (Phase A, visible progress): `phase_callback` fires `(stage, "start")` before and `(stage, "finish")` after each stage, in pipeline order, without changing `timing_callback`'s existing behaviour.
-- T-PL10 (Phase A): the `little_to_extract` short-circuit reports only `("triage", "start")`, `("triage", "finish")`, `("triage", "short_circuit")` — no events for stages that never ran.
+- T-PL10 (owner decision): `run_pipeline` never emits a `"short_circuit"` phase event itself under any triage verdict — that event moved to the ingest-time word-count gate, reported by callers outside this function (`web/app.py`'s `_distill_job`/`_fetch_playlist_video`, `distil/cli.py`).
 - T-PL11 (Phase A): a disabled stage (`enable_graph`/`enable_canonicalize`/`enable_concept_edges=False`) emits no start/finish events, so a caller deriving the declared total from these events reflects only what will actually run.
 - T-PL12 (Phase D): an entity mentioned in the extract response flows end-to-end (canonicalized, synthesized, exported to `okf_root/entities/`) at the existing Stage 8 — the total LLM call count matches concepts-only-plus-entities exactly, with no extra call for a second transcript read.
 - T-PL13 (Phase D): with `enable_entities=False`, the entities stage makes zero LLM calls and creates no entities, even though the extract response still carries an `entities` array.

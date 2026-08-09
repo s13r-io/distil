@@ -84,7 +84,8 @@ consultable. The user asks a question (or a "do I have notes on X?" lookup) and 
 1. Embeds the query and retrieves the most similar **atomic knowledge items** (semantic search).
 2. **Gates on relevance** — if nothing clears the threshold, it returns "no relevant notes
    found" and stops. It must never answer such a question from the model's own world
-   knowledge. This is the read-side analogue of the `little_to_extract` honesty verdict.
+   knowledge. This is the read-side analogue of triage's honest `little_to_extract`
+   classification (FR12) — a refusal to fabricate, not a write-side rejection rule.
 3. If items clear the gate, it synthesizes an answer using **only** those items, grounding
    every claim in them, and returns the answer plus links to the source notes (resolvable to
    the entry file and the item's provenance timestamp).

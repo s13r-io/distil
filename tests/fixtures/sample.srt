@@ -1,11 +1,11 @@
 1
 00:00:01,000 --> 00:00:04,000
-Welcome to the talk on writing maintainable code.
+Welcome to the talk on writing maintainable code that your whole team can actually understand and safely change without fear of breaking something else.
 
 2
 00:00:04,500 --> 00:00:09,200
-The first rule is to keep your functions small and focused.
+The first rule is to keep your functions small and focused, because a function that does one thing is far easier to test, debug, and reuse.
 
 3
 00:01:12,000 --> 00:01:15,800
-Name things clearly; a good name removes the need for a comment.
+Name things clearly; a good name removes the need for a comment, and it helps the next reader build an accurate mental model quickly.

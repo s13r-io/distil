@@ -18,7 +18,9 @@ from distil.store import Store
 from web import jobs as jobsmod
 from web.app import create_app
 
-_VALID_SRT = "1\n00:00:00,000 --> 00:00:02,000\nHello world.\n"
+# Long enough to clear ingest.py's word-count floor — the submit route validates via
+# ingest_srt_text before accepting anything into the pipeline.
+_VALID_SRT = "1\n00:00:00,000 --> 00:00:02,000\n" + "Hello world. " * 30 + "\n"
 
 
 def _bearer(token: str) -> dict:
@@ -205,6 +207,52 @@ def test_collector_submit_rejects_malformed_transcript_and_leaves_the_lease_inta
     got = store.get(job.job_id)
     assert got.status == jobsmod.STATUS_COLLECTING  # unchanged — never accepted into the pipeline
     assert got.kind == "youtube"
+
+
+@pytest.mark.unit
+def test_collector_submit_resolves_job_as_low_value_when_transcript_too_short(client, tmp_path):
+    """A too-short collected transcript is a clean rejection, not a parse failure — the job is
+    resolved (STATUS_LOW_VALUE) immediately rather than left to be re-claimed and resubmitted
+    in a loop until its 7-day collection_deadline gives up."""
+    store = _store(tmp_path)
+    job = store.enqueue(
+        kind="youtube", title="t", payload="https://youtu.be/abc",
+        status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    store.claim_for_collection(limit=5)
+    short_srt = "1\n00:00:00,000 --> 00:00:02,000\nToo short.\n"
+    r = client.post(
+        f"/collector/jobs/{job.job_id}/transcript",
+        data={"srt": short_srt},
+        headers=_bearer("collector-secret"),
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == jobsmod.STATUS_LOW_VALUE
+    got = store.get(job.job_id)
+    assert got.status == jobsmod.STATUS_LOW_VALUE
+
+
+@pytest.mark.unit
+def test_collector_submit_too_short_is_idempotent_on_retry(client, tmp_path):
+    store = _store(tmp_path)
+    job = store.enqueue(
+        kind="youtube", title="t", payload="https://youtu.be/abc",
+        status=jobsmod.STATUS_AWAITING_COLLECTION,
+    )
+    store.claim_for_collection(limit=5)
+    short_srt = "1\n00:00:00,000 --> 00:00:02,000\nToo short.\n"
+    first = client.post(
+        f"/collector/jobs/{job.job_id}/transcript",
+        data={"srt": short_srt},
+        headers=_bearer("collector-secret"),
+    )
+    second = client.post(
+        f"/collector/jobs/{job.job_id}/transcript",
+        data={"srt": short_srt},
+        headers=_bearer("collector-secret"),
+    )
+    assert first.status_code == second.status_code == 200
+    assert store.get(job.job_id).status == jobsmod.STATUS_LOW_VALUE
 
 
 @pytest.mark.unit

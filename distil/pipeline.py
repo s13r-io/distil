@@ -2,14 +2,21 @@
 
 One call turns a normalized transcript + profile into a filed, schema-valid :class:`KBEntry`:
 
-    ingest (done by caller) → triage → [short-circuit] → extract → normalize → link
+    ingest (done by caller) → triage → extract → normalize → link
     → note synthesis → narrative summary → graph → file → canonicalize → concept edges
 
-The ``little_to_extract`` verdict short-circuits: a minimal entry is returned but **not filed**,
-and no extract/link/graph/canonicalize/concept-edge LLM calls are made (T-PL2). The LLM-call
-budget is kept bounded (triage + extract + link, plus capped graph calls and capped
-canonicalize/synthesis/concept-edge calls — see ``canonicalize.py``'s and ``concept_graph.py``'s
-module docstrings and the OKF Phase 3 design report §6, §9 item 4).
+**There is no quality short-circuit here.** The owner chose the video (or note); that editorial
+judgment is trusted unconditionally, and a model second-guessing it can only subtract. The one
+rejection rule — a transcript below a word-count floor — is enforced earlier, at ingest
+(``ingest.py``'s ``TranscriptTooShortError``), never here: by the time a ``Transcript`` reaches
+this function, it is always worth filing, and every entry that starts this pipeline finishes it
+filed (Stage 7 always runs; T-PL2). Triage's ``verdict`` is still computed and stored (other code
+and stored data depend on its shape) but nothing here acts on it — only
+``knowledge_types_present`` (routes ``extract.py``), ``density``, and ``transcript_loss``
+(informational) matter downstream. The LLM-call budget is kept bounded (triage + extract + link,
+plus capped graph calls and capped canonicalize/synthesis/concept-edge calls — see
+``canonicalize.py``'s and ``concept_graph.py``'s module docstrings and the OKF Phase 3 design
+report §6, §9 item 4).
 
 The narrative summary stage (``distil/summary.py``) is additive and optional: it only runs when
 a caller passes ``summary_client`` (a *separate*, cheap-tier client — never ``client``, which
@@ -54,7 +61,7 @@ from .normalize import normalize_items
 from .note import synthesize_note
 from .store import Store
 from .summary import NarrativeSummaryError, synthesize_narrative_summary
-from .triage import is_low_value, run_triage
+from .triage import run_triage
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +76,11 @@ class PipelineConfig:
     enable_narrative_summary: bool = True
     model_version: str = ""
     timing_callback: Callable[[str, float], None] | None = None
-    # Reports stage start/finish (and the little_to_extract short-circuit) for live progress
-    # display, independent of timing_callback's after-the-fact duration reporting. Events:
-    # ("<stage>", "start"), ("<stage>", "finish"), ("triage", "short_circuit").
+    # Reports stage start/finish for live progress display, independent of timing_callback's
+    # after-the-fact duration reporting. Events: ("<stage>", "start"), ("<stage>", "finish").
+    # (Callers may also feed this same reporter a ("<stage>", "short_circuit") event of their
+    # own for a rejection that happens outside this function entirely — see web/app.py's
+    # TranscriptTooShortError handling — but run_pipeline itself never emits one.)
     phase_callback: Callable[[str, str], None] | None = None
 
 
@@ -109,23 +118,17 @@ def run_pipeline(
         thumbnail_url=source_thumbnail_url,
         metadata_provider=source_metadata_provider,
         metadata_fetched_at=source_metadata_fetched_at,
+        transcript_word_count=len(transcript.full_text().split()),
         captured_at=now,
     )
     meta = EntryMeta(created_at=now, model_version=config.model_version)
 
-    # Stage 1 — triage (always one LLM call).
+    # Stage 1 — triage (always one LLM call). Informational only from here on — see the module
+    # docstring: nothing below gates on triage.verdict.
     triage_result = _timed(
         "triage", config, lambda: run_triage(transcript, triage_client or client)
     )
     triage = triage_result.triage
-
-    # Honesty short-circuit: return a minimal entry, no filing or further LLM calls (T-PL2).
-    # Tell the phase reporter the run is stopping now, so a declared total sized for the full
-    # sequence never gets reported as "stuck" on a run that will never reach it.
-    if is_low_value(triage_result):
-        if config.phase_callback is not None:
-            config.phase_callback("triage", "short_circuit")
-        return KBEntry(entry_id=entry_id, source=source, triage=triage, meta=meta)
 
     # Stage 2 — extract; Stage 3 — normalize (pure faithfulness gate).
     raw_items = _timed(

@@ -7,11 +7,16 @@ import json
 
 import pytest
 
-from distil.ingest import ingest_text
+from distil.ingest import Segment, Transcript
 from distil.llm import FakeClient
 from distil.models import Profile
 from distil.pipeline import PipelineConfig, run_pipeline
 from distil.store import Store
+
+
+def _t(text: str) -> Transcript:
+    return Transcript(segments=[Segment(text=text, locator="seg:0")])
+
 
 _TRIAGE_RICH = json.dumps({
     "knowledge_types_present": [{"type": "conceptual", "share": 1.0}],
@@ -54,7 +59,7 @@ def store(tmp_path):
 
 @pytest.mark.unit
 def test_entity_flows_end_to_end_through_the_pipeline_no_extra_transcript_read(profile, store):
-    transcript = ingest_text("react renders ui using a virtual dom under the hood")
+    transcript = _t("react renders ui using a virtual dom under the hood")
     client = FakeClient(responses=[
         _TRIAGE_RICH, _EXTRACT_WITH_ENTITY, _LINK, _NOTE,
         _CANON_NEW_CONCEPT, _SYNTH_CONCEPT_CLAIMS,
@@ -86,7 +91,7 @@ def test_entity_flows_end_to_end_through_the_pipeline_no_extra_transcript_read(p
 
 @pytest.mark.unit
 def test_enable_entities_false_makes_zero_entity_llm_calls(profile, store):
-    transcript = ingest_text("react renders ui using a virtual dom under the hood")
+    transcript = _t("react renders ui using a virtual dom under the hood")
     # Only 6 responses: triage/extract/link/note/concept-canon/concept-synth. An entity call
     # would IndexError on the FakeClient if enable_entities weren't honored.
     client = FakeClient(responses=[
