@@ -6,7 +6,7 @@ import json
 import pytest
 
 from distil.embed import FakeEmbedder
-from distil.ingest import ingest_text
+from distil.ingest import Segment, Transcript
 from distil.llm import FakeClient
 from distil.models import KBEntry, Profile
 from distil.pipeline import PipelineConfig, run_pipeline
@@ -49,9 +49,10 @@ def store(tmp_path):
 def _file_real_entry(profile, store):
     """A fully filed entry with a concept membership, via the real pipeline — so refresh's
     "leaves concepts/entities/items untouched" claim has something real to verify against."""
-    transcript = ingest_text(
-        "Keep functions small and focused on one job. It makes testing dramatically easier."
-    )
+    transcript = Transcript(segments=[Segment(
+        text="Keep functions small and focused on one job. It makes testing dramatically easier.",
+        locator="seg:0",
+    )])
     client = FakeClient(
         responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_NEW, _SYNTH_CLAIMS]
     )
