@@ -579,7 +579,7 @@ class JobStore:
         if r["status"] != STATUS_COLLECTING:
             return "not_leased"
         now = _now()
-        self._conn.execute(
+        cur = self._conn.execute(
             "UPDATE jobs SET status=?, kind=?, payload=?, lease_expires_at=NULL, "
             "collection_deadline=NULL, error=NULL, collected_at=?, updated_at=? "
             "WHERE job_id=? AND status=?",
@@ -589,6 +589,18 @@ class JobStore:
             ),
         )
         self._conn.commit()
+        if cur.rowcount == 0:
+            # The row moved out of COLLECTING between our SELECT and this guarded UPDATE (e.g.
+            # a concurrent expiry sweep or a racing report_uncollectable) — re-derive the real
+            # outcome from current state instead of blindly reporting success.
+            r2 = self._conn.execute(
+                "SELECT status, collected_at FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
+            if not r2:
+                return "not_found"
+            if r2["status"] == STATUS_QUEUED or r2["collected_at"] is not None:
+                return "already_submitted"
+            return "not_leased"
         return "accepted"
 
     def report_uncollectable(self, job_id: str, *, error: str) -> bool:
@@ -603,12 +615,18 @@ class JobStore:
             return True
         if r["status"] != STATUS_COLLECTING:
             return False
-        self._conn.execute(
+        cur = self._conn.execute(
             "UPDATE jobs SET status=?, error=?, lease_expires_at=NULL, updated_at=? "
             "WHERE job_id=? AND status=?",
             (STATUS_FAILED, error, _now(), job_id, STATUS_COLLECTING),
         )
         self._conn.commit()
+        if cur.rowcount == 0:
+            # The row moved out of COLLECTING between our SELECT and this guarded UPDATE (e.g.
+            # a concurrent expiry sweep or a racing submit_collected_transcript) — re-derive the
+            # real outcome from current state instead of blindly reporting success.
+            r2 = self._conn.execute("SELECT status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            return bool(r2) and r2["status"] == STATUS_FAILED
         return True
 
 
