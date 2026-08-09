@@ -260,6 +260,13 @@ class KBEntry(_Model):
     tags: Tags = Field(default_factory=Tags)
     feedback: Feedback = Field(default_factory=Feedback)
     meta: EntryMeta
+    # True when the extraction call's response had to be salvaged from an incomplete array (the
+    # output-token cap was hit, or the connection dropped mid-stream) rather than parsed as a
+    # complete response — see extract.TriageExtractResult.truncated. knowledge_items still holds
+    # whatever was recovered; this flag is what tells the owner that recovery, not a clean stop,
+    # is why the count looks the way it does. Default False for entries filed before this field
+    # existed and for entries whose extraction genuinely completed.
+    extraction_truncated: bool = False
 
 
 # ---- Concept (Phase 15.1 — canonicalize engine; OKF Phase 3a design report §3) ----------

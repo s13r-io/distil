@@ -79,6 +79,16 @@ class FakeClient:
         return len(self.calls)
 
 
+# A non-streaming request whose max_tokens estimates past ~10 minutes of generation is rejected
+# client-side by the SDK (ValueError) before it ever reaches the network — and even where the SDK
+# would allow it, a long-held non-streaming connection risks an idle-connection drop server- or
+# proxy-side. Above this threshold, complete() routes through the streaming API internally and
+# assembles the final text itself, so callers keep the same synchronous str-returning interface.
+# See the PR that introduced per-stage max_tokens ceilings (distil/model_config.py) for why
+# extraction alone needs a ceiling this high.
+_STREAMING_REQUIRED_ABOVE_TOKENS = 16_000
+
+
 @dataclass
 class AnthropicClient:
     """Default provider skeleton: Claude API, key + model from env (ARCHITECTURE.md §1, §6).
@@ -86,12 +96,24 @@ class AnthropicClient:
     The model is required at construction; the API key is required only when a completion is
     actually requested, so the object can be constructed (and a friendly missing-key error
     surfaced lazily) without a network or the SDK installed.
+
+    ``max_tokens`` is the per-request output *ceiling*, not a spend — the API only bills for
+    tokens actually generated, so a caller raising this costs nothing unless the model produces
+    more output. It defaults to 4096 (the pre-existing hardcoded value) for any caller that
+    doesn't specify one explicitly; ``distil/model_config.py``'s ``make_stage_client`` is what
+    resolves the right ceiling per pipeline stage.
     """
 
     model: str = field(default="")
+    max_tokens: int = field(default=4096)
     _api_key: str | None = field(default=None, repr=False)
 
-    def __init__(self, model: str | None = None, api_key: str | None = None):
+    def __init__(
+        self,
+        model: str | None = None,
+        api_key: str | None = None,
+        max_tokens: int = 4096,
+    ):
         resolved_model = model or os.environ.get("DISTIL_MODEL", "")
         if not resolved_model:
             raise RuntimeError(
@@ -99,6 +121,7 @@ class AnthropicClient:
                 "(see .env.example) — Distil does not hardcode a model."
             )
         self.model = resolved_model
+        self.max_tokens = max_tokens
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY") or None
 
     def complete(self, prompt: str, *, system: str | None = None) -> str:
@@ -116,11 +139,15 @@ class AnthropicClient:
             ) from exc
 
         client = anthropic.Anthropic(api_key=self._api_key)
-        kwargs: dict = {"model": self.model, "max_tokens": 4096,
+        kwargs: dict = {"model": self.model, "max_tokens": self.max_tokens,
                         "messages": [{"role": "user", "content": prompt}]}
         if system:
             kwargs["system"] = system
-        message = client.messages.create(**kwargs)
+        if self.max_tokens > _STREAMING_REQUIRED_ABOVE_TOKENS:
+            with client.messages.stream(**kwargs) as stream:
+                message = stream.get_final_message()
+        else:
+            message = client.messages.create(**kwargs)
         return "".join(block.text for block in message.content if block.type == "text")
 
     def stream(self, prompt: str, *, system: str | None = None):  # pragma: no cover - network
@@ -138,7 +165,7 @@ class AnthropicClient:
             ) from exc
 
         client = anthropic.Anthropic(api_key=self._api_key)
-        kwargs: dict = {"model": self.model, "max_tokens": 4096,
+        kwargs: dict = {"model": self.model, "max_tokens": self.max_tokens,
                         "messages": [{"role": "user", "content": prompt}]}
         if system:
             kwargs["system"] = system

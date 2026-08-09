@@ -55,13 +55,13 @@ the process exits, with no such wait.
 Per-stage model selection (``distil/model_config.py``) is a general mechanism, not something
 built one-off for the narrative summary: ``extract_client``/``link_client``/``note_client``/
 ``graph_client``/``canonicalize_client`` let a caller inject a distinct client per stage, each
-defaulting to ``None`` — meaning "use ``client``", the exact single shared object every stage
-used before these existed. No current caller (``cli.py``, ``web/app.py``) passes them yet, so
-today's actual model selection for these stages is unchanged; that wiring, and any settings UI
-for it, are deliberate follow-ups. What already works today is that setting
-``DISTIL_MODEL_<STAGE>`` in the environment and passing the matching
-``model_config.make_stage_client(stage)`` result through one of these parameters changes only
-that stage — no further ``pipeline.py`` change required.
+defaulting to ``None`` — meaning "use ``client``". ``cli.py`` and ``web/app.py`` both construct
+all six via ``model_config.make_stage_client(stage)`` (each stage's own ``_make_<stage>_client``
+seam) and pass them through these kwargs, so setting ``DISTIL_MODEL_<STAGE>`` in the environment
+genuinely changes only that stage's model — no further ``pipeline.py`` change required, and no
+caller needs to pass these explicitly to get today's defaults (every stage still resolves to
+``DISTIL_MODEL`` unless overridden). A settings UI for editing these values is a deliberate
+follow-up; the wiring itself is not.
 """
 
 from __future__ import annotations
@@ -179,6 +179,7 @@ def run_pipeline(
     )
     triage = triage_extract_result.triage
     raw_items = triage_extract_result.items
+    extraction_truncated = triage_extract_result.truncated
 
     # Stage 3 — normalize (pure faithfulness gate).
     items = _timed("normalize", config, lambda: normalize_items(raw_items, transcript))
@@ -208,6 +209,7 @@ def run_pipeline(
         distilled_note=distilled_note,
         tags=_derive_tags(items, links, distilled_note),
         meta=meta,
+        extraction_truncated=extraction_truncated,
     )
 
     # Join the narrative summary now that the rest of the pipeline has already done its work —

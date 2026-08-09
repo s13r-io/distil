@@ -75,7 +75,18 @@ def env(tmp_path, monkeypatch):
 
 
 def _fake(monkeypatch, responses):
-    monkeypatch.setattr(cli, "_make_client", lambda: FakeClient(responses=responses))
+    # A single shared FakeClient stands in for every stage (extract/link/note/graph/
+    # canonicalize) — each stage now has its own client-construction seam (_make_extract_client,
+    # _make_link_client, etc.) so DISTIL_MODEL_<STAGE> genuinely takes effect in production, but
+    # tests still want one client consuming the canned responses in order, exactly as before
+    # that split.
+    fake = FakeClient(responses=responses)
+    monkeypatch.setattr(cli, "_make_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_extract_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_link_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_note_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_graph_client", lambda: fake)
+    monkeypatch.setattr(cli, "_make_canonicalize_client", lambda: fake)
 
 
 # ---- T-C1: distil run <file> and --paste ----
@@ -221,3 +232,53 @@ def test_c3_run_bad_url_is_friendly(env, monkeypatch):
     assert result.exit_code != 0
     assert "YouTube URL" in result.output
     assert "Traceback" not in result.output
+
+
+# ---- Per-stage client wiring: DISTIL_MODEL_<STAGE> must genuinely take effect ------------
+#
+# model_config.resolve_stage_model has always resolved DISTIL_MODEL_<STAGE> correctly, but until
+# every stage's client-construction seam (_make_link_client, _make_note_client, etc.) routed
+# through model_config.make_stage_client, cli.py/web/app.py still shared one _make_client()
+# object across link/note/graph/canonicalize — the env var was inert for those four stages.
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "make_fn_name,stage",
+    [
+        ("_make_extract_client", "extract"),
+        ("_make_link_client", "link"),
+        ("_make_note_client", "note"),
+        ("_make_graph_client", "graph"),
+        ("_make_canonicalize_client", "canonicalize"),
+    ],
+)
+def test_per_stage_client_defaults_to_distil_model(env, monkeypatch, make_fn_name, stage):
+    """Byte-for-byte behavior preservation: with no per-stage override, every one of these
+    still resolves to DISTIL_MODEL, exactly as before this wiring existed."""
+    make_fn = getattr(cli, make_fn_name)
+    assert make_fn().model == "test-model"  # env fixture sets DISTIL_MODEL=test-model
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "make_fn_name,stage",
+    [
+        ("_make_extract_client", "EXTRACT"),
+        ("_make_link_client", "LINK"),
+        ("_make_note_client", "NOTE"),
+        ("_make_graph_client", "GRAPH"),
+        ("_make_canonicalize_client", "CANONICALIZE"),
+    ],
+)
+def test_per_stage_client_honors_its_own_env_override(env, monkeypatch, make_fn_name, stage):
+    monkeypatch.setenv(f"DISTIL_MODEL_{stage}", "claude-sonnet-5")
+    make_fn = getattr(cli, make_fn_name)
+    assert make_fn().model == "claude-sonnet-5"
+
+
+@pytest.mark.unit
+def test_make_summary_client_still_defaults_to_the_haiku_tier(env):
+    """The one stage that must NOT follow DISTIL_MODEL — unaffected by this wiring change."""
+    from distil.model_config import DEFAULT_SUMMARY_MODEL
+    assert cli._make_summary_client().model == DEFAULT_SUMMARY_MODEL

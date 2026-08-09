@@ -178,6 +178,41 @@ def test_thin_material_note_shown_in_teaching_note_export(store):
     assert "---" not in text
 
 
+# ---- Extraction-truncated advisory (visible, never a rejection) -------------------------
+
+
+@pytest.mark.unit
+def test_extraction_truncated_note_shown_when_flagged(store):
+    entry = _entry(with_note=True)
+    entry.extraction_truncated = True
+    path = store.file_entry(entry)
+    assert "Extraction truncated" in path.read_text()
+
+
+@pytest.mark.unit
+def test_extraction_truncated_note_absent_when_not_flagged(store):
+    entry = _entry(with_note=True)
+    entry.extraction_truncated = False
+    path = store.file_entry(entry)
+    assert "Extraction truncated" not in path.read_text()
+
+
+@pytest.mark.unit
+def test_extraction_truncated_note_shown_without_a_distilled_note_too(store):
+    entry = _entry(with_note=False)
+    entry.extraction_truncated = True
+    path = store.file_entry(entry)
+    assert "Extraction truncated" in path.read_text()
+
+
+@pytest.mark.unit
+def test_extraction_truncated_note_shown_in_teaching_note_export(store):
+    entry = _entry(with_note=True)
+    entry.extraction_truncated = True
+    text = Store.teaching_note_markdown(entry)
+    assert "Extraction truncated" in text
+
+
 @pytest.mark.unit
 def test_new_note_entries_render_source_url_and_index_note_title(store):
     entry = _entry(title="[English] weird_file-name.srt", with_note=True)

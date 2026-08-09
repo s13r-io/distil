@@ -9,13 +9,20 @@ faithfulness of the model's output is the gated eval (T-E3).
 depend on the model behaving.
 
 **Extraction robustness (T-E5..E7)**: the extraction call is the one most likely to hit the
-4,096-token output cap on a long transcript, or a dropped connection mid-stream. Both surface
+output-token cap on a long transcript, or a dropped connection mid-stream. Both surface
 the same way — a response that fails to parse as a JSON array. ``run_extraction`` retries the
 model call a bounded number of times on exactly that failure mode (network exception, or an
 unparseable/unrecoverable response); a schema-level (semantic) failure in an item that *did*
 parse is not retried. When the response looks like a JSON array that began but was cut off
 mid-stream, ``_parse_items_json`` recovers whatever complete leading objects it can rather than
-discarding the whole response — see ``_recover_truncated_leading_objects``.
+discarding the whole response — see ``_recover_truncated_leading_objects``. The per-stage
+``max_tokens`` ceiling that bounds how often this path is reached at all is resolved by
+``distil/model_config.py`` (``resolve_stage_max_tokens``), sized to the extraction model's real
+published output ceiling rather than a flat default — see that module's docstring. Even with a
+correct ceiling, a genuinely truncated/salvaged response must never look identical to a complete
+one: ``_parse_items_json`` reports whether it had to recover a partial array, and that flag rides
+``TriageExtractResult.truncated`` all the way to ``KBEntry.extraction_truncated`` (surfaced in the
+web UI and the rendered markdown/teaching-note export) — see ``run_triage_extract``.
 
 **type/stance drift (T-E8)**: the model occasionally copies a ``stance`` value (most often
 ``personal_experience``) into the ``type`` field. Since ``build_extract_prompt`` fixes the
@@ -108,10 +115,17 @@ def run_extraction(
 ) -> list[KnowledgeItem]:
     ktype = dominant_type(triage)
     prompt = build_extract_prompt(ktype, transcript.full_text())
-    data = _complete_with_retry(client, prompt, SYSTEM)
+    data, truncated = _complete_with_retry(client, prompt, SYSTEM)
     items = _items_from_json(data, ktype)
     _truncate_overlong_quotes(items)
     _enforce_quote_discipline(items)
+    if truncated:
+        logger.warning(
+            "Extraction response was truncated (output cap or dropped connection) and salvaged "
+            "via partial recovery: only %d item(s) survived. The transcript's knowledge was NOT "
+            "fully captured.",
+            len(items),
+        )
     return items
 
 
@@ -120,35 +134,55 @@ class TriageExtractResult:
     triage: Triage
     items: list[KnowledgeItem]
     raw: str
+    truncated: bool = False
+    """True when the merged response had to be salvaged from an incomplete ``<ITEMS>`` array
+    (the output-token cap was hit, or the connection dropped mid-stream) rather than parsed as a
+    complete response — see ``extract._parse_items_json``. A salvaged response must never look
+    identical to a complete one: this is what lets ``pipeline.run_pipeline`` record the fact on
+    the filed ``KBEntry`` (``KBEntry.extraction_truncated``) instead of silently returning
+    whatever partial item list happened to survive."""
 
 
 def run_triage_extract(transcript: Transcript, client: LLMClient) -> TriageExtractResult:
     """One strong-tier call that classifies AND extracts — see the module docstring's
     "Triage+extraction merged into one call" section for why and how."""
     prompt = build_triage_extract_prompt(transcript.full_text())
-    triage, items_data, raw = _complete_triage_extract_with_retry(client, prompt)
+    triage, items_data, raw, truncated = _complete_triage_extract_with_retry(client, prompt)
     ktype = dominant_type(triage)
     items = _items_from_json(items_data, ktype)
     _truncate_overlong_quotes(items)
     _enforce_quote_discipline(items)
-    return TriageExtractResult(triage=triage, items=items, raw=raw)
+    if truncated:
+        logger.warning(
+            "Triage+extract response was truncated (output cap or dropped connection) and "
+            "salvaged via partial recovery: only %d item(s) survived out of what the model "
+            "started generating. The transcript's knowledge was NOT fully captured — this is "
+            "recorded on the filed entry (KBEntry.extraction_truncated).",
+            len(items),
+        )
+    return TriageExtractResult(triage=triage, items=items, raw=raw, truncated=truncated)
 
 
 def _complete_triage_extract_with_retry(
     client: LLMClient, prompt: str
-) -> tuple[Triage, list, str]:
+) -> tuple[Triage, list, str, bool]:
     """Same retry contract as ``_complete_with_retry``: a dropped connection or an unparseable
     response (missing/malformed ``<TRIAGE>``, or an ``<ITEMS>`` array that can't be recovered at
     all) is retried a bounded number of times; a schema-level failure in items that did parse
-    happens later, in ``_items_from_json``, and is never retried here."""
+    happens later, in ``_items_from_json``, and is never retried here.
+
+    The returned ``bool`` is whether *this* (successful) attempt's items had to be salvaged from
+    an incomplete array — a retry that eventually succeeds cleanly reports ``False`` even if an
+    earlier attempt failed outright; only a genuinely partial-but-usable response is truncated.
+    """
     last_exc: Exception | None = None
     for attempt in range(_MAX_RETRIES + 1):
         try:
             raw = client.complete(prompt, system=TRIAGE_EXTRACT_SYSTEM)
             triage_text, items_text = _split_triage_extract_response(raw)
             triage = parse_triage_response(triage_text)
-            items_data = _parse_items_json(items_text, kind="Extraction")
-            return triage, items_data, raw
+            items_data, truncated = _parse_items_json(items_text, kind="Extraction")
+            return triage, items_data, raw, truncated
         except ParseError as exc:
             last_exc = exc
         except Exception as exc:  # network/connection failure — retry
@@ -181,13 +215,15 @@ def _split_triage_extract_response(raw: str) -> tuple[str, str]:
     return triage_match.group(1), items_text
 
 
-def _complete_with_retry(client: LLMClient, prompt: str, system: str) -> list:
+def _complete_with_retry(client: LLMClient, prompt: str, system: str) -> tuple[list, bool]:
     """Call the model and parse a JSON array, retrying on parse/network failures only (T-E5..E7).
 
     A dropped connection (``client.complete`` raises) and a response truncated by the
     output-token cap (``_parse_items_json`` can't recover a usable array) both mean this
     attempt produced nothing usable — worth a bounded retry. A schema-level failure in items
     that *did* parse happens later, in ``_items_from_json``, and is never retried here.
+
+    Returns ``(data, truncated)`` — see ``_parse_items_json`` for what ``truncated`` means.
     """
     last_exc: Exception | None = None
     for attempt in range(_MAX_RETRIES + 1):
@@ -204,15 +240,25 @@ def _complete_with_retry(client: LLMClient, prompt: str, system: str) -> list:
     raise last_exc
 
 
-def _parse_items_json(raw: str, *, kind: str = "extraction") -> list:
+def _parse_items_json(raw: str, *, kind: str = "extraction") -> tuple[list, bool]:
     """Robustly parse a model response into a JSON array.
 
     Tolerates code fences / surrounding prose, and — when the response is a JSON array that
     began but was never closed (truncated mid-stream) — recovers whatever complete leading
     objects it can via ``_recover_truncated_leading_objects``. Rejects only when nothing at
     all can be recovered.
+
+    Returns ``(data, truncated)``. ``truncated`` is ``True`` only when ``data`` came from the
+    salvage path (``_recover_truncated_leading_objects``) rather than a complete, well-formed
+    array — a response that parses cleanly on the first try, or that only needed fence/prose
+    stripped from around an otherwise-complete embedded array, is not truncated. This is what
+    makes a salvaged response distinguishable from a complete one (see the module docstring's
+    "Triage+extraction merged into one call" section and ``TriageExtractResult.truncated``) —
+    a salvage that silently looks identical to success is exactly the defect this flag exists
+    to prevent.
     """
     text = _strip_fence(raw).strip()
+    truncated = False
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -228,9 +274,10 @@ def _parse_items_json(raw: str, *, kind: str = "extraction") -> list:
             if not recovered:
                 raise ParseError(f"{kind} response was not a JSON array: {raw[:120]!r}") from exc
             data = recovered
+            truncated = True
     if not isinstance(data, list):
         raise ParseError(f"{kind} response must be a JSON array.")
-    return data
+    return data, truncated
 
 
 def _recover_truncated_leading_objects(text: str) -> list:
@@ -238,9 +285,9 @@ def _recover_truncated_leading_objects(text: str) -> list:
 
     Walks the text after the opening ``[`` and greedily decodes each complete leading JSON
     value, stopping at the first value that fails to parse (the truncated tail — e.g. the
-    4,096-token output cap cut it off, or the connection dropped). Returns whatever complete
-    objects were recovered, possibly none; never fabricates or completes a partial object —
-    items that would have needed the cut-off tail are simply absent.
+    stage's output-token ceiling cut it off, or the connection dropped). Returns whatever
+    complete objects were recovered, possibly none; never fabricates or completes a partial
+    object — items that would have needed the cut-off tail are simply absent.
     """
     if not text.startswith("["):
         return []

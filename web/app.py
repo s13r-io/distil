@@ -34,7 +34,16 @@ from fastapi.templating import Jinja2Templates
 
 from distil import okf, youtube
 from distil.canonicalize import run_delete_entry_stage
-from distil.cli import _make_client, _make_embedder, _make_summary_client
+from distil.cli import (
+    _make_canonicalize_client,
+    _make_client,
+    _make_embedder,
+    _make_extract_client,
+    _make_graph_client,
+    _make_link_client,
+    _make_note_client,
+    _make_summary_client,
+)
 from distil.graph import link_graph
 from distil.ingest import (
     IngestError,
@@ -303,6 +312,11 @@ def _distill_job(job: jobsmod.Job) -> dict:
         ),
         embedder=embedder,
         summary_client=_make_summary_client(),
+        extract_client=_make_extract_client(),
+        link_client=_make_link_client(),
+        note_client=_make_note_client(),
+        graph_client=_make_graph_client(),
+        canonicalize_client=_make_canonicalize_client(),
     )
     total = perf_counter() - total_start
     n = len(entry.knowledge_items)
@@ -477,7 +491,7 @@ def _graph_link_job(entry_id: str) -> None:
         entry = store.load_entry(entry_id)
         if not entry.tags.topics:
             return
-        related = link_graph(entry, store, _make_client())
+        related = link_graph(entry, store, _make_graph_client())
         if related:
             entry.related_entries = related
             store.file_entry(entry)
