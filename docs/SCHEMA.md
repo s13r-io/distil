@@ -69,9 +69,11 @@ the structured fields; body is the human-readable rendering) and indexed in SQLi
               "channel_url": "string|null", "thumbnail_url": "string|null",
               "metadata_provider": "youtube_oembed|null",
               "metadata_fetched_at": "ts|null",
-              "duration_sec": 0, "captured_at": "ts" },
+              "duration_sec": 0, "transcript_word_count": 0, "captured_at": "ts" },
 
-  // TRIAGE — runs first. Routes everything; sets expectations.
+  // TRIAGE — runs first. knowledge_types_present routes stage 2; density/transcript_loss are
+  // informational. verdict is stored but never gates filing — ingest's word-count floor is
+  // the pipeline's only rejection rule (owner decision; ARCHITECTURE.md §2).
   "triage": {
     "knowledge_types_present": [ { "type": "heuristic", "share": 0.6 } ],  // shares sum ~1.0
     "density": "low | medium | high",

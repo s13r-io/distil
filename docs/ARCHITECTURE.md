@@ -37,14 +37,24 @@ raw input (pasted text or .srt / .txt / .md file) + profile
         │
         ▼
 [0] Ingest ──────────► normalized transcript: list of segments {text, timestamp?, locator}
-        │              (parses .srt and inline timestamps; tolerates none — PURE, no LLM)
+        │              (parses .srt and inline timestamps, tolerates none; rejects a
+        │              transcript below a word-count floor (TranscriptTooShortError) — the
+        │              pipeline's only quality gate, owner decision — PURE, no LLM)
         ▼
-[1] Triage ──────────► triage verdict (types, density, loss, verdict)
-        │                     │
-        │            if verdict == little_to_extract → return low-value result, do not file
+[0.5] Narrative summary (optional, cheap-tier, CONCURRENT) ► narrative_summary — whole-
+        │              transcript account, no citations; starts here, on a background thread,
+        │              and runs alongside stage 1 below rather than blocking it — they share no
+        │              data (both read only the transcript). Joined, bounded by
+        │              DISTIL_SUMMARY_JOIN_TIMEOUT_SECONDS, right before stage 7 files; a
+        │              failure or a still-running summary both leave narrative_summary unset
+        │              (logged either way) rather than blocking or failing filing.
         ▼
-[2] Extract (routed by type) ──► raw knowledge items
-        │
+[1] Triage+Extract MERGED ──► one strong-tier call, full transcript read ONCE: states its
+        │              classification (dominant knowledge type routes what it extracts,
+        │              density, transcript-loss — density/loss informational, verdict stored
+        │              but never gates) FIRST, then extracts raw knowledge items conditioned on
+        │              that, SECOND, in the same response — see extract.py's and
+        │              prompts/triage_extract.py's module docstrings
         ▼
 [3] Normalize ─────────► atomic items + provenance + stance validated
         │
@@ -53,10 +63,7 @@ raw input (pasted text or .srt / .txt / .md file) + profile
         │
         ▼
 [5] Note synthesis ────► distilled_note (teaching note grounded in verified item ids)
-        │
-        ▼
-[5.5] Narrative summary (optional, cheap-tier) ► narrative_summary — whole-transcript account,
-        │                no citations; runs only when a caller injects a summary_client
+        │              (narrative summary from stage 0.5 is joined here, before stage 6)
         ▼
 [6] Graph-link ────────► related_entries (match against existing KB index)
         │
@@ -79,16 +86,26 @@ raw input (pasted text or .srt / .txt / .md file) + profile
 [10] Feedback (later) ─► score+reason → profile update (pure logic, SCHEMA §3)
 ```
 
-LLM-backed stages: **1, 2, 4, 5, 6, 8, 9** (6 only needs the LLM for relation classification,
+(There is no stage "2" — it was extraction's own number before the merge; kept as a gap rather
+than renumbering everything below it, since "Stage 8"/"Stage 9" for canonicalize/concept-edges
+are already established, pervasive terminology across `canonicalize.py`, `concept_graph.py`,
+`AGENTS.md`, and `pipeline.py`'s own inline comments.)
+
+LLM-backed stages: **1, 4, 5, 6, 8, 9** (6 only needs the LLM for relation classification,
 candidate matching is a deterministic index lookup first; 8 and 9 likewise — embedding/centroid
 similarity candidates first, one capped batched LLM call for matching plus capped synthesis calls
 for 8, one capped LLM call per candidate pair for 9; 8's entity-mention matching/synthesis follows
 the identical shape one granularity down, so it adds no new LLM-backed stage). Pure/deterministic
-stages: **0, 3, 7, 10**. Stage **5.5** is also LLM-backed but optional and on a separate,
+stages: **0, 3, 7, 10**. Stage **0.5** is also LLM-backed but optional and on a separate,
 cheap-tier client (`model_config.resolve_stage_model("summary")`, never the strong `DISTIL_MODEL`)
-— it only runs when a caller opts in, so it's never counted against the core call budget below.
-Keep the core LLM-call count per useful transcript bounded (target ≤ 4 before graph relation
-classification: triage, extract, link, note). Low-value transcripts still stop after triage.
+— it only runs when a caller opts in, and runs concurrently with stage 1 rather than adding to
+wall-clock time, so it's never counted against the core call budget below.
+Keep the core LLM-call count per useful transcript bounded (target ≤ 3 before graph relation
+classification: one merged triage+extract call, link, note — triage and extraction used to be
+two separate calls; merged once the short-circuit that justified reading the transcript twice
+was removed, since a cheap classification pass buying nothing but a veto no longer had a reason
+to exist). There is no quality short-circuit: once a transcript clears stage 0's word-count
+floor, it always runs the full sequence and gets filed.
 
 **Timestamps are optional.** Stage 0 captures a timestamp per segment when the source has one
 (`.srt`, or inline markers like `00:12:30`), and leaves it null otherwise, always keeping a
@@ -104,13 +121,13 @@ distil/
   ingest.py          # stage 0 (PURE): parse .srt/.txt/.md/pasted text → normalized transcript (timestamps optional)
   llm.py             # LLMClient protocol + AnthropicClient + FakeClient (tests)
   prompts/           # prompt templates, one per LLM stage (versioned strings)
-  triage.py          # stage 1
-  extract.py         # stage 2 (routes by type)
-  normalize.py       # stage 3 (pure: validation, provenance check, dedup)
+  triage.py          # standalone classifier (dominant type, density, transcript-loss, verdict) — not called by the pipeline anymore; kept for the gated eval suite and its parser (parse_triage_response), reused by extract.py's merged call
+  extract.py         # stage 1 (routes by type; also houses run_triage_extract, the merged triage+extract call the pipeline actually uses — see its module docstring)
+  normalize.py       # stage 3 (pure: validation, provenance check, dedup) — no stage "2"; that was extraction's own number before the triage+extract merge
   link.py            # stage 4 (profile-aware application links)
   note.py            # stage 5 (grounded teaching-note synthesis + deterministic fallback)
   model_config.py    # per-stage model resolution: DISTIL_MODEL_<STAGE> overrides, cheap-tier default for "summary"
-  summary.py         # stage 5.5 (optional, cheap-tier): whole-transcript narrative summary — sentence-safe chunking + coverage-floor retry
+  summary.py         # stage 0.5 (optional, cheap-tier, runs CONCURRENTLY with stage 1): whole-transcript narrative summary — sentence-safe chunking + coverage-floor retry
   refresh_summary.py # per-entry narrative-summary regeneration (CLI `refresh-summary` / web route); never re-fetches or re-extracts
   graph.py           # stage 6 (candidate lookup + relation classify)
   canonicalize.py    # stage 8: concept-matching engine, per-item match/new/reject against `concepts` table; also entity-mention matching against `entities` one granularity down (Phase D); plus `run_canonicalize_stage` orchestration (see AGENTS.md)

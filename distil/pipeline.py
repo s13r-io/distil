@@ -2,32 +2,64 @@
 
 One call turns a normalized transcript + profile into a filed, schema-valid :class:`KBEntry`:
 
-    ingest (done by caller) → triage → [short-circuit] → extract → normalize → link
-    → note synthesis → narrative summary → graph → file → canonicalize → concept edges
+    ingest (done by caller) → triage+extract MERGED → normalize → link
+    → note synthesis → graph → file → canonicalize → concept edges
+                        (narrative summary starts at the front, runs concurrently, joins before filing)
 
-The ``little_to_extract`` verdict short-circuits: a minimal entry is returned but **not filed**,
-and no extract/link/graph/canonicalize/concept-edge LLM calls are made (T-PL2). The LLM-call
-budget is kept bounded (triage + extract + link, plus capped graph calls and capped
-canonicalize/synthesis/concept-edge calls — see ``canonicalize.py``'s and ``concept_graph.py``'s
-module docstrings and the OKF Phase 3 design report §6, §9 item 4).
+**There is no quality short-circuit here.** The owner chose the video (or note); that editorial
+judgment is trusted unconditionally, and a model second-guessing it can only subtract. The one
+rejection rule — a transcript below a word-count floor — is enforced earlier, at ingest
+(``ingest.py``'s ``TranscriptTooShortError``), never here: by the time a ``Transcript`` reaches
+this function, it is always worth filing, and every entry that starts this pipeline finishes it
+filed (Stage 7 always runs; T-PL2). Triage's ``verdict`` is still computed and stored (other code
+and stored data depend on its shape) but nothing here acts on it — only
+``knowledge_types_present`` (routes what ``extract.run_triage_extract`` looks for), ``density``,
+and ``transcript_loss`` (informational) matter downstream.
 
-The narrative summary stage (``distil/summary.py``) is additive and optional: it only runs when
-a caller passes ``summary_client`` (a *separate*, cheap-tier client — never ``client``, which
-stays on the strong model for triage/extract/link/note/canonicalize/concept-edges unchanged) and
-``config.enable_narrative_summary`` is true. Omitting ``summary_client`` — every caller that
-existed before this stage was added — reproduces the exact prior behavior: ``entry.
-narrative_summary`` stays ``None`` and no extra LLM call is made. A failure inside the stage
-(thin output that exhausted its retries, a dropped connection) is caught and logged rather than
-propagated, so this layer can never turn a would-have-succeeded filing into a failed one.
+**Triage and extraction are merged into one strong-tier call** (``extract.run_triage_extract``):
+the old two-call design (a cheap classification pass, then extraction) existed only so the
+classification could veto extraction before it ran — and that veto is gone (previous paragraph),
+so the split now buys nothing but a second full read of the transcript. The merged call still
+decides-then-acts within one response: it states its classification first, then extracts
+conditioned on it — see ``extract.py``'s and ``distil/prompts/triage_extract.py``'s module
+docstrings. The LLM-call budget is kept bounded (one merged triage+extract call + link + note,
+plus capped graph calls and capped canonicalize/synthesis/concept-edge calls — see
+``canonicalize.py``'s and ``concept_graph.py``'s module docstrings and the OKF Phase 3 design
+report §6, §9 item 4).
+
+**The narrative summary runs concurrently with triage+extract, not before or after it**
+(``distil/summary.py``). It is additive and optional: it only runs when a caller passes
+``summary_client`` (a *separate*, cheap-tier client — never ``client``, which stays on the
+strong model for extract/link/note/canonicalize/concept-edges unchanged) and
+``config.enable_narrative_summary`` is true. It shares no data with triage+extract (both read
+only the transcript), so there is no ordering dependency to preserve by blocking — starting it
+at the front means the owner sees a readable account sooner, and finishing early on a cheap tier
+means it survives a later extraction failure instead of dying behind it. It runs on a plain
+daemon ``threading.Thread`` (stdlib, no new dependency) started right after the merged call is
+dispatched, and is joined — bounded by ``DISTIL_SUMMARY_JOIN_TIMEOUT_SECONDS`` (default 60s) —
+only once the rest of the pipeline (triage+extract, normalize, link, note) has already produced
+``entry``, so the common case pays no extra wall-clock time at all. A summary that fails (a
+thin-output-after-retries failure, or a dropped connection) or that is still running past the
+bound both leave ``entry.narrative_summary`` ``None`` — logged either way (never silently) —
+rather than ever blocking filing or turning a would-have-succeeded run into a failed one; the
+owner's existing refresh action can always generate it later. A failure or timeout in the
+summary never masks, delays, or is masked by an extraction failure: they are independent stages
+evaluated on separate threads, and either one's outcome is reported on its own terms. The thread
+is deliberately plain and daemonic rather than a ``concurrent.futures.ThreadPoolExecutor``: that
+class registers an ``atexit`` hook that blocks interpreter shutdown until every worker thread
+finishes, even after ``shutdown(wait=False)`` — which would silently defeat the whole point of
+the bound for a one-shot CLI run (`distil run` would hang at process exit waiting for an
+abandoned, already-timed-out-and-ignored summary call). A daemon thread is simply killed when
+the process exits, with no such wait.
 
 Per-stage model selection (``distil/model_config.py``) is a general mechanism, not something
-built one-off for the narrative summary: ``triage_client``/``extract_client``/``link_client``/
-``note_client``/``graph_client``/``canonicalize_client`` let a caller inject a distinct client
-per stage, each defaulting to ``None`` — meaning "use ``client``", the exact single shared
-object every stage used before these existed. No current caller (``cli.py``, ``web/app.py``)
-passes them yet, so today's actual model selection for these six stages is unchanged; that
-wiring, and any settings UI for it, are deliberate follow-ups. What already works today is that
-setting ``DISTIL_MODEL_<STAGE>`` in the environment and passing the matching
+built one-off for the narrative summary: ``extract_client``/``link_client``/``note_client``/
+``graph_client``/``canonicalize_client`` let a caller inject a distinct client per stage, each
+defaulting to ``None`` — meaning "use ``client``", the exact single shared object every stage
+used before these existed. No current caller (``cli.py``, ``web/app.py``) passes them yet, so
+today's actual model selection for these stages is unchanged; that wiring, and any settings UI
+for it, are deliberate follow-ups. What already works today is that setting
+``DISTIL_MODEL_<STAGE>`` in the environment and passing the matching
 ``model_config.make_stage_client(stage)`` result through one of these parameters changes only
 that stage — no further ``pipeline.py`` change required.
 """
@@ -35,16 +67,18 @@ that stage — no further ``pipeline.py`` change required.
 from __future__ import annotations
 
 import logging
+import os
+import threading
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from time import perf_counter
 
 from .canonicalize import run_canonicalize_stage
 from .concept_graph import run_concept_edges_stage
 from .embed import Embedder
-from .extract import run_extraction
+from .extract import run_triage_extract
 from .graph import link_graph
 from .ingest import Transcript
 from .link import generate_links
@@ -54,9 +88,10 @@ from .normalize import normalize_items
 from .note import synthesize_note
 from .store import Store
 from .summary import NarrativeSummaryError, synthesize_narrative_summary
-from .triage import is_low_value, run_triage
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_SUMMARY_JOIN_TIMEOUT_SECONDS = 60.0
 
 
 @dataclass
@@ -69,9 +104,16 @@ class PipelineConfig:
     enable_narrative_summary: bool = True
     model_version: str = ""
     timing_callback: Callable[[str, float], None] | None = None
-    # Reports stage start/finish (and the little_to_extract short-circuit) for live progress
-    # display, independent of timing_callback's after-the-fact duration reporting. Events:
-    # ("<stage>", "start"), ("<stage>", "finish"), ("triage", "short_circuit").
+    # Reports stage start/finish for live progress display, independent of timing_callback's
+    # after-the-fact duration reporting. Events: ("<stage>", "start"), ("<stage>", "finish").
+    # narrative_summary's "start" fires when the background thread is kicked off (the front of
+    # the pipeline) and its "finish" fires only once it is joined (after note) — the two events
+    # for that one stage are the exception to "no stage overlaps another": everything else here
+    # remains strictly sequential from this callback's point of view, since it is only ever
+    # invoked from the main thread, never from the background summary thread.
+    # (Callers may also feed this same reporter a ("<stage>", "short_circuit") event of their
+    # own for a rejection that happens outside this function entirely — see web/app.py's
+    # TranscriptTooShortError handling — but run_pipeline itself never emits one.)
     phase_callback: Callable[[str, str], None] | None = None
 
 
@@ -91,7 +133,6 @@ def run_pipeline(
     config: PipelineConfig | None = None,
     embedder: Embedder | None = None,
     summary_client: LLMClient | None = None,
-    triage_client: LLMClient | None = None,
     extract_client: LLMClient | None = None,
     link_client: LLMClient | None = None,
     note_client: LLMClient | None = None,
@@ -109,28 +150,37 @@ def run_pipeline(
         thumbnail_url=source_thumbnail_url,
         metadata_provider=source_metadata_provider,
         metadata_fetched_at=source_metadata_fetched_at,
+        transcript_word_count=len(transcript.full_text().split()),
         captured_at=now,
     )
     meta = EntryMeta(created_at=now, model_version=config.model_version)
 
-    # Stage 1 — triage (always one LLM call).
-    triage_result = _timed(
-        "triage", config, lambda: run_triage(transcript, triage_client or client)
-    )
-    triage = triage_result.triage
-
-    # Honesty short-circuit: return a minimal entry, no filing or further LLM calls (T-PL2).
-    # Tell the phase reporter the run is stopping now, so a declared total sized for the full
-    # sequence never gets reported as "stuck" on a run that will never reach it.
-    if is_low_value(triage_result):
+    # Narrative summary starts at the FRONT, concurrently with the merged triage+extract call
+    # below — see module docstring. Never blocks anything here; joined only once entry exists.
+    summary_run: _SummaryRun | None = None
+    summary_thread: threading.Thread | None = None
+    summary_started_at = 0.0
+    if config.enable_narrative_summary and summary_client is not None:
         if config.phase_callback is not None:
-            config.phase_callback("triage", "short_circuit")
-        return KBEntry(entry_id=entry_id, source=source, triage=triage, meta=meta)
+            config.phase_callback("narrative_summary", "start")
+        summary_started_at = perf_counter()
+        summary_run = _SummaryRun()
+        summary_thread = threading.Thread(
+            target=summary_run.execute,
+            args=(transcript, summary_client),
+            daemon=True,
+        )
+        summary_thread.start()
 
-    # Stage 2 — extract; Stage 3 — normalize (pure faithfulness gate).
-    raw_items = _timed(
-        "extract", config, lambda: run_extraction(transcript, triage, extract_client or client)
+    # Stage 1+2 merged — triage + extraction in one full-transcript read (strong tier). See
+    # module docstring and extract.run_triage_extract's own docstring for why.
+    triage_extract_result = _timed(
+        "extract", config, lambda: run_triage_extract(transcript, extract_client or client)
     )
+    triage = triage_extract_result.triage
+    raw_items = triage_extract_result.items
+
+    # Stage 3 — normalize (pure faithfulness gate).
     items = _timed("normalize", config, lambda: normalize_items(raw_items, transcript))
 
     # Stage 4 — link to profile.
@@ -160,13 +210,15 @@ def run_pipeline(
         meta=meta,
     )
 
-    # Stage 5.5 — narrative summary: reads the transcript directly (additive, cheap-tier;
-    # see module docstring). No-op unless the caller opted in with a summary_client.
-    if config.enable_narrative_summary and summary_client is not None:
-        entry.narrative_summary = _timed(
-            "narrative_summary",
-            config,
-            lambda: _safe_narrative_summary(transcript, summary_client),
+    # Join the narrative summary now that the rest of the pipeline has already done its work —
+    # in the common case it finished long ago and this costs no extra wall-clock time. Bounded:
+    # it must never delay filing indefinitely (owner decision). Either outcome — a genuine
+    # failure inside the stage, or still running past the bound — is logged honestly and leaves
+    # narrative_summary unset; the entry always still files (see module docstring).
+    if summary_run is not None:
+        assert summary_thread is not None
+        entry.narrative_summary = _join_narrative_summary(
+            summary_thread, summary_run, summary_started_at, config
         )
 
     # Stage 6 — graph link against existing KB (capped; deterministic candidate lookup first).
@@ -201,26 +253,76 @@ def run_pipeline(
     return entry
 
 
-def _safe_narrative_summary(
-    transcript: Transcript, summary_client: LLMClient
+@dataclass
+class _SummaryRun:
+    """Holds the background narrative-summary thread's result. A plain mutable container rather
+    than a ``concurrent.futures.Future`` — see the module docstring for why a plain daemon
+    thread was chosen over ``ThreadPoolExecutor`` here."""
+
+    result: NarrativeSummary | None = field(default=None)
+
+    def execute(self, transcript: Transcript, summary_client: LLMClient) -> None:
+        """Runs on the background thread — must not touch anything besides its own arguments
+        and ``self.result``. Never raises: a thin-output-after-retries failure (or a dropped
+        connection) is logged and leaves ``result`` unset rather than propagating — this layer
+        is additive, so its own failure must never regress an otherwise-successful run."""
+        try:
+            summary = synthesize_narrative_summary(transcript.full_text(), summary_client)
+        except NarrativeSummaryError:
+            logger.warning(
+                "Narrative summary synthesis failed; filing without one.", exc_info=True
+            )
+            return
+        except Exception:
+            logger.exception(
+                "Narrative summary synthesis raised unexpectedly; filing without one."
+            )
+            return
+        self.result = NarrativeSummary(
+            text=summary.text,
+            chunk_count=summary.chunk_count,
+            model=summary.model,
+            generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+
+def _join_narrative_summary(
+    thread: threading.Thread, run: _SummaryRun, started_at: float, config: PipelineConfig
 ) -> NarrativeSummary | None:
-    """Never raises: a thin-output-after-retries failure (or a dropped connection) is logged
-    and leaves the entry without a narrative summary rather than failing the whole filing —
-    this layer is additive, so its own failure must never regress an otherwise-successful run."""
+    """Wait for the background narrative-summary thread, bounded by
+    ``DISTIL_SUMMARY_JOIN_TIMEOUT_SECONDS`` — it must never delay filing indefinitely. A timeout
+    is logged just as honestly as an in-stage failure (``_SummaryRun.execute`` already logs its
+    own); the thread is left running to completion regardless (it's a daemon — the process can
+    still exit without waiting for it), but nothing ever reads ``run.result`` again after this
+    point.
+    """
+    timeout = _summary_join_timeout_seconds()
+    thread.join(timeout)
+    if thread.is_alive():
+        logger.warning(
+            "Narrative summary still running after %.0fs (DISTIL_SUMMARY_JOIN_TIMEOUT_SECONDS); "
+            "filing without one — it can be generated later via the refresh action.",
+            timeout,
+        )
+        result = None
+    else:
+        result = run.result
+    if config.timing_callback is not None:
+        config.timing_callback("narrative_summary", perf_counter() - started_at)
+    if config.phase_callback is not None:
+        config.phase_callback("narrative_summary", "finish")
+    return result
+
+
+def _summary_join_timeout_seconds() -> float:
     try:
-        result = synthesize_narrative_summary(transcript.full_text(), summary_client)
-    except NarrativeSummaryError:
-        logger.warning("Narrative summary synthesis failed; filing without one.", exc_info=True)
-        return None
-    except Exception:
-        logger.exception("Narrative summary synthesis raised unexpectedly; filing without one.")
-        return None
-    return NarrativeSummary(
-        text=result.text,
-        chunk_count=result.chunk_count,
-        model=result.model,
-        generated_at=datetime.now(timezone.utc).isoformat(),
-    )
+        return float(
+            os.environ.get(
+                "DISTIL_SUMMARY_JOIN_TIMEOUT_SECONDS", _DEFAULT_SUMMARY_JOIN_TIMEOUT_SECONDS
+            )
+        )
+    except ValueError:
+        return _DEFAULT_SUMMARY_JOIN_TIMEOUT_SECONDS
 
 
 def _derive_tags(items, links, note) -> Tags:

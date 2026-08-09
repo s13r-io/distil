@@ -36,8 +36,10 @@ DEFAULT_SUMMARY_MODEL = "claude-haiku-4-5"
 
 # Stages that share today's single strong-tier default (DISTIL_MODEL) unless individually
 # overridden via DISTIL_MODEL_<STAGE>. Kept as an explicit tuple — not "anything not cheap" —
-# so adding a stage here is a deliberate decision, not an accident of exclusion.
-STRONG_TIER_STAGES = ("triage", "extract", "link", "note", "graph", "canonicalize")
+# so adding a stage here is a deliberate decision, not an accident of exclusion. "triage" is not
+# a stage of its own anymore: triage and extraction are merged into one call, resolved as
+# "extract" (see pipeline.py's and extract.py's module docstrings).
+STRONG_TIER_STAGES = ("extract", "link", "note", "graph", "canonicalize")
 
 # Stages that default to a cheaper tier unless individually overridden.
 CHEAP_TIER_STAGES = ("summary",)

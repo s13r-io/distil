@@ -34,6 +34,22 @@ but per-mention rather than per-field): an unparseable ``kind``, a missing ``nam
 empty ``quote`` drops just that one mention. This makes it structurally impossible for a
 malformed entity to fail (and thereby drop) the knowledge item it rode in on — entity cleaning
 never raises and never participates in the item-level salvage floor.
+
+**Triage+extraction merged into one call (`run_triage_extract`, owner decision).** Triage's
+short-circuit is gone (``pipeline.py``'s module docstring) — the only reason for a separate,
+cheap classification pass *before* extraction was to buy a veto over whether extraction ran at
+all, and that veto no longer exists. So the strong model now reads the full transcript exactly
+once: :func:`run_triage_extract` sends ``prompts/triage_extract.py``'s two-section prompt, which
+asks the model to state its classification (``<TRIAGE>``) FIRST, then extract items
+(``<ITEMS>``) SECOND, conditioned on what it just classified — preserving the decide-then-act
+sequencing the old two-call design bought via call ordering, within one response instead of
+two. Parsing deliberately keeps the two existing, separately-tested parsers intact rather than
+inventing one for a merged JSON object: ``triage.parse_triage_response`` for ``<TRIAGE>`` (small,
+never expected to truncate) and this module's own ``_parse_items_json`` for ``<ITEMS>``
+(reuses the existing truncated-array recovery for a long items array cut off by the output-token
+cap). ``run_triage``/``run_extraction`` (the split calls) are unchanged and still used by the
+gated eval suite for isolated regression testing — this is an additional entry point, not a
+replacement of either.
 """
 
 from __future__ import annotations
@@ -42,6 +58,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 from typing import get_args
 
 from pydantic import ValidationError
@@ -50,7 +67,9 @@ from .ingest import Transcript
 from .llm import LLMClient
 from .models import EntityKind, EntityMention, KnowledgeItem, KnowledgeType, Triage
 from .prompts.extract import SYSTEM, build_extract_prompt
-from .triage import ParseError
+from .prompts.triage_extract import SYSTEM as TRIAGE_EXTRACT_SYSTEM
+from .prompts.triage_extract import build_triage_extract_prompt
+from .triage import ParseError, parse_triage_response
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +78,10 @@ _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 
 _MAX_RETRIES = 2
 _RETRY_SLEEP_SECONDS = 0.5
+
+_TRIAGE_SECTION = re.compile(r"<TRIAGE>(.*?)</TRIAGE>", re.DOTALL | re.IGNORECASE)
+_ITEMS_OPEN = re.compile(r"<ITEMS>", re.IGNORECASE)
+_ITEMS_CLOSE = re.compile(r"</ITEMS>", re.IGNORECASE)
 
 _VALID_KNOWLEDGE_TYPES = frozenset(get_args(KnowledgeType))
 _VALID_ENTITY_KINDS = frozenset(get_args(EntityKind))
@@ -90,6 +113,72 @@ def run_extraction(
     _truncate_overlong_quotes(items)
     _enforce_quote_discipline(items)
     return items
+
+
+@dataclass
+class TriageExtractResult:
+    triage: Triage
+    items: list[KnowledgeItem]
+    raw: str
+
+
+def run_triage_extract(transcript: Transcript, client: LLMClient) -> TriageExtractResult:
+    """One strong-tier call that classifies AND extracts — see the module docstring's
+    "Triage+extraction merged into one call" section for why and how."""
+    prompt = build_triage_extract_prompt(transcript.full_text())
+    triage, items_data, raw = _complete_triage_extract_with_retry(client, prompt)
+    ktype = dominant_type(triage)
+    items = _items_from_json(items_data, ktype)
+    _truncate_overlong_quotes(items)
+    _enforce_quote_discipline(items)
+    return TriageExtractResult(triage=triage, items=items, raw=raw)
+
+
+def _complete_triage_extract_with_retry(
+    client: LLMClient, prompt: str
+) -> tuple[Triage, list, str]:
+    """Same retry contract as ``_complete_with_retry``: a dropped connection or an unparseable
+    response (missing/malformed ``<TRIAGE>``, or an ``<ITEMS>`` array that can't be recovered at
+    all) is retried a bounded number of times; a schema-level failure in items that did parse
+    happens later, in ``_items_from_json``, and is never retried here."""
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            raw = client.complete(prompt, system=TRIAGE_EXTRACT_SYSTEM)
+            triage_text, items_text = _split_triage_extract_response(raw)
+            triage = parse_triage_response(triage_text)
+            items_data = _parse_items_json(items_text, kind="Extraction")
+            return triage, items_data, raw
+        except ParseError as exc:
+            last_exc = exc
+        except Exception as exc:  # network/connection failure — retry
+            last_exc = exc
+        if attempt < _MAX_RETRIES:
+            time.sleep(_RETRY_SLEEP_SECONDS)
+    assert last_exc is not None
+    raise last_exc
+
+
+def _split_triage_extract_response(raw: str) -> tuple[str, str]:
+    """Split a merged response into its ``<TRIAGE>`` and ``<ITEMS>`` sections.
+
+    Tolerant of truncation only in the (potentially large) items section: if the closing
+    ``</ITEMS>`` tag never arrived, everything after ``<ITEMS>`` is handed to
+    ``_parse_items_json``, which already recovers whatever complete leading items it can from a
+    cut-off array. The triage section is small and expected to always be complete — a missing
+    ``<TRIAGE>``/``<ITEMS>`` tag is treated as a genuine parse failure (retried by the caller).
+    """
+    triage_match = _TRIAGE_SECTION.search(raw)
+    if not triage_match:
+        raise ParseError(f"Response is missing a complete <TRIAGE> section: {raw[:120]!r}")
+
+    items_open = _ITEMS_OPEN.search(raw)
+    if not items_open:
+        raise ParseError(f"Response is missing an <ITEMS> section: {raw[:120]!r}")
+    items_start = items_open.end()
+    items_close = _ITEMS_CLOSE.search(raw, items_start)
+    items_text = raw[items_start : items_close.start()] if items_close else raw[items_start:]
+    return triage_match.group(1), items_text
 
 
 def _complete_with_retry(client: LLMClient, prompt: str, system: str) -> list:

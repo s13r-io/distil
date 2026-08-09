@@ -28,6 +28,9 @@ from pathlib import Path
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
+# A transcript that never cleared the owner's word-count floor (distil.ingest.
+# TranscriptTooShortError). Not a quality judgment and not a failure — a plain, clean rejection,
+# kept distinct from STATUS_FAILED so the Activity view never offers a pointless Retry.
 STATUS_LOW_VALUE = "low_value"
 STATUS_FAILED = "failed"
 STATUS_REMOVED = "removed"
@@ -757,7 +760,7 @@ _STATUS_PRESENTATION: dict[str, tuple[str, str, bool, bool]] = {
     STATUS_AWAITING_COLLECTION: ("warn", "Waiting for collector", False, True),
     STATUS_COLLECTING: ("warn", "Being collected", True, True),
     STATUS_DONE: ("ok", "Done", False, False),
-    STATUS_LOW_VALUE: ("warn", "Low-value", False, False),
+    STATUS_LOW_VALUE: ("warn", "Too short", False, False),
     STATUS_FAILED: ("danger", "Failed", False, False),
 }
 
@@ -874,8 +877,11 @@ class Fetcher:
     contend for the same jobs, since they claim disjoint statuses.
 
     ``fetch_fn(job)`` does the real yt-dlp fetch + stage-to-disk work and returns
-    ``{"status": "fetched", "kind": ..., "payload": ...}`` or ``{"status": "failed", "error":
-    ...}``; injected so tests can drive the fetcher with a fake that makes no network calls.
+    ``{"status": "fetched", "kind": ..., "payload": ...}``, ``{"status": "failed", "error":
+    ...}``, ``{"status": "awaiting_collection", "error": ...}``, or ``{"status":
+    STATUS_LOW_VALUE, "summary": ...}`` (a transcript below the owner's word-count floor — a
+    clean rejection, not a failure); injected so tests can drive the fetcher with a fake that
+    makes no network calls.
 
     ``delay_seconds`` is the configurable pause applied *before* every fetch after the first —
     never before the first, since there's nothing yet to look robotic relative to.
@@ -950,5 +956,9 @@ class Fetcher:
                 job.job_id, error=result.get("error", ""),
                 expiry_seconds=self._collector_expiry_seconds,
             )
+        elif result.get("status") == STATUS_LOW_VALUE:
+            # A transcript below the owner's word-count floor — a clean rejection, not a fetch
+            # failure, so it's never mark_failed.
+            store.mark_low_value(job.job_id, entry_id=None, summary=result.get("summary", ""))
         else:
             store.mark_failed(job.job_id, error=result.get("error", "unknown fetch result"))

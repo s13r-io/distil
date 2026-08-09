@@ -40,9 +40,11 @@ from distil.ingest import (
     IngestError,
     Segment,
     Transcript,
+    TranscriptTooShortError,
     ingest_file,
     ingest_srt_text,
     ingest_text,
+    is_thin_source,
 )
 from distil.pipeline import PipelineConfig, run_pipeline
 from distil.profile_update import apply_feedback
@@ -164,8 +166,7 @@ PHASE_LABELS: dict[str, str] = {
     "caption_parse": "Parsing captions",
     "ingest": "Reading transcript",
     "metadata": "Fetching video info",
-    "triage": "Checking value",
-    "extract": "Extracting knowledge",
+    "extract": "Classifying & extracting knowledge",
     "normalize": "Normalizing items",
     "link": "Linking to profile",
     "note": "Writing teaching note",
@@ -184,12 +185,18 @@ def _build_phase_plan(
     """The ordered phases *this* job will actually run, given its kind and the pipeline flags.
 
     Declaring the total from these flags up front (rather than a fixed 9) is what keeps the
-    step count honest for jobs where graph/canonicalize/concept_edges are disabled.
+    step count honest for jobs where graph/canonicalize/concept_edges are disabled. Triage is no
+    longer its own phase — it's merged into "extract" (one strong-tier call; see pipeline.py's
+    module docstring). "narrative_summary" is listed right after "metadata", before "extract",
+    reflecting when it actually starts (the cheap-tier summary runs concurrently with "extract",
+    not after "note" — its belated "finish" event doesn't disturb this ordering, since
+    current_phase only ever advances on a "start" event; see _PhaseReporter.on_phase).
     """
     pre = ["transcript_fetch", "caption_parse"] if job.kind == "youtube" else ["ingest"]
-    plan = [*pre, "metadata", "triage", "extract", "normalize", "link", "note"]
+    plan = [*pre, "metadata"]
     if enable_narrative_summary:
         plan.append("narrative_summary")
+    plan += ["extract", "normalize", "link", "note"]
     if enable_graph:
         plan.append("graph")
     plan.append("file")
@@ -254,6 +261,16 @@ def _distill_job(job: jobsmod.Job) -> dict:
         transcript = _time_block(
             timings, "ingest", lambda: _load_job_transcript(job, on_phase=reporter.on_phase)
         )
+    except TranscriptTooShortError as exc:
+        # Not a fetch failure and not a quality judgment call — a plain word-count floor the
+        # owner set. Distinguished from a real failure via its own status (STATUS_LOW_VALUE),
+        # never STATUS_FAILED. Collapse the declared phase total honestly: nothing past the
+        # ingest/fetch step will run. The phase name passed here is never read by
+        # collapse_total (it only reads the job's already-persisted phase_index) — it fires
+        # equally whether the exception came from local ingest or a YouTube fetch's caption
+        # parse.
+        reporter.on_phase("ingest", "short_circuit")
+        return {"status": jobsmod.STATUS_LOW_VALUE, "entry_id": None, "summary": str(exc)}
     except YoutubeFetchError as exc:
         # Only a bot-check refusal is worth waiting on — a genuinely uncaptioned/private/missing
         # video must still fail immediately, exactly as it does today (see
@@ -289,12 +306,8 @@ def _distill_job(job: jobsmod.Job) -> dict:
     )
     total = perf_counter() - total_start
     n = len(entry.knowledge_items)
-    if n == 0 and entry.triage.verdict == "little_to_extract":
-        _emit_timing_log(job, entry.entry_id, jobsmod.STATUS_LOW_VALUE, entry.triage.verdict, n,
-                         timings, total)
-        return {"status": jobsmod.STATUS_LOW_VALUE, "entry_id": None,
-                "summary": "Not much to extract — verdict little_to_extract. Nothing filed. "
-                           f"{_format_timings(timings, total)}"}
+    # No quality short-circuit: run_pipeline always files an entry once it starts (Stage 7 runs
+    # unconditionally) — this is always STATUS_DONE, even when extraction genuinely found nothing.
     graph_scheduled = _schedule_graph_link(entry.entry_id) if entry.tags.topics else False
     graph_note = " · graph updating" if graph_scheduled else ""
     _emit_timing_log(job, entry.entry_id, jobsmod.STATUS_DONE, entry.triage.verdict, n,
@@ -337,11 +350,15 @@ def _fetch_playlist_video(job: jobsmod.Job) -> dict:
     only this job, exactly like the old inline-fetch-at-distill-time path did (WEB_UI_SPEC §8 /
     _enqueue_youtube_source docstring) — except specifically a YouTube bot-check refusal, which
     becomes ``awaiting_collection`` instead: parked for an external collector rather than failed,
-    since that failure is about this server's address, not this video."""
+    since that failure is about this server's address, not this video; and a transcript below the
+    owner's word-count floor, which becomes ``low_value`` — a clean rejection, not a failure."""
     jobs_store = jobsmod.JobStore(_db_path())
     reporter = _PhaseReporter(jobs_store, job.job_id, ["transcript_fetch", "caption_parse"])
     try:
         transcript = youtube.fetch_video_transcript(job.payload, on_phase=reporter.on_phase)
+    except TranscriptTooShortError as exc:
+        reporter.on_phase("caption_parse", "short_circuit")
+        return {"status": jobsmod.STATUS_LOW_VALUE, "summary": str(exc)}
     except YoutubeFetchError as exc:
         if youtube.is_bot_check_refusal(exc):
             return {"status": "awaiting_collection", "error": str(exc)}
@@ -410,7 +427,7 @@ def _time_block(timings: dict[str, float], stage: str, fn):
 
 def _format_timings(timings: dict[str, float], total: float) -> str:
     ordered = [
-        "ingest", "metadata", "triage", "extract", "normalize", "link", "note",
+        "ingest", "metadata", "narrative_summary", "extract", "normalize", "link", "note",
         "embedder", "file",
     ]
     parts = [
@@ -994,15 +1011,24 @@ def create_app() -> FastAPI:
         unauthorized = _require_collector_auth(request)
         if unauthorized is not None:
             return unauthorized
+        store_jobs = jobsmod.JobStore(_db_path())
         # Validated as parseable captions before anything is accepted into the pipeline — the
         # same parser a real yt-dlp fetch's captions already go through (distil.youtube._fetch_into).
         try:
             transcript = ingest_srt_text(srt)
+        except TranscriptTooShortError as exc:
+            # A clean rejection, not a parse failure — resolve the job now (STATUS_LOW_VALUE)
+            # instead of just 400ing and leaving it to be re-claimed and re-submitted in a loop
+            # until its 7-day collection_deadline gives up. Idempotent: a retried submit of the
+            # same too-short transcript finds the job already resolved and skips the update.
+            job = store_jobs.get(job_id)
+            if job is not None and job.status == jobsmod.STATUS_COLLECTING:
+                store_jobs.mark_low_value(job_id, entry_id=None, summary=str(exc))
+            return {"job_id": job_id, "status": jobsmod.STATUS_LOW_VALUE, "detail": str(exc)}
         except IngestError as exc:
             return JSONResponse(
                 {"detail": f"Not parseable as captions: {exc}"}, status_code=400
             )
-        store_jobs = jobsmod.JobStore(_db_path())
         # Validate the job against the DB before ever writing to a path built from the raw,
         # collector-controlled job_id — mirrors jobs_remove's get-then-touch-file ordering rather
         # than staging first and cleaning up after the fact.
@@ -1059,6 +1085,7 @@ def create_app() -> FastAPI:
             return HTMLResponse("<p>Entry not found.</p>", status_code=404)
         e = store.load_entry(entry_id)
         mix = [(s.type, round(s.share * 100)) for s in e.triage.knowledge_types_present]
+        thin_source = is_thin_source(e.source.transcript_word_count)
         slug = okf.slug_for_entry(e, store.okf_root)
         has_transcript = (store.okf_root / "raw" / f"{slug}.md").exists()
         job = jobsmod.JobStore(_db_path()).find_by_entry_id(entry_id)
@@ -1070,6 +1097,7 @@ def create_app() -> FastAPI:
         return _TEMPLATES.TemplateResponse(
             request, "entry.html",
             {"e": e, "mix": mix,
+             "thin_source": thin_source,
              "has_transcript": has_transcript,
              "concepts_for_entry": _concepts_for_entry(store, entry_id),
              "entities_for_entry": _entities_for_entry(store, entry_id),

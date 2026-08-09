@@ -28,7 +28,7 @@ from pathlib import Path
 
 from . import okf
 from .embed import Embedder
-from .ingest import Transcript
+from .ingest import Transcript, is_thin_source
 from .models import Concept, Entity, KBEntry, Profile
 from .source import display_title
 
@@ -256,28 +256,26 @@ class Store:
         return {r["entry_id"] for r in self._conn.execute("SELECT entry_id FROM entries")}
 
     def list_entries(self) -> list[EntryIndexRow]:
+        """Every indexed entry, newest first.
+
+        Never prunes on triage verdict / knowledge-item count: a filed entry might legitimately
+        have zero knowledge items (extraction found nothing, but the owner's decision to keep the
+        source stands — pipeline.py's module docstring), and this must not become a second,
+        listing-time discard of exactly what the pipeline itself no longer discards. Only a row
+        whose backing ``kb/`` file is missing (genuinely stale index data) is pruned.
+        """
         cur = self._conn.execute("SELECT * FROM entries ORDER BY created_at DESC, entry_id")
         rows: list[EntryIndexRow] = []
-        stale: list[tuple[str, bool]] = []
+        stale: list[str] = []
         for r in cur.fetchall():
             row = self._row_to_index(r)
             if Path(row.file_path).exists():
-                try:
-                    entry = self.load_entry(row.entry_id)
-                except Exception:
-                    rows.append(row)
-                    continue
-                if entry.triage.verdict == "little_to_extract" and not entry.knowledge_items:
-                    stale.append((row.entry_id, True))
-                else:
-                    rows.append(row)
+                rows.append(row)
             else:
-                stale.append((row.entry_id, False))
+                stale.append(row.entry_id)
         if stale:
             with self._conn:
-                for entry_id, remove_file in stale:
-                    if remove_file:
-                        self.entry_path(entry_id).unlink(missing_ok=True)
+                for entry_id in stale:
                     self._conn.execute("DELETE FROM item_vectors_meta WHERE entry_id = ?", (entry_id,))
                     self._conn.execute("DELETE FROM entries WHERE entry_id = ?", (entry_id,))
         return rows
@@ -775,6 +773,7 @@ class Store:
             f"*Verdict:* {entry.triage.verdict} · *Density:* {entry.triage.density} · "
             f"*Captured:* {entry.source.captured_at}"
         )
+        Store._append_thin_material_note(lines, entry)
         if entry.source.url:
             lines.append("")
             lines.append(f"*Source:* [Watch on YouTube]({entry.source.url})")
@@ -829,6 +828,10 @@ class Store:
         lines.append(f"- Captured: {entry.source.captured_at}")
         lines.append(f"- Verdict: {entry.triage.verdict}")
         lines.append(f"- Density: {entry.triage.density}")
+        if is_thin_source(entry.source.transcript_word_count):
+            lines.append(
+                f"- Thin material: only {entry.source.transcript_word_count} transcript words"
+            )
         if note.topics:
             lines.append("- Tags: " + ", ".join(Store._display_tag(topic) for topic in note.topics))
         lines.append("")
@@ -868,6 +871,7 @@ class Store:
             f"*Verdict:* {entry.triage.verdict} · *Density:* {entry.triage.density} · "
             f"*Captured:* {entry.source.captured_at}"
         )
+        Store._append_thin_material_note(lines, entry)
         if entry.source.url:
             lines.append("")
             lines.append(f"*Source:* [Watch on YouTube]({entry.source.url})")
@@ -956,6 +960,20 @@ class Store:
             prefix = f"{idx}." if ordered else "-"
             lines.append(f"{prefix} {value}")
         lines.append("")
+
+    @staticmethod
+    def _append_thin_material_note(lines: list[str], entry: KBEntry) -> None:
+        """Visible advisory (never a rejection) when the entry was built from unusually little
+        transcript material for its source — see ``ingest.is_thin_source``'s docstring for why
+        this is transcript-only and can't tell a genuinely short source apart from a fetch that
+        died early. Silent when not thin."""
+        if not is_thin_source(entry.source.transcript_word_count):
+            return
+        lines.append(
+            f"*Thin material:* only {entry.source.transcript_word_count} transcript words to "
+            "work from — unusually little for a source. If the fetch may have been cut short, "
+            "consider re-adding it."
+        )
 
     @staticmethod
     def _append_source_metadata(lines: list[str], entry: KBEntry) -> None:

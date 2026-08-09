@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from distil.ingest import Transcript
+from distil.ingest import Transcript, TranscriptTooShortError
 from distil.youtube import (
     PotDiagnostic,
     YoutubeFetchError,
@@ -31,6 +31,17 @@ from distil.youtube import (
 
 def _proc(returncode=0, stdout="", stderr=""):
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+# A single-cue caption body long enough to clear ingest.py's 50-word floor (fetch_video_transcript
+# parses via ingest_srt_text) — used by tests that don't care about the caption text itself.
+_LONG_CAPTION_TEXT = (
+    "Hello and welcome to this talk about writing code that your whole team can "
+    "actually read, understand, and safely change without breaking something else. "
+    "We will cover naming, function size, and how to structure a codebase so that "
+    "new contributors can find their way around it without needing a long guided tour."
+)
+_LONG_SRT_BODY = f"1\n00:00:01,000 --> 00:00:03,000\n{_LONG_CAPTION_TEXT}\n"
 
 
 # ---- T-Y1: playlist URL detection ----
@@ -110,7 +121,9 @@ def test_list_playlist_video_urls_raises_when_empty():
 def test_fetch_video_transcript_parses_downloaded_srt(tmp_path):
     srt_body = (
         "1\n00:00:01,000 --> 00:00:03,000\nWelcome to the talk.\n\n"
-        "2\n00:00:04,000 --> 00:00:06,000\nLet's get started.\n"
+        "2\n00:00:04,000 --> 00:00:06,000\n"
+        + " ".join(["Let's get started with the rest of it."] * 8)
+        + "\n"
     )
 
     def fake_run(cmd, **kwargs):
@@ -131,7 +144,7 @@ def test_fetch_video_transcript_parses_downloaded_srt(tmp_path):
 
 @pytest.mark.unit
 def test_fetch_video_transcript_reports_transcript_fetch_and_caption_parse_phases(tmp_path):
-    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+    srt_body = _LONG_SRT_BODY
 
     def fake_run(cmd, **kwargs):
         out_index = cmd.index("-o") + 1
@@ -168,7 +181,7 @@ def test_fetch_video_transcript_reports_only_fetch_start_on_yt_dlp_failure(tmp_p
 @pytest.mark.unit
 def test_fetch_video_transcript_passes_player_client_fallback_chain(monkeypatch, tmp_path):
     monkeypatch.delenv("DISTIL_POT_PROVIDER_URL", raising=False)
-    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+    srt_body = _LONG_SRT_BODY
 
     def fake_run(cmd, **kwargs):
         idx = cmd.index("--extractor-args")
@@ -190,7 +203,8 @@ def test_fetch_video_transcript_ignores_stale_srt_in_reused_workdir(tmp_path):
     stale = tmp_path / "captions.en.srt"
     stale.write_text("1\n00:00:01,000 --> 00:00:02,000\nSTALE OLD CAPTION\n", encoding="utf-8")
 
-    fresh_srt = "1\n00:00:01,000 --> 00:00:03,000\nFresh caption for this fetch.\n"
+    fresh_text = "Fresh caption for this fetch, " + "long enough to clear the word floor. " * 8
+    fresh_srt = f"1\n00:00:01,000 --> 00:00:03,000\n{fresh_text.strip()}\n"
 
     def fake_run(cmd, **kwargs):
         out_index = cmd.index("-o") + 1
@@ -202,7 +216,7 @@ def test_fetch_video_transcript_ignores_stale_srt_in_reused_workdir(tmp_path):
         "https://www.youtube.com/watch?v=abc", run=fake_run, workdir=tmp_path
     )
     assert len(transcript.segments) == 1
-    assert transcript.segments[0].text == "Fresh caption for this fetch."
+    assert transcript.segments[0].text.startswith("Fresh caption for this fetch")
     assert "STALE" not in transcript.full_text()
     # The stale file at the workdir root is untouched — the fetch was scoped to a subdirectory.
     assert stale.read_text(encoding="utf-8").count("STALE") == 1
@@ -219,6 +233,27 @@ def test_fetch_video_transcript_raises_when_no_captions_written(tmp_path):
     with pytest.raises(YoutubeFetchError, match="[Cc]aptions"):
         fetch_video_transcript(
             "https://www.youtube.com/watch?v=nocaps", run=fake_run, workdir=tmp_path
+        )
+
+
+# ---- Owner-trust: a too-short fetched transcript is rejected, distinctly from a fetch failure --
+
+
+@pytest.mark.unit
+def test_fetch_video_transcript_raises_transcript_too_short_not_wrapped_as_fetch_error(tmp_path):
+    """The fetch itself succeeded and the captions parsed fine — there just isn't enough of
+    them. This must surface as TranscriptTooShortError, never folded into YoutubeFetchError,
+    so callers can tell "too short" apart from a genuine fetch/parse failure."""
+    srt_body = "1\n00:00:01,000 --> 00:00:02,000\nToo short.\n"
+
+    def fake_run(cmd, **kwargs):
+        out_index = cmd.index("-o") + 1
+        Path(f"{cmd[out_index]}.en.srt").write_text(srt_body, encoding="utf-8")
+        return _proc(returncode=0)
+
+    with pytest.raises(TranscriptTooShortError):
+        fetch_video_transcript(
+            "https://www.youtube.com/watch?v=short", run=fake_run, workdir=tmp_path
         )
 
 
@@ -241,7 +276,7 @@ def test_fetch_video_transcript_raises_on_yt_dlp_failure(tmp_path):
 
 @pytest.mark.unit
 def test_fetch_video_transcript_retries_transient_429_then_succeeds(tmp_path):
-    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+    srt_body = _LONG_SRT_BODY
     calls = []
 
     def fake_run(cmd, **kwargs):
@@ -261,7 +296,7 @@ def test_fetch_video_transcript_retries_transient_429_then_succeeds(tmp_path):
         sleep=sleeps.append,
     )
     assert len(calls) == 3
-    assert transcript.full_text() == "Hello."
+    assert transcript.full_text() == _LONG_CAPTION_TEXT
     # Exponential backoff: 2s, then 4s — no real waiting since sleep is faked.
     assert sleeps == [2.0, 4.0]
 
@@ -363,7 +398,7 @@ def test_list_playlist_video_urls_passes_pot_provider_url_when_env_set(monkeypat
 @pytest.mark.unit
 def test_fetch_video_transcript_omits_pot_provider_args_when_env_unset(monkeypatch, tmp_path):
     monkeypatch.delenv("DISTIL_POT_PROVIDER_URL", raising=False)
-    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+    srt_body = _LONG_SRT_BODY
 
     def fake_run(cmd, **kwargs):
         assert cmd.count("--extractor-args") == 1
@@ -382,7 +417,7 @@ def test_fetch_video_transcript_passes_pot_provider_url_when_env_set(monkeypatch
     monkeypatch.setenv(
         "DISTIL_POT_PROVIDER_URL", "http://bgutil-pot-provider.railway.internal:4416"
     )
-    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+    srt_body = _LONG_SRT_BODY
 
     def fake_run(cmd, **kwargs):
         assert cmd.count("--extractor-args") == 2
@@ -427,7 +462,7 @@ def test_fetch_video_transcript_folds_fetch_pot_always_into_youtube_namespace(mo
     monkeypatch.setenv(
         "DISTIL_POT_PROVIDER_URL", "http://bgutil-pot-provider.railway.internal:4416"
     )
-    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+    srt_body = _LONG_SRT_BODY
 
     def fake_run(cmd, **kwargs):
         # Exactly one youtube: pair (never two — the second would silently discard the first,
@@ -708,7 +743,7 @@ def test_list_playlist_video_urls_logs_complete_untruncated_stderr(caplog):
 
 @pytest.mark.unit
 def test_fetch_video_transcript_passes_no_update_flag(tmp_path):
-    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+    srt_body = _LONG_SRT_BODY
 
     def fake_run(cmd, **kwargs):
         assert "--no-update" in cmd
@@ -733,7 +768,7 @@ def test_list_playlist_video_urls_passes_no_update_flag():
 
 @pytest.mark.unit
 def test_fetch_video_transcript_requests_srt_natively_without_convert_subs(tmp_path):
-    srt_body = "1\n00:00:01,000 --> 00:00:03,000\nHello.\n"
+    srt_body = _LONG_SRT_BODY
 
     def fake_run(cmd, **kwargs):
         idx = cmd.index("--sub-format")

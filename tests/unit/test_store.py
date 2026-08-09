@@ -127,6 +127,54 @@ def test_teaching_note_markdown_export_is_reader_facing(store):
     assert "## Tags" in text
     assert "AI Agent Memory" in text
     assert "k_01" not in text
+
+
+# ---- Thin-material advisory (visible, never a rejection) --------------------------------
+
+
+@pytest.mark.unit
+def test_thin_material_note_shown_when_word_count_is_low(store):
+    entry = _entry(with_note=True)
+    entry.source.transcript_word_count = 120
+    path = store.file_entry(entry)
+    text = path.read_text()
+    assert "Thin material" in text
+    assert "120" in text
+
+
+@pytest.mark.unit
+def test_thin_material_note_absent_when_word_count_is_healthy(store):
+    entry = _entry(with_note=True)
+    entry.source.transcript_word_count = 2000
+    path = store.file_entry(entry)
+    assert "Thin material" not in path.read_text()
+
+
+@pytest.mark.unit
+def test_thin_material_note_absent_for_unknown_zero_word_count(store):
+    """word_count == 0 (entries filed before this field existed) is unknown, not thin."""
+    entry = _entry(with_note=True)
+    entry.source.transcript_word_count = 0
+    path = store.file_entry(entry)
+    assert "Thin material" not in path.read_text()
+
+
+@pytest.mark.unit
+def test_thin_material_note_shown_without_a_distilled_note_too(store):
+    """The no-note fallback rendering path also carries the advisory."""
+    entry = _entry(with_note=False)
+    entry.source.transcript_word_count = 50
+    path = store.file_entry(entry)
+    assert "Thin material" in path.read_text()
+
+
+@pytest.mark.unit
+def test_thin_material_note_shown_in_teaching_note_export(store):
+    entry = _entry(with_note=True)
+    entry.source.transcript_word_count = 100
+    text = Store.teaching_note_markdown(entry)
+    assert "Thin material" in text
+    assert "100" in text
     assert "---" not in text
 
 
@@ -173,16 +221,31 @@ def test_list_entries_prunes_rows_whose_files_are_missing(store):
 
 
 @pytest.mark.unit
-def test_list_entries_prunes_legacy_low_value_empty_entries(store):
+def test_list_entries_never_prunes_on_verdict_or_empty_items(store):
+    """A filed entry with a little_to_extract verdict and zero knowledge items is a normal,
+    expected outcome now (owner decision — pipeline.py's module docstring) — list_entries must
+    never silently discard it. That would reintroduce, at listing time, exactly the silent
+    quality-based discard the pipeline itself no longer does."""
     entry = _entry(entry_id="e_low", title="Low value upload")
     entry.triage.verdict = "little_to_extract"
     entry.knowledge_items = []
     store.file_entry(entry, embedder=FakeEmbedder(dim=8))
 
     assert store.entry_path("e_low").exists()
+    assert [r.entry_id for r in store.list_entries()] == ["e_low"]
+    assert store.entry_path("e_low").exists()
+
+
+@pytest.mark.unit
+def test_list_entries_prunes_rows_whose_file_is_missing(store):
+    """Only genuinely stale index data (the kb/ file itself is gone) is pruned — a real
+    filesystem/index mismatch, unrelated to triage verdict or item count."""
+    entry = _entry(entry_id="e_gone", title="Will lose its file")
+    store.file_entry(entry, embedder=FakeEmbedder(dim=8))
+    store.entry_path("e_gone").unlink()
+
     assert store.list_entries() == []
-    assert not store.entry_path("e_low").exists()
-    assert store.vector_count() == 0
+    assert all(row.entry_id != "e_gone" for row in store.list_entries())
 
 
 # ---- T-S3: KB and DB survive process restart (persistence) ----

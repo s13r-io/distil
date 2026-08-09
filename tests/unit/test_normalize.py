@@ -7,9 +7,13 @@ untimestamped sources.
 
 import pytest
 
-from distil.ingest import ingest_text
+from distil.ingest import Segment, Transcript
 from distil.models import KnowledgeItem
 from distil.normalize import normalize_items
+
+
+def _t(text: str, *, timestamp: str | None = None) -> Transcript:
+    return Transcript(segments=[Segment(text=text, locator="seg:0", timestamp=timestamp)])
 
 
 def _item(item_id, statement, quote, *, stance="fact", ktype="declarative",
@@ -28,7 +32,7 @@ def _item(item_id, statement, quote, *, stance="fact", ktype="declarative",
 
 @pytest.mark.unit
 def test_near_duplicates_merged():
-    t = ingest_text("Keep functions small. Name things clearly.")
+    t = _t("Keep functions small. Name things clearly.")
     items = [
         _item("k_01", "Keep functions small.", "keep functions small"),
         _item("k_02", "Keep functions  small!", "keep functions small"),  # near-dup
@@ -46,7 +50,7 @@ def test_near_duplicates_merged():
 
 @pytest.mark.unit
 def test_unverifiable_provenance_dropped():
-    t = ingest_text("Keep functions small.")
+    t = _t("Keep functions small.")
     items = [
         _item("k_01", "Keep functions small.", "keep functions small"),
         _item("k_02", "Always use microservices.", "always use microservices"),  # fabricated
@@ -58,7 +62,7 @@ def test_unverifiable_provenance_dropped():
 
 @pytest.mark.unit
 def test_all_unverifiable_yields_empty():
-    t = ingest_text("Keep functions small.")
+    t = _t("Keep functions small.")
     items = [_item("k_01", "Invented.", "this was never said")]
     assert normalize_items(items, t) == []
 
@@ -68,7 +72,7 @@ def test_all_unverifiable_yields_empty():
 
 @pytest.mark.unit
 def test_stance_preserved():
-    t = ingest_text("I think microservices are usually overkill for small teams.")
+    t = _t("I think microservices are usually overkill for small teams.")
     items = [
         _item("k_01", "Microservices are usually overkill for small teams.",
               "microservices are usually overkill", stance="opinion", ktype="opinion"),
@@ -82,7 +86,7 @@ def test_stance_preserved():
 
 @pytest.mark.unit
 def test_untimestamped_gets_locator_and_passes_quote_gate():
-    t = ingest_text("Deliberate practice means working at the edge of your ability.")
+    t = _t("Deliberate practice means working at the edge of your ability.")
     items = [
         _item("k_01", "Practice at the edge of your ability.",
               "working at the edge of your ability", timestamp=None, locator=None),
@@ -95,7 +99,7 @@ def test_untimestamped_gets_locator_and_passes_quote_gate():
 
 @pytest.mark.unit
 def test_timestamped_locator_preserved():
-    t = ingest_text("00:12:30 Never weaken a guarantee just to make a test pass.")
+    t = _t("Never weaken a guarantee just to make a test pass.", timestamp="00:12:30")
     items = [
         _item("k_01", "Don't weaken guarantees to pass tests.",
               "never weaken a guarantee", timestamp=None, locator=None),
@@ -108,7 +112,7 @@ def test_timestamped_locator_preserved():
 
 @pytest.mark.unit
 def test_pure_does_not_mutate_input():
-    t = ingest_text("Keep functions small.")
+    t = _t("Keep functions small.")
     items = [_item("k_01", "Keep functions small.", "keep functions small")]
     before = items[0].model_dump_json()
     normalize_items(items, t)

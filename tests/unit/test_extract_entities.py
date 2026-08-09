@@ -9,9 +9,13 @@ import json
 import pytest
 
 from distil.extract import run_extraction
-from distil.ingest import ingest_text
+from distil.ingest import Segment, Transcript
 from distil.llm import FakeClient
 from distil.models import Triage
+
+
+def _t(text: str) -> Transcript:
+    return Transcript(segments=[Segment(text=text, locator="seg:0")])
 
 
 def _triage(dominant: str = "conceptual") -> Triage:
@@ -41,7 +45,7 @@ def _item(**overrides) -> dict:
 def test_entities_come_back_from_the_same_extraction_call():
     """A single FakeClient response (one call) carries both the knowledge item and its entity —
     proof there is no second transcript pass."""
-    t = ingest_text("react uses a virtual dom under the hood")
+    t = _t("react uses a virtual dom under the hood")
     resp = json.dumps([
         _item(entities=[
             {"name": "React", "kind": "tool", "description": "A JS UI library.",
@@ -62,7 +66,7 @@ def test_entities_come_back_from_the_same_extraction_call():
 
 @pytest.mark.unit
 def test_item_with_no_entities_gets_empty_list():
-    t = ingest_text("keep functions small and focused")
+    t = _t("keep functions small and focused")
     resp = json.dumps([_item(statement="Keep functions small.", provenance={
         "quote": "keep functions small", "timestamp": None, "locator": None,
     })])
@@ -74,7 +78,7 @@ def test_item_with_no_entities_gets_empty_list():
 def test_malformed_entity_is_dropped_without_harming_the_knowledge_item():
     """An entity with an invalid `kind` (outside tool/person/organization) is dropped — the
     item it rode in on still comes back whole."""
-    t = ingest_text("react uses a virtual dom under the hood")
+    t = _t("react uses a virtual dom under the hood")
     resp = json.dumps([
         _item(entities=[
             {"name": "React", "kind": "framework", "description": "bad kind",
@@ -89,7 +93,7 @@ def test_malformed_entity_is_dropped_without_harming_the_knowledge_item():
 
 @pytest.mark.unit
 def test_entity_missing_name_is_dropped():
-    t = ingest_text("react uses a virtual dom under the hood")
+    t = _t("react uses a virtual dom under the hood")
     resp = json.dumps([
         _item(entities=[{"kind": "tool", "quote": "react uses a virtual dom"}])
     ])
@@ -100,7 +104,7 @@ def test_entity_missing_name_is_dropped():
 
 @pytest.mark.unit
 def test_one_bad_entity_does_not_drop_its_valid_sibling():
-    t = ingest_text("react and openai are both mentioned here today")
+    t = _t("react and openai are both mentioned here today")
     resp = json.dumps([
         _item(entities=[
             {"name": "React", "kind": "tool", "quote": "react", "timestamp": None},
@@ -115,7 +119,7 @@ def test_one_bad_entity_does_not_drop_its_valid_sibling():
 @pytest.mark.unit
 def test_entity_quote_over_word_limit_is_truncated_not_dropped():
     long_quote = " ".join(["word"] * 20)
-    t = ingest_text(long_quote + " and more text")
+    t = _t(long_quote + " and more text")
     resp = json.dumps([
         _item(entities=[
             {"name": "Thing", "kind": "tool", "quote": long_quote, "timestamp": None}
@@ -130,7 +134,7 @@ def test_entity_quote_over_word_limit_is_truncated_not_dropped():
 def test_entities_array_itself_malformed_still_returns_the_item():
     """A wholesale-broken `entities` payload (not a list at all) degrades to an empty list —
     it never fails or drops the knowledge item."""
-    t = ingest_text("react uses a virtual dom under the hood")
+    t = _t("react uses a virtual dom under the hood")
     resp = json.dumps([_item(entities="not-a-list")])
     items = run_extraction(t, _triage(), FakeClient(responses=[resp]))
     assert len(items) == 1
@@ -146,6 +150,6 @@ def test_salvage_floor_for_items_is_unaffected_by_entities():
     bad_item = {"type": "personal_experience", "statement": "missing stance and provenance",
                 "entities": [{"name": "X", "kind": "tool", "quote": "x"}]}
     resp = json.dumps([_item(), bad_item, bad_item, bad_item])
-    t = ingest_text("some transcript text about a concept")
+    t = _t("some transcript text about a concept")
     with pytest.raises(ParseError):
         run_extraction(t, _triage(), FakeClient(responses=[resp]))

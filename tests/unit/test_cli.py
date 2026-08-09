@@ -17,6 +17,10 @@ from distil.source import SourceMetadata
 runner = CliRunner()
 
 
+# Long enough to clear ingest.py's word-count floor; still contains the literal quote the
+# canned extract response below cites, so the faithfulness gate still passes.
+_PASTE = "Keep functions small and focused. " * 12
+
 _TRIAGE_RICH = json.dumps({
     "knowledge_types_present": [{"type": "heuristic", "share": 1.0}],
     "density": "high", "transcript_loss": {"level": "low", "evidence": []}, "verdict": "rich",
@@ -50,6 +54,10 @@ _NOTE = json.dumps({
 _CANON_REJECT = json.dumps([{"item_id": "k_01", "decision": "reject"}])
 
 
+def _merged(triage_json: str, items_json: str) -> str:
+    return f"<TRIAGE>\n{triage_json}\n</TRIAGE>\n<ITEMS>\n{items_json}\n</ITEMS>"
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
@@ -75,7 +83,7 @@ def _fake(monkeypatch, responses):
 
 @pytest.mark.unit
 def test_c1_run_file_exits_zero_and_prints_path(env, monkeypatch, tmp_path):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
+    _fake(monkeypatch, [_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE, _CANON_REJECT])
     monkeypatch.setattr(
         cli,
         "fetch_youtube_oembed_metadata",
@@ -89,7 +97,7 @@ def test_c1_run_file_exits_zero_and_prints_path(env, monkeypatch, tmp_path):
         ),
     )
     src = tmp_path / "[English] my-video_title (Transcript).txt"
-    src.write_text("Keep functions small and focused.")
+    src.write_text(_PASTE)
     result = runner.invoke(
         cli.app,
         [
@@ -110,22 +118,32 @@ def test_c1_run_file_exits_zero_and_prints_path(env, monkeypatch, tmp_path):
 
 @pytest.mark.unit
 def test_c1_run_paste_via_option(env, monkeypatch):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
-    result = runner.invoke(
-        cli.app, ["run", "--paste", "Keep functions small and focused.", "--no-graph"]
-    )
+    _fake(monkeypatch, [_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE, _CANON_REJECT])
+    result = runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
     assert result.exit_code == 0, result.output
     assert ".md" in result.output
 
 
 @pytest.mark.unit
-def test_c1_low_value_run_prints_nothing_filed(env, monkeypatch):
-    _fake(monkeypatch, [_TRIAGE_LOW])
+def test_c1_low_value_verdict_still_files_the_entry(env, monkeypatch):
+    """The owner's decision to run this transcript overrides the model's verdict — triage
+    still classifies it little_to_extract, but that never stops filing (owner decision;
+    see distil/pipeline.py's module docstring)."""
+    _fake(monkeypatch, [_merged(_TRIAGE_LOW, _EXTRACT), _LINK, _NOTE, _CANON_REJECT])
+    result = runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
+    assert result.exit_code == 0, result.output
+    assert ".md" in result.output
+    assert len(cli._make_store().list_entries()) == 1
+
+
+@pytest.mark.unit
+def test_c1_short_paste_is_rejected_clearly(env, monkeypatch):
     result = runner.invoke(
         cli.app, ["run", "--paste", "hey guys smash that like button", "--no-graph"]
     )
-    assert result.exit_code == 0, result.output
-    assert "Nothing filed" in result.output
+    assert result.exit_code != 0
+    assert "too short" in result.output.lower()
+    assert "Traceback" not in result.output
     assert cli._make_store().list_entries() == []
 
 
@@ -134,8 +152,8 @@ def test_c1_low_value_run_prints_nothing_filed(env, monkeypatch):
 
 @pytest.mark.unit
 def test_c2_score_mutates_profile(env, monkeypatch):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
-    run = runner.invoke(cli.app, ["run", "--paste", "Keep functions small.", "--no-graph"])
+    _fake(monkeypatch, [_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE, _CANON_REJECT])
+    run = runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
     entry_id = run.output.strip().split("/")[-1].replace(".md", "").strip()
 
     before = cli._make_store().load_profile("owner")
@@ -150,8 +168,8 @@ def test_c2_score_mutates_profile(env, monkeypatch):
 
 @pytest.mark.unit
 def test_c3_list_and_show(env, monkeypatch):
-    _fake(monkeypatch, [_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_REJECT])
-    run = runner.invoke(cli.app, ["run", "--paste", "Keep functions small.", "--no-graph"])
+    _fake(monkeypatch, [_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE, _CANON_REJECT])
+    run = runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
     entry_id = run.output.strip().split("/")[-1].replace(".md", "").strip()
 
     lst = runner.invoke(cli.app, ["list"])
@@ -181,7 +199,7 @@ def test_c3_show_missing_entry_is_friendly(env, monkeypatch):
 def test_c3_missing_api_key_is_friendly(env, monkeypatch):
     # Use the real client path (no fake) with no key set → friendly message, not a stack trace.
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    result = runner.invoke(cli.app, ["run", "--paste", "some content", "--no-graph"])
+    result = runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
     assert result.exit_code != 0
     assert "ANTHROPIC_API_KEY" in result.output
     assert "Traceback" not in result.output
@@ -198,7 +216,7 @@ def test_c3_run_bad_file_is_friendly(env, monkeypatch):
 @pytest.mark.unit
 def test_c3_run_bad_url_is_friendly(env, monkeypatch):
     result = runner.invoke(
-        cli.app, ["run", "--paste", "some content", "--url", "https://example.com/x"]
+        cli.app, ["run", "--paste", _PASTE, "--url", "https://example.com/x"]
     )
     assert result.exit_code != 0
     assert "YouTube URL" in result.output

@@ -12,6 +12,9 @@
       <span class="badge {% if e.triage.verdict == 'rich' %}ok{% elif e.triage.verdict == 'little_to_extract' %}warn{% endif %}">verdict: {{ e.triage.verdict }}</span>
       <span class="badge">density: {{ e.triage.density }}</span>
       <span class="badge">loss: {{ e.triage.transcript_loss.level }}</span>
+      {% if thin_source %}
+      <span class="badge warn" title="Built from only {{ e.source.transcript_word_count }} transcript words — unusually little for a source. If the fetch may have been cut short, consider re-adding it.">thin source</span>
+      {% endif %}
     </div>
     {% if mix %}
     <p class="muted" style="margin:0;">Mix: {% for t, pct in mix %}{{ t }} {{ pct }}%{% if not loop.last %} / {% endif %}{% endfor %}</p>

@@ -1,15 +1,32 @@
-"""Phase 8/15.3 — pipeline.py orchestration. Tests T-PL1, T-PL2, T-PL5, T-PL6 (unit, FakeClient)."""
+"""Phase 8/15.3 — pipeline.py orchestration. Tests T-PL1, T-PL5, T-PL6 (unit, FakeClient).
+
+There is no more quality short-circuit (owner decision — see pipeline.py's module docstring):
+a transcript that reaches run_pipeline always finishes filed, regardless of triage.verdict.
+
+Triage and extraction are merged into one strong-tier call (owner decision, addendum) — a
+canned FakeClient response for that merged stage is built via `_merged(triage_json, items_json)`,
+a two-section `<TRIAGE>...</TRIAGE><ITEMS>...</ITEMS>` string that replaces what used to be two
+separate canned responses with one.
+"""
 
 import json
 
 import pytest
 
 from distil.embed import FakeEmbedder
-from distil.ingest import ingest_text
+from distil.ingest import Segment, Transcript
 from distil.llm import FakeClient
 from distil.models import KBEntry, Profile
 from distil.pipeline import PipelineConfig, run_pipeline
 from distil.store import Store
+
+
+def _t(text: str) -> Transcript:
+    return Transcript(segments=[Segment(text=text, locator="seg:0")])
+
+
+def _merged(triage_json: str, items_json: str) -> str:
+    return f"<TRIAGE>\n{triage_json}\n</TRIAGE>\n<ITEMS>\n{items_json}\n</ITEMS>"
 
 
 @pytest.fixture
@@ -89,9 +106,9 @@ _EDGE_RELATED = json.dumps({"relation": "related"})
 
 @pytest.mark.unit
 def test_pl1_end_to_end_produces_valid_entry(profile, store):
-    transcript = ingest_text("Keep functions small and focused on one thing.")
-    # graph disabled (no prior entries anyway) -> triage, extract, link, note = 4 calls
-    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    transcript = _t("Keep functions small and focused on one thing.")
+    # graph disabled (no prior entries anyway) -> merged triage+extract, link, note = 3 calls
+    client = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
     entry = run_pipeline(transcript, profile, store, client,
                          source_title="A talk", config=PipelineConfig(enable_graph=False, enable_canonicalize=False))
     assert isinstance(entry, KBEntry)
@@ -110,17 +127,17 @@ def test_pl1_end_to_end_produces_valid_entry(profile, store):
 
 @pytest.mark.unit
 def test_pl1_respects_llm_budget(profile, store):
-    transcript = ingest_text("Keep functions small.")
-    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    transcript = _t("Keep functions small.")
+    client = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
     run_pipeline(transcript, profile, store, client, source_title="t",
                  config=PipelineConfig(enable_graph=False, enable_canonicalize=False))
-    assert client.call_count <= 4  # triage + extract + link + note
+    assert client.call_count <= 3  # merged triage+extract + link + note
 
 
 @pytest.mark.unit
 def test_pl1_reports_stage_timings(profile, store):
-    transcript = ingest_text("Keep functions small.")
-    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    transcript = _t("Keep functions small.")
+    client = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
     timings: dict[str, float] = {}
     run_pipeline(
         transcript,
@@ -134,7 +151,7 @@ def test_pl1_reports_stage_timings(profile, store):
             timing_callback=lambda stage, seconds: timings.__setitem__(stage, seconds),
         ),
     )
-    assert {"triage", "extract", "normalize", "link", "note", "file"} <= set(timings)
+    assert {"extract", "normalize", "link", "note", "file"} <= set(timings)
     assert all(seconds >= 0 for seconds in timings.values())
 
 
@@ -145,8 +162,8 @@ def test_pl1_reports_stage_timings(profile, store):
 def test_phase_callback_reports_start_before_finish_in_stage_order(profile, store):
     """Each stage's start event must precede its own finish event, in pipeline stage order —
     and the existing timing_callback behaviour must be unaffected by adding phase_callback."""
-    transcript = ingest_text("Keep functions small.")
-    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    transcript = _t("Keep functions small.")
+    client = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
     events: list[tuple[str, str]] = []
     timings: dict[str, float] = {}
     run_pipeline(
@@ -159,7 +176,6 @@ def test_phase_callback_reports_start_before_finish_in_stage_order(profile, stor
         ),
     )
     assert events == [
-        ("triage", "start"), ("triage", "finish"),
         ("extract", "start"), ("extract", "finish"),
         ("normalize", "start"), ("normalize", "finish"),
         ("link", "start"), ("link", "finish"),
@@ -167,21 +183,25 @@ def test_phase_callback_reports_start_before_finish_in_stage_order(profile, stor
         ("file", "start"), ("file", "finish"),
     ]
     # timing_callback keeps working exactly as before, independent of phase_callback.
-    assert {"triage", "extract", "normalize", "link", "note", "file"} <= set(timings)
+    assert {"extract", "normalize", "link", "note", "file"} <= set(timings)
 
 
 @pytest.mark.unit
-def test_phase_callback_low_value_short_circuit_is_honest(profile, store):
-    """The little_to_extract short-circuit must report it is stopping, not silently stall on
-    a total the run will never reach (only triage ever starts/finishes)."""
-    transcript = ingest_text("hey guys smash that like button")
-    client = FakeClient(responses=[_TRIAGE_LOW])
+def test_phase_callback_never_emits_short_circuit(profile, store):
+    """run_pipeline itself no longer emits a short_circuit event under any triage verdict — that
+    behaviour moved to the ingest-time word-count gate, reported by callers outside this
+    function (see pipeline.py's PipelineConfig.phase_callback docstring)."""
+    transcript = _t("hey guys smash that like button")
+    client = FakeClient(responses=[_merged(_TRIAGE_LOW, _EXTRACT), _LINK, _NOTE])
     events: list[tuple[str, str]] = []
     run_pipeline(
         transcript, profile, store, client, source_title="vlog",
-        config=PipelineConfig(phase_callback=lambda stage, event: events.append((stage, event))),
+        config=PipelineConfig(
+            enable_graph=False, enable_canonicalize=False,
+            phase_callback=lambda stage, event: events.append((stage, event)),
+        ),
     )
-    assert events == [("triage", "start"), ("triage", "finish"), ("triage", "short_circuit")]
+    assert all(event != "short_circuit" for _stage, event in events)
 
 
 @pytest.mark.unit
@@ -189,8 +209,8 @@ def test_phase_callback_omits_disabled_stages(profile, store):
     """graph/canonicalize/concept_edges must not appear in the events when their flags are
     off — the declared total a caller derives from these events must reflect what will
     actually run, not a fixed nine."""
-    transcript = ingest_text("Keep functions small.")
-    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    transcript = _t("Keep functions small.")
+    client = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
     events: list[tuple[str, str]] = []
     run_pipeline(
         transcript, profile, store, client, source_title="t",
@@ -202,31 +222,35 @@ def test_phase_callback_omits_disabled_stages(profile, store):
         ),
     )
     stages_seen = {stage for stage, _event in events}
-    assert stages_seen == {"triage", "extract", "normalize", "link", "note", "file"}
+    assert stages_seen == {"extract", "normalize", "link", "note", "file"}
 
 
-# ---- T-PL2: little_to_extract path returns minimal entry, makes no extract/link calls ----
+# ---- Owner-trust: a little_to_extract verdict never stops filing (owner decision) ----
 
 
 @pytest.mark.unit
-def test_pl2_low_value_returns_minimal_without_filing(profile, store):
-    transcript = ingest_text("hey guys smash that like button")
-    client = FakeClient(responses=[_TRIAGE_LOW])  # ONLY triage; extra calls would IndexError
-    entry = run_pipeline(transcript, profile, store, client, source_title="vlog")
+def test_low_value_verdict_still_produces_a_full_filed_entry(profile, store):
+    """A transcript triage would once have discarded (little_to_extract) still goes through
+    extract/link/note/file exactly like any other — the owner's decision to keep the source
+    overrides the model's quality judgment. Verdict is stored but informational only."""
+    transcript = _t("Keep functions small and focused on one thing.")
+    client = FakeClient(responses=[_merged(_TRIAGE_LOW, _EXTRACT), _LINK, _NOTE])
+    entry = run_pipeline(
+        transcript, profile, store, client, source_title="vlog",
+        config=PipelineConfig(enable_graph=False, enable_canonicalize=False),
+    )
     assert entry.triage.verdict == "little_to_extract"
-    assert entry.knowledge_items == []
-    assert entry.application_links == []
-    # exactly one LLM call was made (triage); no extract/link/graph
-    assert client.call_count == 1
-    # not filed: low-value jobs remain in Activity, not the Library
-    assert not store.entry_path(entry.entry_id).exists()
-    assert all(row.entry_id != entry.entry_id for row in store.list_entries())
+    assert len(entry.knowledge_items) == 1
+    assert entry.distilled_note is not None
+    # filed to disk + indexed, exactly like a "rich" verdict
+    assert store.entry_path(entry.entry_id).exists()
+    assert any(row.entry_id == entry.entry_id for row in store.list_entries())
 
 
 @pytest.mark.unit
 def test_pl1_filing_exports_okf_pages(profile, store):
-    transcript = ingest_text("Keep functions small and focused on one thing.")
-    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    transcript = _t("Keep functions small and focused on one thing.")
+    client = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
     entry = run_pipeline(transcript, profile, store, client,
                          source_title="A talk", config=PipelineConfig(enable_graph=False, enable_canonicalize=False))
     from distil.okf import slug_for_entry
@@ -238,12 +262,12 @@ def test_pl1_filing_exports_okf_pages(profile, store):
 
 @pytest.mark.unit
 def test_pl_entry_id_is_unique_and_indexed(profile, store):
-    t = ingest_text("Keep functions small.")
+    t = _t("Keep functions small.")
     e1 = run_pipeline(t, profile, store,
-                      FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE]),
+                      FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE]),
                       source_title="t1", config=PipelineConfig(enable_graph=False, enable_canonicalize=False))
     e2 = run_pipeline(t, profile, store,
-                      FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE]),
+                      FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE]),
                       source_title="t2", config=PipelineConfig(enable_graph=False, enable_canonicalize=False))
     assert e1.entry_id != e2.entry_id
     assert len(store.list_entries()) == 2
@@ -254,9 +278,9 @@ def test_pl_entry_id_is_unique_and_indexed(profile, store):
 
 @pytest.mark.unit
 def test_pl5_canonicalize_enabled_produces_concept_pages(profile, store):
-    transcript = ingest_text("Keep functions small and focused on one thing.")
+    transcript = _t("Keep functions small and focused on one thing.")
     client = FakeClient(
-        responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE, _CANON_NEW, _SYNTH_CLAIMS]
+        responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE, _CANON_NEW, _SYNTH_CLAIMS]
     )
     run_pipeline(
         transcript, profile, store, client, source_title="A talk",
@@ -275,14 +299,14 @@ def test_pl5_canonicalize_enabled_produces_concept_pages(profile, store):
 
 @pytest.mark.unit
 def test_pl6_canonicalize_disabled_makes_zero_canonicalize_calls(profile, store):
-    transcript = ingest_text("Keep functions small and focused on one thing.")
-    # Only the 4 core-stage responses; a canonicalize call would IndexError.
-    client = FakeClient(responses=[_TRIAGE_RICH, _EXTRACT, _LINK, _NOTE])
+    transcript = _t("Keep functions small and focused on one thing.")
+    # Only the 3 core-stage responses; a canonicalize call would IndexError.
+    client = FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT), _LINK, _NOTE])
     run_pipeline(
         transcript, profile, store, client, source_title="A talk",
         config=PipelineConfig(enable_graph=False, enable_canonicalize=False),
     )
-    assert client.call_count == 4  # triage + extract + link + note; zero canonicalize calls
+    assert client.call_count == 3  # merged triage+extract + link + note; zero canonicalize calls
     assert store.list_concepts() == []
     concepts_dir = store.okf_root / "concepts"
     pages = [p for p in concepts_dir.glob("*.md") if p.name != "index.md"]
@@ -295,11 +319,11 @@ def test_pl6_canonicalize_disabled_makes_zero_canonicalize_calls(profile, store)
 @pytest.mark.unit
 def test_pl7_concept_edges_enabled_computes_and_renders_edges(profile, store):
     embedder = FakeEmbedder(dim=32)
-    transcript = ingest_text("Traditional RAG retrieves then generates.")
+    transcript = _t("Traditional RAG retrieves then generates.")
 
     run_pipeline(
         transcript, profile, store,
-        FakeClient(responses=[_TRIAGE_RICH, _EXTRACT_RAG, _LINK, _NOTE, _CANON_NEW_A, _SYNTH_A]),
+        FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT_RAG), _LINK, _NOTE, _CANON_NEW_A, _SYNTH_A]),
         source_title="Video A",
         config=PipelineConfig(enable_graph=False, enable_canonicalize=True, enable_concept_edges=True),
         embedder=embedder,
@@ -308,7 +332,7 @@ def test_pl7_concept_edges_enabled_computes_and_renders_edges(profile, store):
         transcript, profile, store,
         FakeClient(
             responses=[
-                _TRIAGE_RICH, _EXTRACT_RAG, _LINK, _NOTE, _CANON_NEW_B, _SYNTH_B, _EDGE_RELATED,
+                _merged(_TRIAGE_RICH, _EXTRACT_RAG), _LINK, _NOTE, _CANON_NEW_B, _SYNTH_B, _EDGE_RELATED,
             ]
         ),
         source_title="Video B",
@@ -327,18 +351,18 @@ def test_pl7_concept_edges_enabled_computes_and_renders_edges(profile, store):
 @pytest.mark.unit
 def test_pl8_concept_edges_disabled_makes_zero_edge_calls(profile, store):
     embedder = FakeEmbedder(dim=32)
-    transcript = ingest_text("Traditional RAG retrieves then generates.")
+    transcript = _t("Traditional RAG retrieves then generates.")
 
     run_pipeline(
         transcript, profile, store,
-        FakeClient(responses=[_TRIAGE_RICH, _EXTRACT_RAG, _LINK, _NOTE, _CANON_NEW_A, _SYNTH_A]),
+        FakeClient(responses=[_merged(_TRIAGE_RICH, _EXTRACT_RAG), _LINK, _NOTE, _CANON_NEW_A, _SYNTH_A]),
         source_title="Video A",
         config=PipelineConfig(enable_graph=False, enable_canonicalize=True, enable_concept_edges=False),
         embedder=embedder,
     )
     # No _EDGE_RELATED response supplied; an edge-classification call would IndexError.
     client = FakeClient(
-        responses=[_TRIAGE_RICH, _EXTRACT_RAG, _LINK, _NOTE, _CANON_NEW_B, _SYNTH_B]
+        responses=[_merged(_TRIAGE_RICH, _EXTRACT_RAG), _LINK, _NOTE, _CANON_NEW_B, _SYNTH_B]
     )
     run_pipeline(
         transcript, profile, store, client,
@@ -347,6 +371,6 @@ def test_pl8_concept_edges_disabled_makes_zero_edge_calls(profile, store):
         embedder=embedder,
     )
 
-    assert client.call_count == 6
+    assert client.call_count == 5
     concept_b = next(c for c in store.list_concepts() if c.title == "Concept B")
     assert concept_b.edges == []

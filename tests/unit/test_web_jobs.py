@@ -303,6 +303,27 @@ def test_fetcher_isolates_unfetchable_video_when_fetch_fn_raises(tmp_path):
 
 
 @pytest.mark.unit
+def test_fetcher_marks_low_value_not_failed_for_a_too_short_transcript(tmp_path):
+    """A too-short fetched transcript is a clean rejection, not a fetch failure — isolated to
+    its own job like any other outcome, never STATUS_FAILED."""
+    db = tmp_path / "distil.db"
+    store = jobsmod.JobStore(db)
+    short = store.enqueue(
+        kind="youtube", title="short", payload="https://x/1",
+        status=jobsmod.STATUS_PENDING_FETCH,
+    )
+
+    def fake_fetch(job):
+        return {"status": jobsmod.STATUS_LOW_VALUE, "summary": "Transcript has only 3 words."}
+
+    fetcher = jobsmod.Fetcher(db, fake_fetch, sleep=lambda s: None)
+    assert fetcher.process_once()
+    got = store.get(short.job_id)
+    assert got.status == jobsmod.STATUS_LOW_VALUE
+    assert "3 words" in got.summary
+
+
+@pytest.mark.unit
 def test_distilling_first_video_starts_before_last_fetch_completes(tmp_path):
     """Overlap, proven deterministically: after only the first of two videos has been fetched,
     it's already distillable while the second hasn't even started fetching yet."""
@@ -456,7 +477,7 @@ def test_web_distill_job_skips_inline_graph_and_reports_timings(tmp_path, monkey
     def fake_run_pipeline(*_args, **kwargs):
         config = kwargs["config"]
         captured["enable_graph"] = config.enable_graph
-        config.timing_callback("triage", 1.26)
+        config.timing_callback("extract", 1.26)
         return KBEntry.model_validate({
             "entry_id": "e_fast",
             "source": {"title": "Fast note", "captured_at": "2026-06-15T00:00:00"},
@@ -479,13 +500,13 @@ def test_web_distill_job_skips_inline_graph_and_reports_timings(tmp_path, monkey
 
     monkeypatch.setattr(webapp, "run_pipeline", fake_run_pipeline)
     job = jobsmod.JobStore(tmp_path / "distil.db").enqueue(
-        kind="paste", title="t", payload="Keep functions small."
+        kind="paste", title="t", payload="Keep functions small. " * 18
     )
     result = webapp._distill_job(job)
     assert result["status"] == jobsmod.STATUS_DONE
     assert captured["enable_graph"] is False
     assert scheduled == ["e_fast"]
-    assert "triage 1.3s" in result["summary"]
+    assert "extract 1.3s" in result["summary"]
     assert "graph updating" in result["summary"]
     out = capsys.readouterr().out
     line = next(line for line in out.splitlines() if line.startswith("distil_timing "))
@@ -493,7 +514,7 @@ def test_web_distill_job_skips_inline_graph_and_reports_timings(tmp_path, monkey
     assert payload["job_id"] == job.job_id
     assert payload["entry_id"] == "e_fast"
     assert payload["status"] == "done"
-    assert payload["timings"]["triage"] == 1.26
+    assert payload["timings"]["extract"] == 1.26
 
 
 # ---- Phase A visible progress, wired through _distill_job (no LLM) --------------------
@@ -511,9 +532,9 @@ def test_distill_job_persists_phase_durations_and_current_phase(tmp_path, monkey
     def fake_run_pipeline(*_args, **kwargs):
         config = kwargs["config"]
         # Simulate what pipeline._timed does for one stage: entry, timing, exit.
-        config.phase_callback("triage", "start")
-        config.timing_callback("triage", 0.5)
-        config.phase_callback("triage", "finish")
+        config.phase_callback("extract", "start")
+        config.timing_callback("extract", 0.5)
+        config.phase_callback("extract", "finish")
         return KBEntry.model_validate({
             "entry_id": "e_fast",
             "source": {"title": "Fast note", "captured_at": "2026-06-15T00:00:00"},
@@ -532,24 +553,27 @@ def test_distill_job_persists_phase_durations_and_current_phase(tmp_path, monkey
 
     monkeypatch.setattr(webapp, "run_pipeline", fake_run_pipeline)
     db = tmp_path / "distil.db"
-    job = jobsmod.JobStore(db).enqueue(kind="paste", title="t", payload="Keep functions small.")
+    job = jobsmod.JobStore(db).enqueue(kind="paste", title="t", payload="Keep functions small. " * 18)
     result = webapp._distill_job(job)
     assert result["status"] == jobsmod.STATUS_DONE
 
     got = jobsmod.JobStore(db).get(job.job_id)
     # ingest + metadata phases ran for real (not mocked) and their durations were persisted,
-    # alongside the pipeline-reported "triage" duration — this is requirement 5 (durations
+    # alongside the pipeline-reported "extract" duration — this is requirement 5 (durations
     # stored) plus requirement 3 (pre-pipeline steps get their own phases).
-    assert got.phase_durations["triage"] >= 0
+    assert got.phase_durations["extract"] >= 0
     assert "ingest" in got.phase_durations
     assert "metadata" in got.phase_durations
-    assert got.current_phase == "triage"
+    assert got.current_phase == "extract"
     assert got.phase_index is not None and got.phase_total is not None
     assert got.phase_index <= got.phase_total
 
 
 @pytest.mark.unit
-def test_distill_job_low_value_short_circuit_collapses_total_honestly(tmp_path, monkeypatch):
+def test_distill_job_short_transcript_collapses_total_honestly(tmp_path, monkeypatch):
+    """A transcript below the owner's word-count floor is rejected at ingest, before
+    run_pipeline is ever called — STATUS_LOW_VALUE, and the declared phase total shrinks to
+    what actually ran (just "ingest") instead of continuing to claim the full ~10-phase plan."""
     monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
     monkeypatch.setenv("DISTIL_KB_DIR", str(tmp_path / "kb"))
     monkeypatch.setattr(webapp, "_make_client", lambda: object())
@@ -557,32 +581,18 @@ def test_distill_job_low_value_short_circuit_collapses_total_honestly(tmp_path, 
     monkeypatch.setattr(webapp, "_fetch_source_metadata", lambda _url: webapp.SourceMetadata())
 
     def fake_run_pipeline(*_args, **kwargs):
-        config = kwargs["config"]
-        config.phase_callback("triage", "start")
-        config.timing_callback("triage", 0.2)
-        config.phase_callback("triage", "finish")
-        config.phase_callback("triage", "short_circuit")
-        return KBEntry.model_validate({
-            "entry_id": "e_low",
-            "source": {"title": "vlog", "captured_at": "2026-06-15T00:00:00"},
-            "triage": {
-                "knowledge_types_present": [], "density": "low",
-                "transcript_loss": {"level": "low", "evidence": []},
-                "verdict": "little_to_extract",
-            },
-            "meta": {"created_at": "2026-06-15T00:00:00", "model_version": "test"},
-        })
+        raise AssertionError("run_pipeline must not be called for a too-short transcript")
 
     monkeypatch.setattr(webapp, "run_pipeline", fake_run_pipeline)
     db = tmp_path / "distil.db"
     job = jobsmod.JobStore(db).enqueue(kind="paste", title="t", payload="meh")
     result = webapp._distill_job(job)
     assert result["status"] == jobsmod.STATUS_LOW_VALUE
+    assert result["entry_id"] is None
+    assert "too short" in result["summary"].lower()
 
     got = jobsmod.JobStore(db).get(job.job_id)
-    # The declared total must shrink to what actually ran (ingest, metadata, triage) rather
-    # than continuing to claim the full ~10-phase plan the run never reached.
-    assert got.phase_total == got.phase_index == 3
+    assert got.phase_total == got.phase_index == 1
 
 
 # ---- /ingest is non-blocking and /jobs reports state -----------------------------------
@@ -844,6 +854,26 @@ def test_fetch_playlist_video_reports_failed_on_youtube_fetch_error(tmp_path, mo
     result = webapp._fetch_playlist_video(job)
     assert result["status"] == "failed"
     assert "captions" in result["error"]
+
+
+@pytest.mark.unit
+def test_fetch_playlist_video_reports_low_value_on_transcript_too_short(tmp_path, monkeypatch):
+    """A too-short fetched transcript is a clean rejection (STATUS_LOW_VALUE), not a fetch
+    failure — distinguishable so the Activity view never offers a pointless Retry."""
+    from distil.ingest import TranscriptTooShortError
+
+    monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
+
+    def boom(url, **kw):
+        raise TranscriptTooShortError("Transcript has only 3 words (minimum 50).")
+
+    monkeypatch.setattr(webapp.youtube, "fetch_video_transcript", boom)
+    job = jobsmod.JobStore(tmp_path / "distil.db").enqueue(
+        kind="youtube", title="t", payload="https://x/1", status=jobsmod.STATUS_PENDING_FETCH,
+    )
+    result = webapp._fetch_playlist_video(job)
+    assert result["status"] == jobsmod.STATUS_LOW_VALUE
+    assert "too short" in result["summary"].lower() or "3 words" in result["summary"]
 
 
 # ---- Staging on the persistent volume (Phase E) — fixes the ephemeral-tmp upload bug ---

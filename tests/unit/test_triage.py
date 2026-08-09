@@ -1,12 +1,20 @@
-"""Phase 3.2/3.3 — triage parsing + short-circuit. Tests T-T1, T-T2, T-T3 (unit, FakeClient)."""
+"""Phase 3.2/3.3 — triage parsing. Tests T-T1, T-T2 (unit, FakeClient).
+
+Triage no longer gates the pipeline (owner decision — see distil/pipeline.py's module
+docstring); it only classifies. There is no is_low_value/short-circuit to test here anymore."""
 
 import json
 
 import pytest
 
-from distil.ingest import ingest_text
+from distil.ingest import Segment, Transcript
 from distil.llm import FakeClient
-from distil.triage import ParseError, TriageResult, is_low_value, run_triage
+from distil.triage import ParseError, TriageResult, run_triage
+
+
+def _t(text: str = "Keep functions small. Name things clearly.") -> Transcript:
+    return Transcript(segments=[Segment(text=text, locator="seg:0")])
+
 
 _GOOD = json.dumps(
     {
@@ -26,7 +34,7 @@ _GOOD = json.dumps(
 
 @pytest.mark.unit
 def test_parses_well_formed_response():
-    t = ingest_text("Keep functions small. Name things clearly.")
+    t = _t()
     fake = FakeClient(responses=[_GOOD])
     result = run_triage(t, fake)
     assert isinstance(result, TriageResult)
@@ -38,7 +46,7 @@ def test_parses_well_formed_response():
 
 @pytest.mark.unit
 def test_tolerates_code_fence_wrapping():
-    t = ingest_text("some content here")
+    t = _t("some content here")
     fenced = f"```json\n{_GOOD}\n```"
     result = run_triage(t, FakeClient(responses=[fenced]))
     assert result.triage.verdict == "rich"
@@ -49,14 +57,14 @@ def test_tolerates_code_fence_wrapping():
 
 @pytest.mark.unit
 def test_malformed_json_raises_parse_error():
-    t = ingest_text("content")
+    t = _t("content")
     with pytest.raises(ParseError):
         run_triage(t, FakeClient(responses=["not json at all"]))
 
 
 @pytest.mark.unit
 def test_partial_json_missing_fields_raises_parse_error():
-    t = ingest_text("content")
+    t = _t("content")
     partial = json.dumps({"density": "high"})  # missing verdict, loss, types
     with pytest.raises(ParseError):
         run_triage(t, FakeClient(responses=[partial]))
@@ -64,7 +72,7 @@ def test_partial_json_missing_fields_raises_parse_error():
 
 @pytest.mark.unit
 def test_invalid_enum_value_raises_parse_error():
-    t = ingest_text("content")
+    t = _t("content")
     bad = json.dumps(
         {
             "knowledge_types_present": [{"type": "gossip", "share": 1.0}],
@@ -75,28 +83,3 @@ def test_invalid_enum_value_raises_parse_error():
     )
     with pytest.raises(ParseError):
         run_triage(t, FakeClient(responses=[bad]))
-
-
-# ---- T-T3: little_to_extract short-circuit signal ----
-
-
-@pytest.mark.unit
-def test_is_low_value_true_for_little_to_extract():
-    t = ingest_text("content")
-    low = json.dumps(
-        {
-            "knowledge_types_present": [],
-            "density": "low",
-            "transcript_loss": {"level": "low", "evidence": []},
-            "verdict": "little_to_extract",
-        }
-    )
-    result = run_triage(t, FakeClient(responses=[low]))
-    assert is_low_value(result) is True
-
-
-@pytest.mark.unit
-def test_is_low_value_false_for_rich():
-    t = ingest_text("content")
-    result = run_triage(t, FakeClient(responses=[_GOOD]))
-    assert is_low_value(result) is False

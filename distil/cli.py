@@ -19,7 +19,7 @@ import typer
 from .canonicalize import run_delete_entry_stage
 from .collector import CollectorConfigError, config_from_env, run_collector
 from .embed import Embedder, make_embedder
-from .ingest import IngestError, Transcript, ingest_file, ingest_text
+from .ingest import IngestError, Transcript, TranscriptTooShortError, ingest_file, ingest_text
 from .llm import AnthropicClient, LLMClient
 from .model_config import make_stage_client
 from .models import Profile
@@ -126,6 +126,9 @@ def run(
         else:
             _fail("Provide a transcript: `distil run <file>` or `distil run --paste \"...\"`.")
             return
+    except TranscriptTooShortError as exc:
+        _fail(str(exc))
+        return
     except IngestError as exc:
         _fail(f"Could not read the transcript: {exc}")
         return
@@ -166,11 +169,9 @@ def run(
         _fail(f"{exc}")
         return
 
-    path = store.entry_path(entry.entry_id)
-    if not path.exists():
-        typer.echo(f"Nothing filed: verdict {entry.triage.verdict}.")
-        return
-    typer.echo(str(path))
+    # run_pipeline always files an entry once it starts (no quality short-circuit) — the
+    # transcript already cleared the word-count floor above, so this is always a real path.
+    typer.echo(str(store.entry_path(entry.entry_id)))
 
 
 def _fetch_source_metadata(source_url: str | None) -> SourceMetadata:

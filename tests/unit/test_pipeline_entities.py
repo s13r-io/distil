@@ -7,11 +7,20 @@ import json
 
 import pytest
 
-from distil.ingest import ingest_text
+from distil.ingest import Segment, Transcript
 from distil.llm import FakeClient
 from distil.models import Profile
 from distil.pipeline import PipelineConfig, run_pipeline
 from distil.store import Store
+
+
+def _t(text: str) -> Transcript:
+    return Transcript(segments=[Segment(text=text, locator="seg:0")])
+
+
+def _merged(triage_json: str, items_json: str) -> str:
+    return f"<TRIAGE>\n{triage_json}\n</TRIAGE>\n<ITEMS>\n{items_json}\n</ITEMS>"
+
 
 _TRIAGE_RICH = json.dumps({
     "knowledge_types_present": [{"type": "conceptual", "share": 1.0}],
@@ -54,9 +63,9 @@ def store(tmp_path):
 
 @pytest.mark.unit
 def test_entity_flows_end_to_end_through_the_pipeline_no_extra_transcript_read(profile, store):
-    transcript = ingest_text("react renders ui using a virtual dom under the hood")
+    transcript = _t("react renders ui using a virtual dom under the hood")
     client = FakeClient(responses=[
-        _TRIAGE_RICH, _EXTRACT_WITH_ENTITY, _LINK, _NOTE,
+        _merged(_TRIAGE_RICH, _EXTRACT_WITH_ENTITY), _LINK, _NOTE,
         _CANON_NEW_CONCEPT, _SYNTH_CONCEPT_CLAIMS,
         _CANON_NEW_ENTITY, _SYNTH_ENTITY_CLAIMS,
     ])
@@ -65,10 +74,10 @@ def test_entity_flows_end_to_end_through_the_pipeline_no_extra_transcript_read(p
         config=PipelineConfig(enable_graph=False, enable_concept_edges=False),
     )
 
-    # Exactly 8 model calls were made — nothing extra, no second transcript read (the extract
-    # call above already carries the entity; every later call operates on already-extracted
-    # data, never the transcript itself).
-    assert client.call_count == 8
+    # Exactly 7 model calls were made — nothing extra, no second transcript read (the merged
+    # triage+extract call above already carries the entity; every later call operates on
+    # already-extracted data, never the transcript itself).
+    assert client.call_count == 7
     assert len(entry.knowledge_items[0].entity_mentions) == 1
 
     entities = store.list_entities()
@@ -86,11 +95,11 @@ def test_entity_flows_end_to_end_through_the_pipeline_no_extra_transcript_read(p
 
 @pytest.mark.unit
 def test_enable_entities_false_makes_zero_entity_llm_calls(profile, store):
-    transcript = ingest_text("react renders ui using a virtual dom under the hood")
-    # Only 6 responses: triage/extract/link/note/concept-canon/concept-synth. An entity call
-    # would IndexError on the FakeClient if enable_entities weren't honored.
+    transcript = _t("react renders ui using a virtual dom under the hood")
+    # Only 5 responses: merged triage+extract/link/note/concept-canon/concept-synth. An entity
+    # call would IndexError on the FakeClient if enable_entities weren't honored.
     client = FakeClient(responses=[
-        _TRIAGE_RICH, _EXTRACT_WITH_ENTITY, _LINK, _NOTE,
+        _merged(_TRIAGE_RICH, _EXTRACT_WITH_ENTITY), _LINK, _NOTE,
         _CANON_NEW_CONCEPT, _SYNTH_CONCEPT_CLAIMS,
     ])
     run_pipeline(

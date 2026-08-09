@@ -12,6 +12,10 @@ from distil.models import Profile
 
 runner = CliRunner()
 
+# Long enough to clear ingest.py's word-count floor; still contains the literal quote the
+# canned extract response below cites, so the faithfulness gate still passes.
+_PASTE = "Write python unit tests before code. " * 10
+
 _TRIAGE = json.dumps({
     "knowledge_types_present": [{"type": "heuristic", "share": 1.0}],
     "density": "high", "transcript_loss": {"level": "low", "evidence": []}, "verdict": "rich",
@@ -37,6 +41,10 @@ _NOTE = json.dumps({
 })
 
 
+def _merged(triage_json: str, items_json: str) -> str:
+    return f"<TRIAGE>\n{triage_json}\n</TRIAGE>\n<ITEMS>\n{items_json}\n</ITEMS>"
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("DISTIL_DB_PATH", str(tmp_path / "distil.db"))
@@ -56,9 +64,9 @@ def env(tmp_path, monkeypatch):
 
 def _seed_entry(monkeypatch):
     monkeypatch.setattr(
-        cli, "_make_client", lambda: FakeClient(responses=[_TRIAGE, _EXTRACT, _LINK, _NOTE])
+        cli, "_make_client", lambda: FakeClient(responses=[_merged(_TRIAGE, _EXTRACT), _LINK, _NOTE])
     )
-    runner.invoke(cli.app, ["run", "--paste", "Write python unit tests before code.", "--no-graph"])
+    runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
 
 
 # ---- T-C4: distil ask prints answer + sources, or the no-notes message ----
@@ -105,10 +113,10 @@ def test_c4_ask_lookup_only_lists_sources(env, monkeypatch):
 def test_c5_reindex_backfills(env, monkeypatch):
     # file an entry WITHOUT embedding (simulate pre-read-layer) by disabling the embedder
     monkeypatch.setattr(
-        cli, "_make_client", lambda: FakeClient(responses=[_TRIAGE, _EXTRACT, _LINK, _NOTE])
+        cli, "_make_client", lambda: FakeClient(responses=[_merged(_TRIAGE, _EXTRACT), _LINK, _NOTE])
     )
     monkeypatch.setattr(cli, "_safe_embedder", lambda: None)
-    runner.invoke(cli.app, ["run", "--paste", "Write python unit tests before code.", "--no-graph"])
+    runner.invoke(cli.app, ["run", "--paste", _PASTE, "--no-graph"])
     assert cli._make_store().vector_count() == 0
 
     result = runner.invoke(cli.app, ["reindex"])

@@ -5,10 +5,14 @@ import json
 import pytest
 
 from distil.extract import QuoteDisciplineError, run_extraction
-from distil.ingest import ingest_text
+from distil.ingest import Segment, Transcript
 from distil.llm import FakeClient
 from distil.models import Triage
 from distil.prompts.extract import build_extract_prompt
+
+
+def _t(text: str) -> Transcript:
+    return Transcript(segments=[Segment(text=text, locator="seg:0")])
 
 
 def _triage(dominant: str) -> Triage:
@@ -57,7 +61,7 @@ _PROCEDURAL_RESPONSE = json.dumps(
 
 @pytest.mark.unit
 def test_routes_to_heuristic_extractor():
-    t = ingest_text("keep functions small and focused on one thing")
+    t = _t("keep functions small and focused on one thing")
     fake = FakeClient(responses=[_HEURISTIC_RESPONSE])
     items = run_extraction(t, _triage("heuristic"), fake)
     assert len(items) == 1
@@ -68,7 +72,7 @@ def test_routes_to_heuristic_extractor():
 
 @pytest.mark.unit
 def test_routes_to_procedural_extractor():
-    t = ingest_text("first create a new virtual environment, then install")
+    t = _t("first create a new virtual environment, then install")
     fake = FakeClient(responses=[_PROCEDURAL_RESPONSE])
     items = run_extraction(t, _triage("procedural"), fake)
     assert items[0].type == "procedural"
@@ -80,7 +84,7 @@ def test_routes_to_procedural_extractor():
 
 @pytest.mark.unit
 def test_heuristic_items_have_rationale_and_scope():
-    t = ingest_text("keep functions small and focused on one thing")
+    t = _t("keep functions small and focused on one thing")
     items = run_extraction(t, _triage("heuristic"), FakeClient(responses=[_HEURISTIC_RESPONSE]))
     assert items[0].rationale
     assert items[0].scope
@@ -88,7 +92,7 @@ def test_heuristic_items_have_rationale_and_scope():
 
 @pytest.mark.unit
 def test_procedural_items_have_order_index():
-    t = ingest_text("first create a new virtual environment, then install")
+    t = _t("first create a new virtual environment, then install")
     items = run_extraction(t, _triage("procedural"), FakeClient(responses=[_PROCEDURAL_RESPONSE]))
     assert items[0].order_index == 0
 
@@ -105,7 +109,7 @@ def test_overlong_quote_is_truncated():
     substring is still verbatim) while satisfying the copyright guardrail.
     """
     long_quote = " ".join(["word"] * 20)
-    t = ingest_text(long_quote + " and more text here")
+    t = _t(long_quote + " and more text here")
     resp = json.dumps(
         [
             {
@@ -147,7 +151,7 @@ def test_overlong_quote_guard_raises_directly():
 @pytest.mark.unit
 def test_quote_exactly_14_words_allowed():
     quote = " ".join([f"w{i}" for i in range(14)])
-    t = ingest_text(quote + " trailing")
+    t = _t(quote + " trailing")
     resp = json.dumps(
         [
             {
@@ -165,7 +169,7 @@ def test_quote_exactly_14_words_allowed():
 
 @pytest.mark.unit
 def test_item_ids_are_assigned():
-    t = ingest_text("keep functions small")
+    t = _t("keep functions small")
     items = run_extraction(t, _triage("heuristic"), FakeClient(responses=[_HEURISTIC_RESPONSE]))
     assert items[0].item_id
 
