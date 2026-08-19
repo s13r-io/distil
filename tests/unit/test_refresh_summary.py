@@ -93,13 +93,12 @@ def test_refresh_generates_summary_and_leaves_items_concepts_untouched(profile, 
 
 @pytest.mark.unit
 def test_refresh_calls_only_the_narrative_summary_stage(profile, store):
-    """A shared client with exactly one canned response would IndexError if refresh made any
-    call beyond the single chunk summary — e.g. a re-run of extraction, note, or canonicalize."""
+    """Refresh makes one summary call plus its two style calls, and no pipeline-stage calls."""
     entry = _file_real_entry(profile, store)
-    client = FakeClient(responses=["N" * 200])
+    client = FakeClient(responses=["N" * 200, "P" * 180, "Q" * 180])
     result = refresh_narrative_summary(entry.entry_id, store, client)
     assert result.ok is True
-    assert client.call_count == 1
+    assert client.call_count == 3
 
 
 @pytest.mark.unit

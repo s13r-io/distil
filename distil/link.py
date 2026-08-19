@@ -10,6 +10,8 @@ not depend on the model behaving:
 * **Cold start (T-L3):** when ``meta.confidence`` is low, the prompt presents only the stable
   long-term goals (and active focus), never learned affinities — so a thin profile leans on
   what the user actually stated.
+* **Style rewrite:** all scenarios are batch-unslopped after IDs are assigned; the result is
+  accepted only if grounding IDs and every non-scenario field remain identical.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from .llm import LLMClient
 from .models import ApplicationLink, KnowledgeItem, Profile
 from .prompts.link import SYSTEM, build_link_prompt
 from .triage import ParseError
+from .unslop import rewrite_json_fields
 
 _COLD_START_CONFIDENCE = 0.25
 
@@ -37,6 +40,7 @@ def generate_links(
     client: LLMClient,
     *,
     novelty_ratio: float = 0.2,
+    unslop_client: LLMClient | None = None,
 ) -> list[ApplicationLink]:
     if not items:
         return []
@@ -50,7 +54,26 @@ def generate_links(
     _reserve_novelty(kept, novelty_ratio)
     for i, link in enumerate(kept, start=1):
         link.link_id = f"a_{i:02d}"
-    return kept
+    return _unslop_links(kept, unslop_client) if unslop_client is not None else kept
+
+
+def _unslop_links(
+    links: list[ApplicationLink], client: LLMClient
+) -> list[ApplicationLink]:
+    """Rewrite every scenario in one two-call JSON batch, preserving grounding IDs."""
+    original = [link.model_dump(mode="json") for link in links]
+    rewritten = rewrite_json_fields(
+        original,
+        client,
+        text_keys={"scenario"},
+        id_keys={"knowledge_item_ids"},
+    )
+    if rewritten is original:
+        return links
+    try:
+        return [ApplicationLink.model_validate(item) for item in rewritten]
+    except (TypeError, ValidationError):
+        return links
 
 
 def _reserve_novelty(links: list[ApplicationLink], ratio: float) -> None:

@@ -3,6 +3,9 @@
 The LLM may propose prose, but the code keeps the faithfulness boundary: every note section
 must cite valid extracted item IDs. Invalid or malformed output degrades to a deterministic
 fallback built only from verified items and application links.
+
+After validation, the free-text fields are sent in one batch through ``unslop.py``. The batch
+is accepted only when every citation ID array and non-prose field remains identical.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from .models import (
     Triage,
 )
 from .prompts.note import SYSTEM, build_note_prompt
+from .unslop import rewrite_json_fields
 
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 _TOPIC_CHARS = re.compile(r"[^a-z0-9_-]+")
@@ -40,6 +44,8 @@ def synthesize_note(
     items: list[KnowledgeItem],
     links: list[ApplicationLink],
     client: LLMClient,
+    *,
+    unslop_client: LLMClient | None = None,
 ) -> DistilledNote | None:
     """Build the reader-facing note from verified evidence, or fallback if the model fails."""
     if not items:
@@ -47,9 +53,27 @@ def synthesize_note(
 
     try:
         raw = client.complete(build_note_prompt(source_title, triage, items, links), system=SYSTEM)
-        return _parse_note(raw, items, links)
+        note = _parse_note(raw, items, links)
+        return _unslop_note(note, unslop_client) if unslop_client is not None else note
     except Exception:
         return _fallback_note(items, links)
+
+
+def _unslop_note(note: DistilledNote, client: LLMClient) -> DistilledNote:
+    """Rewrite all reader-facing prose in one two-call JSON batch, preserving citations."""
+    original = note.model_dump(mode="json")
+    rewritten = rewrite_json_fields(
+        original,
+        client,
+        text_keys={"text", "question"},
+        id_keys={"item_ids", "application_link_ids"},
+    )
+    if rewritten is original:
+        return note
+    try:
+        return DistilledNote.model_validate(rewritten)
+    except ValidationError:
+        return note
 
 
 def _parse_note(

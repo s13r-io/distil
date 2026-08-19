@@ -9,6 +9,10 @@ chunk by chunk (so a single completion never has to compress an entire long vide
 too-thin chunk summary is a rejectable failure rather than a shrug), then merging the chunk
 summaries into one flowing account.
 
+The final merged account, never each chunk, may then pass through ``unslop.py``'s two-call
+rewrite/self-audit on the same summary-tier client. Its output must still satisfy the merge
+coverage floor; failure keeps the already-valid pre-unslop merge.
+
 This is a strictly additive companion to the grounded note, not a replacement — see
 ``models.NarrativeSummary``'s docstring and the module docstring in ``distil/note.py``. It also
 runs on a **cheaper model tier** than extraction/note/concepts/entities: summarizing spoken
@@ -41,6 +45,7 @@ from .prompts.summary import (
     build_chunk_prompt,
     build_merge_prompt,
 )
+from .unslop import rewrite_text
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +184,7 @@ def synthesize_narrative_summary(
     *,
     chunk_chars: int | None = None,
     max_retries: int | None = None,
+    unslop_client: LLMClient | None = None,
 ) -> NarrativeSummaryResult:
     """Chunk ``transcript_text``, summarize each chunk, then merge into one narrative account.
 
@@ -200,5 +206,13 @@ def synthesize_narrative_summary(
         for i, chunk in enumerate(chunks)
     ]
     merged = _merge_summaries(summaries, client, retries)
+    if unslop_client is not None:
+        minimum = _min_merge_summary_len(len(merged))
+        merged = rewrite_text(
+            merged,
+            unslop_client,
+            validator=lambda text: len(text) >= minimum,
+            max_attempts=retries,
+        )
     model = getattr(client, "model", "") or resolve_stage_model("summary")
     return NarrativeSummaryResult(text=merged, chunk_count=len(chunks), model=model)

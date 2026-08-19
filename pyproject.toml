@@ -56,6 +56,9 @@ distil = "distil.cli:app"
 [tool.setuptools.packages.find]
 include = ["distil*"]
 
+[tool.setuptools.package-data]
+distil = ["prompts/style_guides/*.md"]
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]

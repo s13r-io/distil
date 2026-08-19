@@ -147,6 +147,22 @@ def test_single_chunk_skips_the_merge_call():
     assert client.call_count == 1  # no merge call needed for a single chunk
 
 
+@pytest.mark.unit
+def test_unslop_retries_when_rewrite_falls_below_merged_coverage_floor():
+    text = "word " * 500
+    original = "A" * 250
+    thin = "too short"
+    polished = "B" * 220
+    client = FakeClient([original, thin, thin, polished, polished])
+
+    result = synthesize_narrative_summary(
+        text, client, chunk_chars=10_000, max_retries=2, unslop_client=client
+    )
+
+    assert result.text == polished
+    assert client.call_count == 5
+
+
 # ---- cheap-model tagging -----------------------------------------------------------------
 
 

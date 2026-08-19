@@ -126,3 +126,35 @@ def test_valid_goal_ids_includes_goals_and_focus():
     p = _profile()
     ids = valid_goal_ids(p)
     assert {"g_01", "g_02", "f_01"} <= ids
+
+
+@pytest.mark.unit
+def test_link_unslops_scenarios_in_one_batched_two_pass_rewrite():
+    proposed = [{
+        "knowledge_item_ids": ["k_01"],
+        "linked_goal_id": "g_01",
+        "application_form": "checklist",
+        "scenario": "Additionally, leverage the reliability checklist.",
+        "novelty_flag": False,
+    }]
+    rewritten = [{
+        "link_id": "a_01",
+        "knowledge_item_ids": ["k_01"],
+        "linked_goal_id": "g_01",
+        "application_form": "checklist",
+        "scenario": "Use the reliability checklist.",
+        "novelty_flag": False,
+    }]
+    unslop_client = FakeClient([json.dumps(rewritten), json.dumps(rewritten)])
+
+    links = generate_links(
+        _items(1),
+        _profile(),
+        FakeClient([_resp(proposed)]),
+        novelty_ratio=0.0,
+        unslop_client=unslop_client,
+    )
+
+    assert links[0].scenario == "Use the reliability checklist."
+    assert links[0].knowledge_item_ids == ["k_01"]
+    assert unslop_client.call_count == 2

@@ -46,6 +46,7 @@ raw input (pasted text or .srt / .txt / .md file) + profile
         │              and runs alongside stages 1-2 below rather than blocking them — they
         │              share no data (all read only the transcript). Joined, bounded by
         │              DISTIL_SUMMARY_JOIN_TIMEOUT_SECONDS, right before stage 7 files; a
+        │              final merged prose gets a two-pass unslop rewrite on the same cheap tier;
         │              failure or a still-running summary both leave narrative_summary unset
         │              (logged either way) rather than blocking or failing filing.
         ▼
@@ -65,10 +66,12 @@ raw input (pasted text or .srt / .txt / .md file) + profile
 [3] Normalize ─────────► atomic items + provenance + stance validated
         │
         ▼
-[4] Link to profile ───► application_links (goal-tied, some novelty-flagged)
+[4] Link to profile ───► application_links (goal-tied, some novelty-flagged); scenarios are
+        │              batch-unslopped, with knowledge_item_ids required to remain identical
         │
         ▼
-[5] Note synthesis ────► distilled_note (teaching note grounded in verified item ids)
+[5] Note synthesis ────► distilled_note (teaching note grounded in verified item ids); free-text
+        │              fields are batch-unslopped, with every citation-id array kept identical
         │              (narrative summary from stage 0.5 is joined here, before stage 6)
         ▼
 [6] Graph-link ────────► related_entries (match against existing KB index)
@@ -112,6 +115,15 @@ calls (N = chunk count, usually 1-a few for a typical video) + link + note befor
 classification. There is no quality short-circuit: once a transcript clears stage 0's word-count
 floor, it always runs the full sequence and gets filed.
 
+The final prose from stages 0.5, 4, and 5 goes through `unslop.py`: one rewrite call followed by
+one self-audit call using the standalone `prompts/style_guides/unslop.md` guide. All six calls use
+the stage-0.5 summary client even when a per-stage override points link or note elsewhere. The
+pass defaults on via `DISTIL_UNSLOP_ENABLED`; any call failure or deterministic validation
+failure keeps the original prose and filing continues. Link and note are rewritten as one JSON
+batch per surface, and code rejects the batch unless citation ID arrays and every non-prose field
+remain identical. The query-answer synthesis in `synthesize.py` is deliberately outside this
+pass because its citation markers live inline in prose.
+
 **Timestamps are optional.** Stage 0 captures a timestamp per segment when the source has one
 (`.srt`, or inline markers like `00:12:30`), and leaves it null otherwise, always keeping a
 line/segment `locator`. Downstream, provenance uses the quote as the always-present anchor and
@@ -126,6 +138,7 @@ distil/
   ingest.py          # stage 0 (PURE): parse .srt/.txt/.md/pasted text → normalized transcript (timestamps optional)
   llm.py             # LLMClient protocol + AnthropicClient + FakeClient (tests)
   prompts/           # prompt templates, one per LLM stage (versioned strings)
+  unslop.py          # non-blocking two-pass style rewrite; reads prompts/style_guides/unslop.md at runtime
   triage.py          # stage 1 (cheap-tier): classifier (dominant type, density, transcript-loss, verdict) — runs once, ahead of extraction, and steers it
   extract.py         # stage 2 (strong-tier, chunked): routes by triage's dominant type; run_chunked_extraction is what the pipeline calls, run_extraction (single whole-transcript call) kept for the gated eval suite — see its module docstring
   normalize.py       # stage 3 (pure: validation, provenance check, dedup)
@@ -166,7 +179,7 @@ data/                # distil.db incl. vectors (gitignored)
 - **OKF export layer (Phase 2)**: at the File stage, `store.file_entry(..., transcript=...)` derives a second, neutral bundle under `okf_root` (default a sibling of `kb_dir`, e.g. `data/../okf`) via `okf.py` — `sources/<slug>.md` (summary + key moments + a link to the raw page) and `raw/<slug>.md` (immutable timestamped transcript), plus regenerated `index.md`/`sources/index.md`. It carries no feedback or application-link data, and is skipped when `transcript` is omitted (e.g. feedback-only re-files). `okf_lint.py` (`python -m distil.okf_lint <okf_root>`) validates the bundle. See `AGENTS.md` for the slug-stability rule and phase boundaries, and `docs/TESTING.md` (T-OKF*, T-OKFL*) for the test catalog.
 - **Concept canonicalization + synthesis (Stage 8, OKF Phase 3)**: `canonicalize.run_canonicalize_stage(entry, store, client)` is `pipeline.run_pipeline`'s Stage 8, gated by `PipelineConfig.enable_canonicalize` (default `True`). It calls `canonicalize_entry` (decides match/new/reject per knowledge item against existing `concepts` rows — embedding-similarity candidates + a capped LLM call — returning the touched `Concept`s), then `synthesize_touched_concepts` (ranks touched concepts by embedding similarity and, up to a per-video cap, calls `synthesize_concept.py` to build grounded `ConceptClaim`s), then keeps the OKF bundle in sync via `okf.export_concept`/`remove_concept` (including concepts that lost this entry as a member, not just touched ones) and `okf.render_source_with_concepts` (the source page's "## Concepts covered" backlink). `okf_lint.py`'s E5-E8 checks validate the resulting `concepts/` bundle. The same Stage 8 call also runs `canonicalize_entry_entities`/`synthesize_touched_entities` (gated by `PipelineConfig.enable_entities`, default `True`) — the identical match/new/reject/synthesis-capping shape one granularity down (entity mentions instead of items, with a hard `kind` pre-filter), keeping `okf/entities/` in sync the same way (`okf_lint.py`'s E9-E12). Entities ride the extraction response already read for items, so this adds no new transcript read or pipeline stage. See `AGENTS.md` for the full data-flow detail and phase boundaries.
 - **Concept↔concept typed edges (Stage 9, OKF Phase 3b)**: `concept_graph.run_concept_edges_stage(touched, store, client)` is `pipeline.run_pipeline`'s Stage 9, gated by `PipelineConfig.enable_concept_edges` (default `True`). For each concept Stage 8 actually synthesized this run, `link_concept_graph` finds candidates via centroid-to-centroid cosine similarity (`Store.find_concept_edge_candidates`) and classifies each into `contrasts_with`/`builds_on`/`related` (or drops it) with one capped LLM call, replacing `Concept.edges` wholesale. `Store.prune_dangling_concept_edges` then drops edges left dangling by any concept deleted this run, and every concept whose edges changed gets its OKF page re-exported (`## Contrasts with`/`## Builds on`/`## Related`, plus a deterministic `> **Contradiction:**` flag from `synthesize_concept.find_claim_contradictions`). `okf_lint.py`'s E8 check counts these typed-edge links as valid inbound links. See `AGENTS.md` for the full data-flow detail.
-- **Narrative summary (Stage 5.5, optional)**: `summary.py` reads the transcript directly (sentence-safe chunking, per-chunk + merge synthesis, coverage-floor retry on thin output or a dropped connection) on a separate client resolved via `model_config.resolve_stage_model("summary")` — cheap-tier by default, never the strong `DISTIL_MODEL`. `pipeline.run_pipeline` only runs it when a caller passes `summary_client`; a failure is caught and logged, never blocking filing. `refresh_summary.py` regenerates just `narrative_summary` later, from the entry's already-stored OKF raw page, without re-fetching or re-extracting (CLI `refresh-summary` / `POST /entries/{id}/refresh-summary`). See `AGENTS.md` for full detail.
+- **Narrative summary (Stage 5.5, optional)**: `summary.py` reads the transcript directly (sentence-safe chunking, per-chunk + merge synthesis, coverage-floor retry on thin output or a dropped connection) on a separate client resolved via `model_config.resolve_stage_model("summary")` — cheap-tier by default, never the strong `DISTIL_MODEL`. Its final merged prose, not each chunk, receives the shared two-pass unslop rewrite and must still clear the merge coverage floor; rewrite failure keeps the pre-unslop merge. `pipeline.run_pipeline` only runs it when a caller passes `summary_client`; a failure is caught and logged, never blocking filing. `refresh_summary.py` regenerates just `narrative_summary` later, from the entry's already-stored OKF raw page, without re-fetching or re-extracting (CLI `refresh-summary` / `POST /entries/{id}/refresh-summary`). See `AGENTS.md` for full detail.
 - **Provenance** is stored inside each item; the transcript itself is not retained after processing unless the user opts in (privacy).
 
 ## 5. LLM boundary (critical for testing)
@@ -187,7 +200,8 @@ All config via env (`.env` locally, service variables when hosted): `ANTHROPIC_A
 (default 6), `DISTIL_AUTH_SECRET` (required when not on localhost), `DISTIL_PUBLIC` (set true
 when hosting — refuses to serve without `DISTIL_AUTH_SECRET`), `DISTIL_MODEL_<STAGE>` (per-stage
 model override, e.g. `DISTIL_MODEL_SUMMARY`), `DISTIL_SUMMARY_CHUNK_CHARS`/
-`DISTIL_SUMMARY_MAX_RETRIES` (narrative summary layer). No secrets in source. `.env.example`
+`DISTIL_SUMMARY_MAX_RETRIES` (narrative summary layer), `DISTIL_UNSLOP_ENABLED` (default true).
+No secrets in source. `.env.example`
 documents every variable.
 
 ## 7. Deployment (local)
