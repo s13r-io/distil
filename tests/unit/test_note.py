@@ -120,3 +120,27 @@ def test_note_falls_back_on_malformed_output(triage, items, links):
 def test_note_returns_none_for_empty_items(triage, links):
     note = synthesize_note("Talk", triage, [], links, FakeClient(["SHOULD NOT BE CALLED"]))
     assert note is None
+
+
+@pytest.mark.unit
+def test_note_unslops_free_text_in_one_batched_two_pass_rewrite(triage, items, links):
+    original = json.loads(_valid_note())
+    rewritten = json.loads(_valid_note())
+    rewritten["topics"] = ["function_design", "unit_testing", "bad_topic"]
+    rewritten["generated_from"] = "llm"
+    rewritten["core_takeaway"]["text"] = "Small functions are easier to improve."
+    rewritten["review_questions"][0]["question"] = "Which function needs splitting?"
+    rewritten["title"] = "Write Smaller Functions"
+    generation_client = FakeClient([json.dumps(original)])
+    unslop_client = FakeClient([json.dumps(rewritten), json.dumps(rewritten)])
+
+    note = synthesize_note(
+        "Talk", triage, items, links, generation_client, unslop_client=unslop_client
+    )
+
+    assert note.title == "Write Smaller Functions"
+    assert note.core_takeaway.text == "Small functions are easier to improve."
+    assert note.review_questions[0].question == "Which function needs splitting?"
+    assert note.core_takeaway.item_ids == ["k_01"]
+    assert note.how_to_apply[0].application_link_ids == ["a_01"]
+    assert unslop_client.call_count == 2

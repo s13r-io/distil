@@ -15,6 +15,12 @@ from distil.models import Profile
 from distil.pipeline import PipelineConfig, run_pipeline
 from distil.store import Store
 
+
+@pytest.fixture(autouse=True)
+def _disable_unslop_for_summary_concurrency_contracts(monkeypatch):
+    """Keep this file's client counts focused on narrative-summary scheduling and retries."""
+    monkeypatch.setenv("DISTIL_UNSLOP_ENABLED", "false")
+
 _TRIAGE_RICH = json.dumps({
     "knowledge_types_present": [{"type": "heuristic", "share": 1.0}],
     "density": "high", "transcript_loss": {"level": "low", "evidence": []}, "verdict": "rich",

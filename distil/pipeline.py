@@ -203,7 +203,11 @@ def run_pipeline(
         "link",
         config,
         lambda: generate_links(
-            items, profile, link_client or client, novelty_ratio=config.novelty_ratio
+            items,
+            profile,
+            link_client or client,
+            novelty_ratio=config.novelty_ratio,
+            unslop_client=summary_client,
         ),
     )
 
@@ -211,7 +215,14 @@ def run_pipeline(
     distilled_note = _timed(
         "note",
         config,
-        lambda: synthesize_note(source_title, triage, items, links, note_client or client),
+        lambda: synthesize_note(
+            source_title,
+            triage,
+            items,
+            links,
+            note_client or client,
+            unslop_client=summary_client,
+        ),
     )
 
     entry = KBEntry(
@@ -283,7 +294,9 @@ class _SummaryRun:
         connection) is logged and leaves ``result`` unset rather than propagating — this layer
         is additive, so its own failure must never regress an otherwise-successful run."""
         try:
-            summary = synthesize_narrative_summary(transcript.full_text(), summary_client)
+            summary = synthesize_narrative_summary(
+                transcript.full_text(), summary_client, unslop_client=summary_client
+            )
         except NarrativeSummaryError:
             logger.warning(
                 "Narrative summary synthesis failed; filing without one.", exc_info=True

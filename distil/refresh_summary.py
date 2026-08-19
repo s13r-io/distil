@@ -55,7 +55,7 @@ def refresh_narrative_summary(entry_id: str, store: Store, client: LLMClient) ->
         )
 
     try:
-        result = synthesize_narrative_summary(transcript_text, client)
+        result = synthesize_narrative_summary(transcript_text, client, unslop_client=client)
     except NarrativeSummaryError as exc:
         return RefreshResult(False, f"Could not generate a narrative summary: {exc}")
     except Exception as exc:  # an unexpected failure still reports plainly, never a stack trace
