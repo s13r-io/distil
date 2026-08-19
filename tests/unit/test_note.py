@@ -130,6 +130,7 @@ def test_note_unslops_free_text_in_one_batched_two_pass_rewrite(triage, items, l
     rewritten["generated_from"] = "llm"
     rewritten["core_takeaway"]["text"] = "Small functions are easier to improve."
     rewritten["review_questions"][0]["question"] = "Which function needs splitting?"
+    rewritten["title"] = "Write Smaller Functions"
     generation_client = FakeClient([json.dumps(original)])
     unslop_client = FakeClient([json.dumps(rewritten), json.dumps(rewritten)])
 
@@ -137,6 +138,7 @@ def test_note_unslops_free_text_in_one_batched_two_pass_rewrite(triage, items, l
         "Talk", triage, items, links, generation_client, unslop_client=unslop_client
     )
 
+    assert note.title == "Write Smaller Functions"
     assert note.core_takeaway.text == "Small functions are easier to improve."
     assert note.review_questions[0].question == "Which function needs splitting?"
     assert note.core_takeaway.item_ids == ["k_01"]
