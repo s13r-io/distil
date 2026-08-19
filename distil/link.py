@@ -62,9 +62,7 @@ def generate_links(
         return kept
 
 
-def _unslop_links(
-    links: list[ApplicationLink], client: LLMClient
-) -> list[ApplicationLink]:
+def _unslop_links(links: list[ApplicationLink], client: LLMClient) -> list[ApplicationLink]:
     """Rewrite every scenario in one two-call JSON batch, preserving grounding IDs."""
     original = [link.model_dump(mode="json") for link in links]
     rewritten = rewrite_json_fields(
