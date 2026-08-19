@@ -176,6 +176,16 @@ that must abstain.
 - T-L1: every application_link has a valid `linked_goal_id` pointing at a real profile goal/focus.
 - T-L2: with `DISTIL_NOVELTY_RATIO=0.2`, ~1 in 5 links carries `novelty_flag=true`.
 - T-L3: cold-start profile (confidence 0) → links reference `stable.long_term_goals`, not learned affinities.
+- T-L4 (unslop): with an `unslop_client` injected, every link's `scenario` is rewritten in one batched two-pass (rewrite + self-audit) call across all links, while `knowledge_item_ids` stays byte-identical.
+
+### unslop.py (non-blocking two-pass prose style rewrite — unit, FakeClient)
+- T-US1: `rewrite_text` issues exactly two calls — rewrite then self-audit — both carrying the raw, unmodified guide text and the "preserve meaning and facts exactly"/"never invent" framing; the second call's prompt embeds the first call's own output (step-4 self-audit framing).
+- T-US2: with `DISTIL_UNSLOP_ENABLED` unset, the pass defaults to enabled.
+- T-US3: `DISTIL_UNSLOP_ENABLED=false` skips both calls and returns the original text unchanged.
+- T-US4 (cheap-tier enforcement): a client whose `.model` differs from `resolve_stage_model("summary")` is rejected before any call is made, falling back to the original text.
+- T-US5: a raised exception from either the rewrite or the self-audit call is caught and falls back to the original text, never propagating.
+- T-US6 (corrupted citation-ID rejection): `rewrite_json_fields` rejects a candidate whose `item_ids`/`application_link_ids`-style arrays changed (even when only one nested item's ids changed) and falls back to the original structure unchanged.
+- T-US7 (batching): `rewrite_json_fields` rewrites every text field across a whole list/object in one two-call pass (not one call per item), and accepts a candidate whose only difference from the original is in the declared text keys.
 
 ### note.py (unit, FakeClient)
 - T-DN1: parses a valid note JSON object into `DistilledNote`.
@@ -184,6 +194,7 @@ that must abstain.
 - T-DN4: topics are normalized, deduped, and bounded.
 - T-DN5: malformed model output or a failed note call falls back to a deterministic note built from verified items.
 - T-DN6: empty verified item list returns no note and makes no model call.
+- T-DN7 (unslop): with an `unslop_client` injected, `title`/`text`/`question` fields across the whole note are rewritten in one batched two-pass call, while every `item_ids`/`application_link_ids` array stays byte-identical.
 
 ### model_config.py (per-stage model resolution — unit)
 - T-MCFG1: every `STRONG_TIER_STAGES` member (`extract`, `canonicalize`) falls back to `DISTIL_MODEL` when set, and raises `RuntimeError` when it isn't — the same "must be set explicitly" contract `AnthropicClient` already enforces, just resolved per stage. `graph` moved to `CHEAP_TIER_STAGES` (owner decision — it was never measured; see the module docstring) and is covered by T-MCFG3 instead.
@@ -205,6 +216,7 @@ that must abstain.
 - T-SUM4: chunk summaries are merged in chronological order — the merge prompt contains the first chunk's summary before the second's; a single chunk skips the merge call entirely (`chunk_count == 1`).
 - T-SUM5: `NarrativeSummary.model` is tagged from the injected client's own `.model` attribute when present, else falls back to `model_config.resolve_stage_model("summary")` — never a hardcoded literal.
 - T-SUM6: an empty/whitespace-only transcript raises `NarrativeSummaryError` rather than making a model call.
+- T-SUM7 (unslop): when a passed `unslop_client` rewrite falls below the same scaled coverage floor as T-SUM3, `synthesize_narrative_summary` retries the unslop pass (not just the generation pass) until a long-enough rewrite arrives, and the returned summary is the accepted rewritten text.
 
 ### graph.py
 - T-G1: candidate lookup returns existing entries sharing topics/items (deterministic, no LLM).
@@ -340,7 +352,7 @@ that must abstain.
 
 ### refresh_summary.py (per-entry narrative-summary refresh — unit, FakeClient)
 - T-RS1: refreshing a fully filed entry regenerates only `narrative_summary`; knowledge items, concept membership/pages, and the raw OKF page are all byte-identical/unchanged before and after.
-- T-RS2: refresh makes exactly one model call (the narrative-summary chunk call) — a shared client seeded with only that one response would `IndexError` on any re-run of extraction, note, or canonicalize, proving nothing else executes.
+- T-RS2: refresh makes exactly the narrative-summary chunk call plus its two unslop calls (rewrite + self-audit) — a shared client seeded with only those three responses would `IndexError` on any re-run of extraction, note, or canonicalize, proving nothing else executes.
 - T-RS3: an entry with no stored raw transcript page (filed before OKF export existed, or reconciled away) reports plainly that it can't generate a summary and that retrying won't help, rather than a doomed retry or an obscure failure.
 - T-RS4: refreshing an unknown entry id reports "not found" rather than raising.
 - T-RS5: exhausting the coverage-floor retries reports "could not generate" and leaves `narrative_summary` at its prior value (`None` here), never a partial/thin result.

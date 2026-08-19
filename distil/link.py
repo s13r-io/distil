@@ -54,7 +54,12 @@ def generate_links(
     _reserve_novelty(kept, novelty_ratio)
     for i, link in enumerate(kept, start=1):
         link.link_id = f"a_{i:02d}"
-    return _unslop_links(kept, unslop_client) if unslop_client is not None else kept
+    if unslop_client is None:
+        return kept
+    try:
+        return _unslop_links(kept, unslop_client)
+    except Exception:
+        return kept
 
 
 def _unslop_links(

@@ -65,7 +65,7 @@ def _unslop_note(note: DistilledNote, client: LLMClient) -> DistilledNote:
     rewritten = rewrite_json_fields(
         original,
         client,
-        text_keys={"text", "question"},
+        text_keys={"title", "text", "question"},
         id_keys={"item_ids", "application_link_ids"},
     )
     if rewritten is original:
